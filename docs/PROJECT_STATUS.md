@@ -4,7 +4,55 @@
 
 ## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-27)
 
-### 0. Next: work through the 2026-09-28 review results. Suggested order below; nothing is started.
+### 0. IN PROGRESS (2026-10-02): Wave 1 + Wave 2 fixes, 5 of 11 branches merged — HAND-OFF
+Every Wave 1/2 item was cross-checked by Codex gpt-6-astra and GLM 5.3 before fixing. User decisions: booster tree
+count = one value from the pooled CV curve; chemometrics validation conventions (CLAUDE.md).
+**Merged:** #83 fix/ct-honest-labels; #84 fix/ensemble-cv (wrappers now in `model_wrappers.py`); #85 feat/dpi-fonts; #86 fix/contaminant-maths (QW3, QW6; auto EPO count
+advisory, revertible `_CONTAM_AUTO_COUNT_ADVISORY`; DeepSeek LOWs left: GUI says ~7% vs docs 6.5%, skew hint checks
+only the first direction); #87 fix/readers (R017 OPUS background, R062 one ASCII parser, data type/scale
+carried through every tab; comma files dot-decimal + warning).
+**Reviewers:** Codex is OUT OF QUOTA until 2026-10-09 15:10, so GLM 5.3 + DeepSeek (deepseek-flash; Pro only if the
+user says "pro") stand in. opencode prompts must forbid shell redirection, writes, and reads outside the repo, and
+demand a verdict even if a tool call is rejected. Merge rule: well-reviewed PR → merge origin/main into branch, test,
+`gh pr create`, `gh pr merge N --merge --match-head-commit <full sha>`.
+**Open branches** (pushed to origin as backup; worktrees under `.claude/worktrees/agent-*`), state at hand-off:
+- `fix/wavelength-mapping` — final fixes in progress (matcher per-item numeric/text partition in
+  `model_wrappers._match_wavelengths_normalized`; Tab 8 multi-model probability column alignment) + merge main → merge.
+- `fix/classification-metrics` e5e012e — round 4 done (`scoring.classification_fit_labels`); GLM + DeepSeek pending.
+  At merge with booster branch keep `|labels=` after `|boost_rounds=`; on "resume declined" KEEP the run record.
+- `fix/booster-early-stopping` — round 3 fixes committed, main merged, ensemble rebuild via truncation; awaiting
+  round-4 review. Reconcile with fix/ytransform-save: Tab 7 y-transform k read off transformed-y curve vs final fit on
+  raw y (~41998).
+- `fix/ytransform-save` — round 6 in progress (freeze all worker inputs in `run_training`; guard Results double-click
+  during refit; plot click callback token; export header). Then one confirm + merge.
+- `fix/gui-dataset-state` 77063e1 — round in progress (Codex BLOCK: transactional reconcile, shared calibration-prep
+  function for digest+worker, lossless int targets, object-y canonicalisation, framed digest + counts, strict
+  record schema, dotted IDs → "can't verify", MultiIndex NaN dedupe). QW4 (holdout direction) waits for this.
+- `perf/thread-budget` c53c6f2 — GLM r2 MWF (GA candidate pool lacks CatBoost-serial rule; `native_thread_limit`
+  cross-API restore via `restore_original_limits()` clobbers other APIs; stricter nested exit never re-loosens);
+  DeepSeek r2 pending; then fix round + merge main.
+- `fix/preexisting-test-export` d4f608a — fixes multiclass GUI test fake Thread + export NameErrors without CV; GLM
+  MWF; one_class+imbalance export still NameErrors `_lins_ccc` (fix in progress) → review → merge, then delete the
+  "known pre-existing" lines below.
+Known pre-existing on main until that merges: `test_multiclass_gui.py::test_run_analysis_accepts_multiclass_engine_selection`
+fails; regression/one-class code export without CV raises NameError.
+**Open questions for the user:** Import rounds wavelengths to integers and refuses sub-unit spacing (FTIR?); comma
+ASCII files default to dot-decimal with a warning (my call); advisory EPO count (my call); delete stray GLM temp files
+in %TEMP% (diff.txt, gui_f359708.py, opencodeepo_*).
+
+**Booster round selection (branch `fix/booster-early-stopping`, Wave 1 item 1, R028/R003/R022/R126).** XGBoost,
+LightGBM and CatBoost no longer early-stop each CV fold on its own test fold. The round count is chosen once from the
+pooled CV curve, as the PLS LV count is (`cv_utils.cross_val_boosting_rounds`; `early_stopping_rounds` is the patience),
+and every CV metric, Tab 7 and the export use that count. **Booster CV scores drop** (example data: LightGBM RMSEcv
+3.900 -> 3.949, XGBoost 3.960 -> 4.062). The final model is the scored configuration fitted at the maximum count and
+truncated to the selected one (`truncate_booster`). Results gain `n_estimators_selected`, `n_estimators_fit` and
+`round_selection_truncated`; Params carry the selected count. Booster Bayesian studies with selection on get a
+`|boost_rounds=pooled_cv_curve_v1` identity segment: old booster studies are reported (`booster_scoring_changed`,
+resume declined), preserved, never resumed, and the saved run's resume record is kept until the user deletes it.
+DART, tree dropout, gblinear and CatBoost shrinkage are fitted at their configured count (recorded as no selection).
+Details: SESSION_LOG 2026-10-02.
+
+### 0a. The 2026-09-28 review results and the combined order
 Two whole-codebase reviews ran on `main` `449dfb1` (PR D merged as `85790dd`):
 - **Correctness:** `docs/reviews/2026-09-28-adversarial-review.md`. 133 findings kept (129 confirmed by an
   independent refuter; 2 critical, 30 high). IDs are R001-R133; themes in SESSION_LOG 2026-09-28.
@@ -29,7 +77,11 @@ Wave 2 stops the app misleading:
    Interference tab crashes (R075), plus R113/R114. Add behavioural tests.
 7. **QW4 + QW5:** holdout direction (KS/SPXY must pick CALIBRATION; R085 starting pair), figures of merit; classification
    metrics R029/R030.
-8. **QW7:** DPI awareness and fonts (the cheapest visible upgrade).
+8. **QW7:** DPI awareness and fonts (the cheapest visible upgrade). **Implemented on `feat/dpi-fonts`** (not merged
+   yet). It adds system DPI awareness before `tk.Tk()` plus a DPI-aware manifest in the spec (the frozen build is
+   untested), the `_px`/`_px_geometry` scale helpers, and six named fonts (`self.fonts`) wired into every ttk style.
+   The literal font-tuple sweep (101 tuples) and the per-tab pixel padding are queued in
+   `docs/plans/2026-10-02-font-tuple-sweep.md`; do them after the concurrent GUI branches merge.
 Wave 3 (flagships): F2 calibration transfer that validates itself (backend, then GUI), F1 CVPlan/grouped CV, F4 real
 DD-SIMCA, CS1 EMSC-with-interferent then F3 in-fold saved contaminant correction, F5 publication output, MW1 stability
 selection, SP1/SP2 PLS kernel and SPA. Structural enablers ST1a/ST2/ST4 whenever a flagship touches that area.
@@ -53,20 +105,6 @@ selection, SP1/SP2 PLS kernel and SPA. Structural enablers ST1a/ST2/ST4 whenever
   `suggest_one_class_params`. That is the one planned exception to the no-sampler-edits rule, and it changes the
   pinned sampler hashes in `tests/test_t51_extra_axes_mechanism.py`.
 
-> **2026-09-27:** T-51 PR D is done and green, open as **PR #82** (branch `feat/T51-pr-d-gui`), not merged yet.
-> The full hand-off is in that branch's `docs/PROJECT_STATUS.md`. Merge #82 first; this section is replaced then.
-
-**Booster round selection (branch `fix/booster-early-stopping`, Wave 1 item 1, R028/R003/R022/R126).** XGBoost,
-LightGBM and CatBoost no longer early-stop each CV fold on its own test fold. The round count is chosen once from the
-pooled CV curve, as the PLS LV count is (`cv_utils.cross_val_boosting_rounds`; `early_stopping_rounds` is the patience),
-and every CV metric, Tab 7 and the export use that count. **Booster CV scores drop** (example data: LightGBM RMSEcv
-3.900 -> 3.949, XGBoost 3.960 -> 4.062). The final model is the scored configuration fitted at the maximum count and
-truncated to the selected one (`truncate_booster`). Results gain `n_estimators_selected`, `n_estimators_fit` and
-`round_selection_truncated`; Params carry the selected count. Booster Bayesian studies with selection on get a
-`|boost_rounds=pooled_cv_curve_v1` identity segment: old booster studies are reported (`booster_scoring_changed`,
-resume declined), preserved, never resumed, and the saved run's resume record is kept until the user deletes it.
-DART, tree dropout, gblinear and CatBoost shrinkage are fitted at their configured count (recorded as no selection).
-Details: SESSION_LOG 2026-10-02.
 
 ### PR #81 (sparse-selector top-N cap) MERGED 2026-09-26 as `e3c6d59`
 CARS-family top-N subsets no longer pad with zero-score long wavelengths (grid, one-class, multiclass, Bayesian).
@@ -582,6 +620,10 @@ assert "wt-" in spectral_predict.__file__, spectral_predict.__file__
 | `src/spectral_predict/preprocessing_discovery.py` | Smart preprocessing, has one-class path at line ~680 |
 
 ## Follow-Ups (unclaimed)
+
+- **Decimal-comma misreads in the CSV, reference and ASD-text readers (deferred from fix/readers review round 5, 2026-10-02).** These predate fix/readers and are not made worse by it (the ASCII reader's delimiter/decimal policy is not applied to these readers). Neither case gives a Python warning or an `import_warnings` entry.
+  1. **CSV spectra and reference readers shift columns** (`read_csv_spectra` ~io.py:81, `read_combined_csv` ~io.py:421, `read_reference_csv` ~io.py:1474). When decimal-comma values are written unquoted in a comma-delimited file, data rows have more fields than the header, and pandas silently turns the extra leading field into an implicit index. Codex repro: header `id,1000,1001,...,1099`, one data row `s1` followed by 100 unquoted `0,123` values → 100 wavelengths, alternating values `0` and `123`, sample ID `123`. Reference repro: `id,y\n1,12,34\n2,13,45` → IDs `12,13`, targets `34,45`. Fix: compare each row's field count with the header before pandas can infer an index; apply the ASCII delimiter/decimal policy (decimal-point default, warn or refuse when a decimal-comma split competes); pass diagnostics to the GUI's `import_warnings` dialog.
+  2. **ASD text parsing reports detector counts instead of a decimal-comma reflectance** (~io.py:849, ~858). For 100 rows shaped like `1000 12345 12000 0,123`, `read_asd_dir` drops the unparseable last field and returns `12000` rather than `0.123`. Fix: keep column positions; recognise decimal-comma fields, or reject/report a non-numeric expected ordinate instead of falling back to an earlier numeric column.
 
 - **T-51 — Opt-in Bayesian search-space axes (ticket written 2026-08-30; design complete, no code).** Full ticket: `docs/plans/2026-08-30-T51-bayesian-opt-in-search-axes.md`. **Premise is added value, not a defect** — supervised Bayesian performs well and the ticket does not assume otherwise. It adds opt-in knobs for hyperparameters that currently take exactly *one* value (LightGBM `reg_alpha=0.1`/`subsample=0.8`/`min_child_samples=5`, XGBoost `colsample_bytree=0.8` with `gamma`/`min_child_weight` absent, RandomForest `max_features='sqrt'`, SVM `gamma='scale'`, PLS-DA logistic head `C=1.0`), curated per model family, all off by default. **Design:** `suggest_model_params` / `suggest_one_class_params` stay byte-for-byte; a new `search_spaces.py` supplies `apply_extra_axes()` that runs after them and is a literal no-op when no bundle is enabled. GUI checkboxes and the Python API drive the same bundle ids (`enabled_extra_axes=(...)`). One-class included from the start, closing the PR #58 deferral. **Two hard constraints discovered in review (see SESSION_LOG 2026-08-30):** (a) Optuna forbids re-suggesting a parameter name, so only *pinned-constant* axes can be opened additively — ranges already searched (Ridge/Lasso/ElasticNet `alpha`, MLP `alpha`, OneClassSVM `gamma`, PCA-SIMCA `n_components`) cannot be widened this way, which is fine since widening them is explicitly out of scope; (b) clamping after `trial.suggest_*` does not change what TPE learns. **Two genuine bugs ride alongside, sequenced separately:** the `'SVC'`/`'SVM'` string mismatch leaving classification SVM unscaled (prerequisite for any SVM `gamma` knob), and the PLS clamp asymmetry where Bayesian bounds `n_components` by `n_features` while the grid path uses `compute_min_train_fold_size` (approved to ship last, own gate). Reviewed by Codex gpt-5.5 and a DeepSeek+GLM peer panel.
 

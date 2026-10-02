@@ -64,6 +64,7 @@ import logging
 import re
 from pathlib import Path
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox, simpledialog
 import threading
 from datetime import datetime
@@ -168,7 +169,7 @@ except ImportError:
 
 # Shared ASD extension set + folder helper (single source of truth for .asd/.sig/.sco
 # detection so directory-scan sites across the GUI can't drift out of sync).
-from spectral_predict.io import ASD_EXTENSIONS, list_asd_files
+from spectral_predict.io import ASD_EXTENSIONS, canonical_source_data_type, list_asd_files
 
 # Import search controller for pause/resume/stop
 from spectral_predict.search_controller import SearchController
@@ -296,9 +297,187 @@ try:
         choose_common_grid,
         equalize_dataset,
     )
+    # User-facing transfer-method names. The stored keys ('tsr', 'ctai', 'nspfce')
+    # are historical and persist in saved transfer models, so labels come from here.
+    from spectral_predict.calibration_transfer import DEFAULT_METHOD as CT_DEFAULT_METHOD
+    from spectral_predict.calibration_transfer import (
+        method_display_name as ct_method_display_name,
+    )
     HAS_CALIBRATION_TRANSFER = True
 except ImportError:
     HAS_CALIBRATION_TRANSFER = False
+    CT_DEFAULT_METHOD = 'tsr'
+
+    def ct_method_display_name(method: str, short: bool = False) -> str:
+        """Fallback when calibration transfer is unavailable: the raw key, upper-cased."""
+        return str(method).upper()
+
+
+def parse_transfer_standards_count(text: str) -> int | None:
+    """Parse the slope/bias 'standards' entry: 'All' or blank -> None, else an integer.
+
+    Raises:
+        ValueError: If the text is neither 'All' nor a whole number.
+    """
+    cleaned = str(text).strip()
+    if cleaned == "" or cleaned.lower() == "all":
+        return None
+    try:
+        return int(cleaned)
+    except ValueError:
+        raise ValueError(
+            f"Slope/bias standards must be 'All' or a whole number, got {text!r}"
+        ) from None
+
+
+def ct_region_arrays(
+    X_primary: "np.ndarray",
+    X_satellite: "np.ndarray",
+    wavelengths: "np.ndarray",
+    meta: "dict | None",
+) -> "tuple[np.ndarray, np.ndarray, np.ndarray]":
+    """Clip paired spectra to a transfer model's region of interest, if it has one.
+
+    A model built with a region of interest was fitted on those columns only
+    (``meta['region_of_interest']['indices']``); applying it to the full-width
+    arrays fails on shape. Without a region the inputs are returned unchanged.
+    """
+    roi = (meta or {}).get('region_of_interest') or {}
+    if not roi.get('enabled') or roi.get('indices') is None:
+        return X_primary, X_satellite, wavelengths
+    idx = np.asarray(roi['indices'], dtype=int)
+    return X_primary[:, idx], X_satellite[:, idx], np.asarray(wavelengths)[idx]
+
+
+def ct_derivative_window(n_wavelengths: int) -> int | None:
+    """Savitzky-Golay window (polyorder 2) for the transfer-quality derivative tabs.
+
+    Up to 11 points, odd and no wider than the plotted region; ``None`` when fewer
+    than 3 wavelengths are plotted, so no derivative can be drawn.
+    """
+    window = min(11, n_wavelengths - 1)
+    if window % 2 == 0:
+        window -= 1
+    window = max(window, 5)
+    if window > n_wavelengths:
+        window = n_wavelengths if n_wavelengths % 2 else n_wavelengths - 1
+    return window if window >= 3 else None
+
+
+CT_AGREEMENT_TITLE = (
+    "Spectral agreement on loaded standards (includes fitting data — not a validation)"
+)
+
+
+def ct_spectral_agreement_on_fit_rows(
+    X_primary: "np.ndarray", X_transferred: "np.ndarray", method: str, params: dict
+) -> "tuple[float, np.ndarray]":
+    """R² between primary and transferred spectra on the rows the transfer was fitted on.
+
+    Slope/bias ('tsr') stores the standards it used in ``params['transfer_indices']``;
+    every other GUI-built method is fitted on all loaded rows. The value is a
+    resubstitution figure on fitting data, not a validation (R128).
+
+    Returns:
+        (r2, rows) where rows are the row indices used.
+    """
+    from sklearn.metrics import r2_score
+
+    n_rows = X_primary.shape[0]
+    rows = np.arange(n_rows)
+    if method == "tsr" and params.get("transfer_indices") is not None:
+        candidate = np.asarray(params["transfer_indices"], dtype=int)
+        if candidate.size and candidate.min() >= 0 and candidate.max() < n_rows:
+            rows = candidate
+    r2 = float(r2_score(X_primary[rows].ravel(), X_transferred[rows].ravel()))
+    return r2, rows
+
+
+# ===== SPECTRAL DATA TYPES =====
+# Reflectance and absorbance convert into each other (A = log10(1/R)). The readers
+# also report OTHER_DATA_TYPE ('other') for measured ordinates that are neither
+# (Kubelka-Munk, photoacoustic, Raman/emission, raw single-channel intensity), and
+# keep the specific kind in source_data_type. No conversion is offered for those.
+_CONVERTIBLE_DATA_TYPES = ("reflectance", "absorbance")
+_SOURCE_DATA_TYPE_LABELS = {
+    "kubelka_munk": "Kubelka-Munk",
+    "photoacoustic": "Photoacoustic signal",
+    "raman": "Raman intensity",
+    "emission": "Emission intensity",
+    "sample": "Single-channel intensity",
+    "reference": "Single-channel intensity",
+}
+
+
+def _is_convertible_data_type(data_type) -> bool:
+    """True if reflectance <-> absorbance conversion applies to ``data_type``."""
+    return data_type in _CONVERTIBLE_DATA_TYPES
+
+
+def _data_type_label(data_type, source_data_type=None) -> str:
+    """Display name of a data type, e.g. for plot y labels and status text."""
+    if _is_convertible_data_type(data_type):
+        return str(data_type).capitalize()
+    return _SOURCE_DATA_TYPE_LABELS.get(canonical_source_data_type(source_data_type), "Intensity")
+
+
+_SOURCE_DATA_TYPE_SUFFIXES = {
+    "kubelka_munk": "_km",
+    "photoacoustic": "_pas",
+    "raman": "_raman",
+    "emission": "_emis",
+    "sample": "_sc",
+    "reference": "_sc",
+}
+
+
+def _data_type_suffix(data_type, source_data_type=None) -> str:
+    """Filename suffix for a model's data type: _abs, _ref, or a source-specific one."""
+    if data_type == "absorbance":
+        return "_abs"
+    if data_type == "reflectance":
+        return "_ref"
+    return _SOURCE_DATA_TYPE_SUFFIXES.get(canonical_source_data_type(source_data_type), "_other")
+
+
+def _loaded_value_scale(metadata, X, data_type) -> float:
+    """Reflectance scale (1 or 100) to use when converting this data.
+
+    A scale carried in metadata wins whatever the current type: percent reflectance
+    already converted to absorbance must convert back to percent. Otherwise the
+    scale is inferred for reflectance and is 1.0 for other types.
+    """
+    scale = (metadata or {}).get("value_scale")
+    if scale in (1.0, 100.0):
+        return float(scale)
+    if data_type != "reflectance":
+        return 1.0
+    try:
+        from spectral_predict.io import infer_reflectance_scale
+
+        return float(infer_reflectance_scale(pd.DataFrame(np.asarray(X, dtype=float))))
+    except Exception:
+        return 1.0
+
+
+def _resolve_loaded_data_type(metadata, X):
+    """Return ``(data_type, confidence, source_data_type)`` for freshly loaded data.
+
+    The reader's own result wins: it already fell back to the value heuristic where
+    the file carried no type, and it knows types the heuristic cannot see (an OPUS
+    log-reflectance block looks like reflectance by value but must not be logged
+    again). The heuristic runs only when the reader returned no data_type.
+    """
+    metadata = metadata or {}
+    data_type = metadata.get("data_type")
+    if data_type:
+        return data_type, float(metadata.get("type_confidence", 50.0)), metadata.get(
+            "source_data_type"
+        )
+    from spectral_predict.io import detect_spectral_data_type
+
+    data_type, confidence, _ = detect_spectral_data_type(X)
+    return data_type, confidence, None
 
 
 # ===== NATIVE TKINTER TOOLTIP CLASS =====
@@ -1011,54 +1190,50 @@ TOOLTIP_CONTENT = {
     # ===== CALIBRATION TRANSFER METHODS =====
     'calibration_transfer': {
         # Transfer Methods
-        'method_DS': (
-            "Direct Standardization (DS) is a simple pairwise calibration transfer method. "
-            "Builds a linear transformation matrix F that directly maps satellite spectra to primary spectra: "
-            "X_primary ≈ X_satellite × F. Fast and straightforward, works well when primary and satellite "
-            "instruments have similar wavelength grids. Best for simple spectral differences. "
-            "Requires paired samples measured on both instruments. Lambda parameter controls regularization."
+        "method_DS": (
+            "Direct Standardization (DS): one full matrix that maps every satellite wavelength "
+            "to every primary wavelength, X_primary ~ X_satellite x F, fitted by ridge regression "
+            "on the paired standards (the same samples measured on both instruments, row for row). "
+            "It has far more coefficients than there are standards, so it can reproduce the "
+            "standards almost exactly and still do worse on new samples; increase Lambda if so. "
+            "Check it on standards that were not used to fit it."
         ),
-        'method_PDS': (
-            "Piecewise Direct Standardization (PDS) is a local version of DS that models each primary "
-            "wavelength independently using a sliding window of neighboring satellite wavelengths. "
-            "More flexible than global DS, better at handling nonlinear wavelength dependencies. "
-            "Window size controls how many neighboring wavelengths are used (typical: 7-15). "
-            "Larger windows = smoother transfer but may miss local spectral features. "
-            "Good for instruments with slight wavelength misalignments."
+        "method_PDS": (
+            "Piecewise Direct Standardization (PDS): each primary wavelength is predicted from a "
+            "small window of neighbouring satellite wavelengths, fitted on the paired standards. "
+            "Handles small wavelength shifts and bandwidth differences, which a per-wavelength "
+            "correction cannot. Window size sets how many neighbours are used (odd number; "
+            "typical 7-15). Needs more paired standards than the window size."
         ),
-        'method_TSR': (
-            "Transfer by Sample Regression (TSR) selects a subset of representative transfer samples "
-            "that span the spectral space, then uses only these samples to build the transformation. "
-            "More efficient than using all transfer samples, reduces overfitting. Sample selection uses "
-            "Kennard-Stone algorithm to ensure good coverage of spectral diversity. "
-            "Number of samples controls subset size (typical: 10-30). Fewer = faster but may miss patterns, "
-            "more = comprehensive but slower. Robust choice for heterogeneous sample sets."
+        "method_TSR": (
+            "Slope/bias per wavelength (default). For each wavelength separately, the primary value "
+            "is regressed on the satellite value over the paired standards: primary = slope x "
+            "satellite + bias. Two coefficients per wavelength, so it can be fitted from few "
+            "standards. It cannot correct wavelength shifts (use PDS for those). "
+            "Standardization in the spirit of Shenk & Westerhaus (1991, Crop Sci 31:1694-1696). "
+            "Saved models call it 'tsr'; this is not trimmed scores regression."
         ),
-        'method_CTAI': (
-            "Calibration Transfer via Adaptive Integration (CTAI) combines spectral standardization "
-            "with adaptive selection of informative wavelengths. Uses an iterative algorithm to identify "
-            "and weight wavelengths that transfer well between instruments while down-weighting problematic "
-            "regions (e.g., noise, nonlinear response). More sophisticated than DS/PDS, adapts to "
-            "instrument-specific characteristics. Recommended when instruments have different noise profiles "
-            "or response characteristics. Generally provides robust transfer with minimal tuning."
+        "method_CTAI": (
+            "PC-DS: paired regression in the satellite PCA space. Both instruments' spectra of the "
+            "paired standards are projected onto the satellite's leading principal components, the "
+            "primary scores are regressed on the satellite scores, and the map is projected back. "
+            "Needs the same standards on both instruments and the same wavelength grid. "
+            "Saved models call it 'ctai', but it is not the published standard-free CTAI "
+            "(Zhao et al. 2019)."
         ),
-        'method_NSPFCE': (
-            "Null-Space Projection followed by Feature Correlation Enhancement (NS-PFCE) is an advanced "
-            "method that removes instrument-specific variance while preserving chemical information. "
-            "Uses wavelength selection algorithms (VCPA-IRIV, CARS, SPA) to identify informative features, "
-            "then projects out instrument-specific interference using null-space operations. "
-            "Excellent for complex scenarios with significant instrumental differences (e.g., different "
-            "detectors, optical configurations). Slower than other methods but very effective. "
-            "Wavelength selection is critical for performance - VCPA-IRIV recommended for most cases."
+        "method_NSPFCE": (
+            "Iterative ridge DS: a dasp heuristic, not the published PFCE/NS-PFCE. Starts from a "
+            "per-wavelength scaling and repeatedly re-solves a lightly regularised (ridge 1e-6) "
+            "full-matrix DS on the paired standards, with damped updates and a re-fitted offset. "
+            "Like DS, it can fit the standards closely and do worse than no correction on new "
+            "samples when there are few standards. Saved models call it 'nspfce'."
         ),
-        'method_JYPLS': (
-            "Joint-Y Partial Least Squares Inverse (JYPLS-inv) uses PLS regression to model the "
-            "primary-satellite relationship, treating primary spectra as 'Y' and satellite spectra as 'X'. "
-            "The PLS model learns latent variables capturing the systematic spectral differences. "
-            "Number of components controls model complexity (typical: 3-15, or 'Auto' for cross-validation). "
-            "More flexible than DS for nonlinear relationships, but requires more transfer samples (30+). "
-            "Sample selection uses Kennard-Stone for representativeness. "
-            "Good when spectral differences are complex but systematic."
+        "method_JYPLS": (
+            "JYPLS-inv (experimental, disabled): stacks both instruments' spectra of the paired "
+            "standards with their shared measured reference values, fits one PLS model, maps "
+            "satellite scores to primary scores, and reconstructs primary spectra from the PLS "
+            "loadings. Needs a measured reference value for every standard. Not checked against "
+            "a published JYPLS-inv algorithm."
         ),
 
         # Transfer Parameters
@@ -1078,13 +1253,11 @@ TOOLTIP_CONTENT = {
             "Large windows (17-25) = more global, smoother, approaches regular DS. "
             "Match to your spectral resolution: higher resolution allows smaller windows."
         ),
-        'param_tsr_samples': (
-            "Number of representative samples selected for Transfer by Sample Regression (TSR). "
-            "Subset selected using Kennard-Stone algorithm to span spectral diversity. "
-            "Fewer samples (8-12) = faster, simpler model, may miss spectral patterns (default: 12). "
-            "More samples (20-30) = more comprehensive, better coverage, slower. "
-            "Rule of thumb: 10-20% of total transfer samples, minimum 10. "
-            "Increase if transfer fails to capture sample diversity. Decrease if overfitting occurs."
+        "param_tsr_samples": (
+            "How many of the loaded paired standards the slope/bias fit uses. "
+            "'All' (default) uses every loaded pair. A smaller number picks that many by "
+            "Kennard-Stone on the primary spectra; the rest are not used in the fit. "
+            "At least 2 are needed; more standards give steadier slopes."
         ),
         'param_jypls_samples': (
             "Number of representative samples selected for JYPLS-inv calibration transfer. "
@@ -1104,31 +1277,24 @@ TOOLTIP_CONTENT = {
             "Too few = underfitting (incomplete transfer). Too many = overfitting (noise transfer). "
             "Start with 'Auto' or 5-8 for typical applications."
         ),
-        'param_nspfce_max_iter': (
-            "Maximum iterations for NS-PFCE optimization algorithm. Controls convergence of the iterative "
-            "null-space projection process. More iterations allow finding better projection but take longer. "
-            "50-100 = fast, usually sufficient for simple cases (default: 100). "
-            "200-500 = thorough optimization for complex instrumental differences. "
-            "Algorithm may converge early (before max iterations) if tolerance is met. "
-            "Increase if transfer quality is poor and you suspect incomplete convergence. "
-            "Monitor convergence messages - if hitting max iterations, consider increasing."
+        "param_nspfce_max_iter": (
+            "Maximum iterations for Iterative ridge DS. Each iteration re-solves the ridge DS and "
+            "takes a damped step; it stops early when the change in mean squared error on the "
+            "standards falls below the tolerance. Default 100."
         ),
-        'param_nspfce_wavelength_selection': (
-            "Enable wavelength selection for NS-PFCE optimization. "
-            "UNCHECKED (default): Uses all wavelengths. Recommended for most cases - NS-PFCE performs excellently "
-            "without wavelength selection, is faster, and outputs full-width spectra compatible with existing models. "
-            "CHECKED: Uses feature selection (CARS, SPA, or VCPA-IRIV) to focus on a subset of wavelengths. "
-            "Output spectra contain ONLY selected wavelengths (reduced width). "
-            "Use with caution - downstream models must be trained on the same reduced wavelength set."
+        "param_nspfce_wavelength_selection": (
+            "Iterative ridge DS: select wavelengths before fitting. "
+            "UNCHECKED (default): all wavelengths; output is full width. "
+            "CHECKED: a selector (CARS, SPA or VCPA-IRIV, run against the spectral mean) keeps a "
+            "subset, and the output contains ONLY those wavelengths, so models that expect the "
+            "full grid cannot use it."
         ),
-        'param_nspfce_selector': (
-            "Wavelength selection algorithm for NS-PFCE (only when wavelength selection is enabled). "
-            "cars (default) = Competitive Adaptive Reweighted Sampling. Fast and robust, uses competitive mechanism. "
-            "Good for most applications. "
-            "spa = Successive Projections Algorithm. Very fast, selects orthogonal variables. Good for "
-            "highly collinear spectral data. "
-            "vcpa-iriv = Variable Combination Population Analysis + Iteratively Retaining Informative Variables. "
-            "Most comprehensive but slowest. Identifies stable informative wavelengths through multiple iterations."
+        "param_nspfce_selector": (
+            "Wavelength selector for Iterative ridge DS (only when wavelength selection is on). "
+            "cars = Competitive Adaptive Reweighted Sampling. "
+            "spa = Successive Projections Algorithm. "
+            "vcpa-iriv = VCPA followed by IRIV; slowest. "
+            "All three run against the spectral mean as a stand-in target, not a measured property."
         ),
     },
 
@@ -1591,6 +1757,300 @@ SIDEBAR_CONFIG = {
 }
 
 
+# ===== HIGH-DPI SCALING =====
+# SPACING and SIDEBAR_CONFIG above are in pixels at 96 dpi. Once the process is
+# DPI aware (see _enable_windows_dpi_awareness), Windows stops bitmap-stretching the
+# window, so pixel sizes must be multiplied by the display scale to keep their
+# physical size. Point-sized fonts already follow Tk's own scaling and must NOT be
+# multiplied, and embedded matplotlib canvases rescale themselves from `tk scaling`
+# (FigureCanvasTk._update_device_pixel_ratio), so figure dpi is left alone too.
+_BASE_SPACING = dict(SPACING)
+_BASE_SIDEBAR_CONFIG = dict(SIDEBAR_CONFIG)
+_UI_SCALE = 1.0
+
+# HRESULT returned by SetProcessDpiAwareness when awareness was already set, e.g. by
+# the DPI-aware manifest embedded in the frozen executable.
+_E_ACCESSDENIED = 0x80070005
+
+
+def _enable_windows_dpi_awareness() -> bool:
+    """Declare the process system-DPI-aware on Windows. Call before ``tk.Tk()``.
+
+    Returns:
+        Advisory only, nothing depends on it: True if the process is DPI aware
+        afterwards, False otherwise (including on non-Windows platforms, where this
+        is a no-op).
+    """
+    if sys.platform != 'win32':
+        return False
+    import ctypes
+
+    try:
+        hresult = ctypes.windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
+    except (AttributeError, OSError) as exc:  # shcore.dll is absent before Windows 8.1
+        logger.debug("SetProcessDpiAwareness unavailable (%s); trying SetProcessDPIAware", exc)
+    else:
+        if hresult == 0:
+            return True
+        if (hresult & 0xFFFFFFFF) == _E_ACCESSDENIED:
+            logger.debug("DPI awareness was already set for this process (manifest)")
+            return True
+        logger.warning("SetProcessDpiAwareness(1) failed with HRESULT 0x%08X", hresult & 0xFFFFFFFF)
+    try:
+        user32 = ctypes.windll.user32
+        if user32.SetProcessDPIAware():
+            return True
+        # On Windows 7/8 a manifest that already declared awareness makes this call
+        # fail too; ask whether the process is aware anyway.
+        aware = bool(user32.IsProcessDPIAware())
+        logger.debug("SetProcessDPIAware failed; IsProcessDPIAware() = %s", aware)
+        return aware
+    except (AttributeError, OSError) as exc:
+        logger.warning("Could not declare DPI awareness; UI may be blurry: %s", exc)
+        return False
+
+
+def _compute_ui_scale(root: tk.Misc) -> float:
+    """Return the pixel scale factor for the display ``root`` is on (1.0 = 96 dpi).
+
+    The factor never drops below 1.0, and is 1.0 on macOS where Tk works in points
+    and the OS handles Retina scaling. A DPI-unaware Windows process sees 96 dpi and
+    therefore gets 1.0.
+    """
+    if sys.platform == 'darwin':
+        return 1.0
+    try:
+        dpi = float(root.winfo_fpixels('1i'))
+    except tk.TclError:
+        return 1.0
+    return max(1.0, round(dpi / 96.0, 2))
+
+
+def _apply_ui_scale(root: tk.Misc) -> float:
+    """Set the module scale factor and rescale SPACING / SIDEBAR_CONFIG in place.
+
+    Idempotent: values are always recomputed from the 96-dpi base values, so
+    constructing a second app in the same process does not compound the scaling.
+    """
+    global _UI_SCALE
+    _UI_SCALE = _compute_ui_scale(root)
+    SPACING.update({k: _px(v) for k, v in _BASE_SPACING.items()})
+    SIDEBAR_CONFIG.update({k: _px(v) for k, v in _BASE_SIDEBAR_CONFIG.items()})
+    return _UI_SCALE
+
+
+def _px(value: float) -> int:
+    """Scale a pixel length given at 96 dpi to the current display."""
+    return int(round(value * _UI_SCALE))
+
+
+def _monitor_work_area(window: tk.Misc) -> tuple[int, int, int, int]:
+    """Return ``(left, top, right, bottom)`` of the usable area around ``window``.
+
+    On Windows this is the work area (screen minus taskbar) of the monitor that holds
+    ``window``'s toplevel, in the process's own DPI coordinate space, which is also
+    the space Tk geometry strings use. Elsewhere, or if the Win32 calls fail, it is
+    the screen Tk reports (the primary monitor on Windows).
+    """
+    fallback = (0, 0, int(window.winfo_screenwidth()), int(window.winfo_screenheight()))
+    if sys.platform != 'win32':
+        return fallback
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _MonitorInfo(ctypes.Structure):
+            _fields_ = [
+                ('cbSize', wintypes.DWORD),
+                ('rcMonitor', wintypes.RECT),
+                ('rcWork', wintypes.RECT),
+                ('dwFlags', wintypes.DWORD),
+            ]
+
+        user32 = ctypes.windll.user32
+        user32.MonitorFromWindow.restype = wintypes.HMONITOR
+        user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+        user32.GetMonitorInfoW.restype = wintypes.BOOL
+        user32.GetMonitorInfoW.argtypes = [wintypes.HMONITOR, ctypes.POINTER(_MonitorInfo)]
+        hwnd = int(window.winfo_toplevel().wm_frame(), 16)
+        monitor = user32.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
+        info = _MonitorInfo()
+        info.cbSize = ctypes.sizeof(_MonitorInfo)
+        if not monitor or not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return fallback
+        work = info.rcWork
+        if work.right <= work.left or work.bottom <= work.top:
+            return fallback
+        return work.left, work.top, work.right, work.bottom
+    except (AttributeError, OSError, ValueError, tk.TclError) as exc:
+        logger.debug("Monitor work area unavailable (%s); using screen size", exc)
+        return fallback
+
+
+def _px_geometry(size: str, owner: tk.Misc | None = None) -> str:
+    """Scale a ``"WIDTHxHEIGHT"`` Toplevel size given at 96 dpi, e.g. ``"350x180"``.
+
+    Fixed-size dialogs do not grow to fit their content, while their point-sized
+    fonts do grow with the display scale, so an unscaled size clips the bottom rows.
+
+    With ``owner`` (the window the dialog belongs to), the size is clamped to the work
+    area of the owner's monitor, leaving room for the title bar and borders, and the
+    dialog is centred on the owner and kept inside that work area: the result is
+    ``"WxH+X+Y"``. Without ``owner`` only the scaled ``"WxH"`` is returned.
+    """
+    width, height = (_px(int(v)) for v in size.lower().split('x'))
+    if owner is None:
+        return f"{width}x{height}"
+    left, top, right, bottom = _monitor_work_area(owner)
+    # Tk sizes the client area; the frame adds the title bar and borders.
+    width = max(1, min(width, right - left - _px(16)))
+    height = max(1, min(height, bottom - top - _px(40)))
+    # Centre on the owner, unless it is iconified, withdrawn or not yet mapped: its
+    # coordinates are then meaningless (Windows parks minimised windows at -32000),
+    # so centre on the work area instead. MonitorFromWindow already uses a minimised
+    # window's restored position to pick the monitor.
+    cx, cy = (left + right) // 2, (top + bottom) // 2
+    try:
+        if owner.winfo_ismapped() and owner.winfo_toplevel().state() in ('normal', 'zoomed'):
+            cx = owner.winfo_rootx() + owner.winfo_width() // 2
+            cy = owner.winfo_rooty() + owner.winfo_height() // 2
+    except (AttributeError, tk.TclError):
+        pass
+    x = min(max(cx - width // 2, left), right - width - _px(16))
+    y = min(max(cy - height // 2, top), bottom - height - _px(40))
+    return f"{width}x{height}+{max(x, left)}+{max(y, top)}"
+
+
+def _results_column_width(col: str, values: pd.Series, row_font: tkfont.Font) -> int:
+    """Pixel width for a Results-table column at the current display scale.
+
+    The per-column widths below are 96-dpi minimums, scaled with ``_px``. Float cells
+    are shown as ``.6g`` text, which can be as wide as ``-1.23456e+10``, so float
+    columns are widened to their widest formatted value measured in ``row_font``,
+    plus Tk's horizontal cell padding (4 px per side at 96 dpi) and a small margin.
+    """
+    if col == 'Select':
+        base = 60
+    elif col in ('Model', 'Preprocess', 'Subset'):
+        base = 120
+    elif col == 'top_vars':
+        base = 200
+    elif col in ('BestRegion', 'BestClass'):
+        base = 100
+    elif col.startswith('RMSE_') or col.startswith('F1_Class'):
+        base = 70  # Quartile RMSE or Class F1 columns
+    else:
+        base = 80
+    width = _px(base)
+    if pd.api.types.is_float_dtype(values):
+        text_width = _float_column_text_width(values, row_font)
+        if text_width:
+            width = max(width, text_width + 2 * _px(4) + _px(2))
+    return width
+
+
+def _float_column_text_width(values: pd.Series, font: tkfont.Font) -> int:
+    """Pixel width of the widest ``.6g``-formatted value in a float column, in ``font``.
+
+    ``font.measure`` already returns pixels at the current display scale, so the
+    result must not be multiplied by ``_UI_SCALE``.
+
+    Every value is formatted and every distinct string is considered. Character
+    count is not a proxy, because equal-length strings differ in width ('+' is wider
+    than '-'). Measuring each string costs about 100 us inside Tk (text layout, not
+    call overhead), and a results column can hold thousands of distinct values. So:
+
+    1. Each string is ranked by the sum of its cached per-character widths.
+    2. The 50 strings with the largest sums are measured exactly, as whole runs.
+    3. The larger of the widest sum and the widest exact measure is returned.
+
+    This is a heuristic, not a guarantee. Tk on Windows measures a whole run with
+    GetTextExtentPoint32, which need not be additive. However, probes on 12k ``.6g``
+    strings (Segoe UI 9/10 and Arial 9, at 100/125/200%) found the sum equal to the
+    measure every time, and X11 Tk accumulates per-character advances. A string whose
+    true width exceeds its sum, and that ranks below the top 50 by sum, could still
+    be under-measured.
+    """
+    numeric = pd.to_numeric(values, errors='coerce').to_numpy(dtype=float)
+    finite = numeric[np.isfinite(numeric)]
+    if finite.size == 0:
+        return 0
+    strings = {f"{v:.6g}" for v in finite.tolist()}
+    char_width: dict[str, int] = {}
+    for ch in set().union(*strings):
+        char_width[ch] = font.measure(ch)
+    summed = {text: sum(char_width[ch] for ch in text) for text in strings}
+    widest_first = sorted(summed, key=summed.__getitem__, reverse=True)[:50]
+    return max(max(summed.values()), max(font.measure(text) for text in widest_first))
+
+
+# ===== NAMED FONTS =====
+# Tk has no font fallback list: font=(('Segoe UI', 'Arial'), 10) is parsed as the
+# single family "Segoe UI Arial", which does not exist, so Windows substitutes Arial.
+# Pick one family that is actually installed and share it through named fonts.
+_UI_FAMILY_CANDIDATES = {
+    'win32': ('Segoe UI',),
+    'darwin': ('SF Pro Text', 'Helvetica Neue', 'Helvetica'),
+    'other': ('Inter', 'Ubuntu', 'Noto Sans', 'DejaVu Sans', 'Liberation Sans'),
+}
+_MONO_FAMILY_CANDIDATES = {
+    'win32': ('Consolas', 'Cascadia Mono', 'Courier New'),
+    'darwin': ('Menlo', 'Monaco'),
+    'other': ('DejaVu Sans Mono', 'Ubuntu Mono', 'Noto Sans Mono', 'Liberation Mono'),
+}
+# key -> (family kind, size in points, weight)
+_NAMED_FONT_SPECS = {
+    'body': ('ui', 10, 'normal'),
+    'small': ('ui', 9, 'normal'),
+    'strong': ('ui', 11, 'bold'),
+    'heading': ('ui', 12, 'bold'),
+    'title': ('ui', 16, 'bold'),
+    'mono': ('mono', 9, 'normal'),
+}
+
+
+def _resolve_font_family(root: tk.Misc, candidates: tuple[str, ...], fallback: str) -> str:
+    """Return the first installed family in ``candidates``, else the family of ``fallback``.
+
+    A family counts as installed when Tk resolves it to itself rather than
+    substituting another face.
+    """
+    for family in candidates:
+        actual = tkfont.Font(root=root, family=family).actual('family')
+        if actual.lower() == family.lower():
+            return family
+    return tkfont.nametofont(fallback, root=root).actual('family')
+
+
+def _init_named_fonts(root: tk.Misc) -> dict[str, tkfont.Font]:
+    """Create (or reconfigure) the app's named fonts on ``root``.
+
+    Tk deletes a named font when the Python object that created it is
+    garbage-collected, so the owning objects are also kept on ``root`` and reused if
+    a second app is built on the same root.
+    """
+    platform_key = sys.platform if sys.platform in ('win32', 'darwin') else 'other'
+    families = {
+        'ui': _resolve_font_family(root, _UI_FAMILY_CANDIDATES[platform_key], 'TkDefaultFont'),
+        'mono': _resolve_font_family(root, _MONO_FAMILY_CANDIDATES[platform_key], 'TkFixedFont'),
+    }
+    fonts = dict(getattr(root, '_dasp_named_fonts', {}))
+    existing = set(tkfont.names(root))
+    for key, (kind, size, weight) in _NAMED_FONT_SPECS.items():
+        name = f"Dasp{key.capitalize()}"
+        options = {'family': families[kind], 'size': size, 'weight': weight}
+        font = fonts.get(key)
+        if font is None and name in existing:
+            font = tkfont.nametofont(name, root=root)
+        if font is None:
+            fonts[key] = tkfont.Font(root=root, name=name, **options)
+        else:
+            font.configure(**options)
+            fonts[key] = font
+    root._dasp_named_fonts = fonts
+    return fonts
+
+
 class SidebarNavigation:
     """
     Collapsible sidebar navigation component for the application.
@@ -1687,7 +2147,7 @@ class SidebarNavigation:
     def _create_collapse_toggle(self):
         """Create the collapse/expand toggle button at the bottom."""
         toggle_frame = tk.Frame(self.frame, bg=self.colors.get('sidebar', '#2D3748'),
-                               height=50)
+                               height=_px(50))
         toggle_frame.pack(side='bottom', fill='x')
         toggle_frame.pack_propagate(False)
 
@@ -1981,592 +2441,19 @@ def _get_imbalance_suffix(imbalance_method: str | None) -> str:
 # These classes wrap models with preprocessing/wavelength selection
 # and are sklearn-clonable (required for ensemble OOF predictions)
 
-def _build_transform_from_config(config: dict):
-    """
-    Build a preprocessing transform function from configuration.
-
-    This is factored out so wrapper classes can recreate transforms after cloning.
-    Imports are done inside to avoid circular dependencies.
-    """
-    from spectral_predict.preprocess import SavgolDerivative, SNV, SavgolSmooth
-    from spectral_predict.baseline import BaselinePolynomial, BaselineALS, BaselineAirPLS
-
-    def transform(X):
-        import numpy as np
-        X_out = np.asarray(X, dtype=np.float64)
-
-        # Apply smoothing first (if enabled)
-        if config.get('smooth'):
-            smoother = SavgolSmooth(window_length=config['smooth'], polyorder=2)
-            X_out = smoother.fit_transform(X_out)
-
-        # Apply baseline correction
-        baseline = config.get('baseline')
-        bl_params = config.get('baseline_params', {})
-        if baseline == 'polynomial':
-            bl = BaselinePolynomial(degree=bl_params.get('degree', 2))
-            X_out = bl.fit_transform(X_out)
-        elif baseline == 'als':
-            bl = BaselineALS(
-                lambda_=bl_params.get('lam', 1e5),
-                p=bl_params.get('p', 0.01),
-                niter=10,
-            )
-            X_out = bl.fit_transform(X_out)
-        elif baseline == 'airpls':
-            bl = BaselineAirPLS(
-                lam=bl_params.get('lam', 1e5),
-                max_iter=15,
-            )
-            X_out = bl.fit_transform(X_out)
-
-        # Apply main preprocessing
-        pt = config.get('type', 'raw')
-        w = config.get('window', 15)
-
-        if pt == 'raw':
-            pass
-        elif pt == 'snv':
-            X_out = SNV().fit_transform(X_out)
-        elif pt == 'deriv1':
-            X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
-        elif pt == 'deriv2':
-            X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
-        elif pt == 'deriv3':
-            X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
-        elif pt == 'deriv4':
-            X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
-        elif pt == 'snv_deriv1':
-            X_out = SNV().fit_transform(X_out)
-            X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
-        elif pt == 'snv_deriv2':
-            X_out = SNV().fit_transform(X_out)
-            X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
-        elif pt == 'snv_deriv3':
-            X_out = SNV().fit_transform(X_out)
-            X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
-        elif pt == 'snv_deriv4':
-            X_out = SNV().fit_transform(X_out)
-            X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
-        elif pt == 'deriv1_snv':
-            X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
-            X_out = SNV().fit_transform(X_out)
-        elif pt == 'deriv2_snv':
-            X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
-            X_out = SNV().fit_transform(X_out)
-        elif pt == 'deriv3_snv':
-            X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
-            X_out = SNV().fit_transform(X_out)
-        elif pt == 'deriv4_snv':
-            X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
-            X_out = SNV().fit_transform(X_out)
-
-        return X_out
-
-    return transform
-
-
-def _match_wavelengths_normalized(requested_cols, available_columns, precision=1):
-    """
-    Match wavelengths using exact precision matching after normalization.
-
-    This function solves the CARS wavelength matching bug where tolerance-based
-    matching (±0.5nm) could match wrong wavelengths or fail silently.
-
-    Instead of tolerance-based matching, this:
-    1. Rounds both requested and available wavelengths to the same precision
-    2. Matches on the normalized string representation
-    3. Tries multiple precision levels if initial match fails
-
-    Args:
-        requested_cols: List of wavelength column names (can be strings or floats)
-        available_columns: Column names from the new DataFrame
-        precision: Decimal places to round to (default 1)
-
-    Returns:
-        List of matched column names from available_columns
-
-    Raises:
-        KeyError: If any wavelength cannot be matched
-    """
-    # Build lookup dict: normalized wavelength string -> original column name
-    col_lookup = {}
-    col_names = list(available_columns)
-
-    for col in col_names:
-        try:
-            col_float = float(col)
-            normalized_key = f"{round(col_float, precision):.{precision}f}"
-            if normalized_key not in col_lookup:
-                col_lookup[normalized_key] = col
-        except (ValueError, TypeError):
-            continue
-
-    # Match each requested wavelength
-    matched_by_index = {}  # index -> matched column
-    missing_by_index = {}  # index -> wavelength
-
-    for idx, req_col in enumerate(requested_cols):
-        try:
-            req_float = float(req_col)
-            normalized_key = f"{round(req_float, precision):.{precision}f}"
-            if normalized_key in col_lookup:
-                matched_by_index[idx] = col_lookup[normalized_key]
-            else:
-                missing_by_index[idx] = req_col
-        except (ValueError, TypeError):
-            # Non-numeric column - try direct string match
-            if req_col in col_names:
-                matched_by_index[idx] = req_col
-            else:
-                missing_by_index[idx] = req_col
-
-    # Try different precision levels for missing wavelengths
-    if missing_by_index:
-        for alt_precision in [0, 2, 3]:
-            if alt_precision == precision:
-                continue
-
-            # Rebuild lookup at alternative precision
-            col_lookup_alt = {}
-            for col in col_names:
-                try:
-                    col_float = float(col)
-                    normalized_key = f"{round(col_float, alt_precision):.{alt_precision}f}"
-                    if normalized_key not in col_lookup_alt:
-                        col_lookup_alt[normalized_key] = col
-                except (ValueError, TypeError):
-                    continue
-
-            # Try matching still-missing wavelengths
-            still_missing = {}
-            for idx, wl in missing_by_index.items():
-                try:
-                    wl_float = float(wl)
-                    normalized_key = f"{round(wl_float, alt_precision):.{alt_precision}f}"
-                    if normalized_key in col_lookup_alt:
-                        matched_by_index[idx] = col_lookup_alt[normalized_key]
-                    else:
-                        still_missing[idx] = wl
-                except (ValueError, TypeError):
-                    still_missing[idx] = wl
-
-            missing_by_index = still_missing
-            if not missing_by_index:
-                break
-
-    # Report any still-missing wavelengths
-    if missing_by_index:
-        missing_wls = list(missing_by_index.values())
-        raise KeyError(
-            f"Could not match all wavelength columns. "
-            f"Missing {len(missing_wls)} wavelengths: {missing_wls[:5]}{'...' if len(missing_wls) > 5 else ''}"
-        )
-
-    # Return matched columns in original order
-    return [matched_by_index[i] for i in range(len(requested_cols))]
-
-
-class WavelengthSubsetWrapper(BaseEstimator, RegressorMixin):
-    """
-    Sklearn-compatible wrapper that applies wavelength subsetting during fit and predict.
-
-    This wrapper is clonable via sklearn.clone() because it inherits from BaseEstimator
-    and implements get_params/set_params properly.
-
-    FIXED: Uses exact precision matching instead of tolerance-based matching (±0.5nm)
-    to solve the CARS wavelength mismatch bug in ensembles.
-    """
-
-    def __init__(self, pipeline=None, wavelength_cols=None):
-        self.pipeline = pipeline
-        self.wavelength_cols = wavelength_cols
-
-    def _subset(self, X):
-        """
-        Subset X to selected wavelengths using exact precision matching.
-
-        This method solves the CARS wavelength matching bug where tolerance-based
-        matching (±0.5nm) could match wrong wavelengths or fail silently.
-        """
-        if self.wavelength_cols is None:
-            return X
-
-        if hasattr(X, 'loc'):
-            # DataFrame - use column selection
-            try:
-                return X[self.wavelength_cols]
-            except KeyError:
-                # Column name type mismatch - use normalized precision matching
-                # This fixes the CARS ensemble bug where float vs string columns caused issues
-                matching_cols = _match_wavelengths_normalized(
-                    self.wavelength_cols, X.columns, precision=1
-                )
-                return X[matching_cols]
-        else:
-            # numpy array - assume columns are already matched
-            return X
-
-    def fit(self, X, y):
-        X_subset = self._subset(X)
-        self.pipeline.fit(X_subset, y)
-        return self
-
-    def predict(self, X):
-        X_subset = self._subset(X)
-        return self.pipeline.predict(X_subset)
-
-    def get_params(self, deep=True):
-        return {'pipeline': self.pipeline, 'wavelength_cols': self.wavelength_cols}
-
-    def set_params(self, **params):
-        for key, value in params.items():
-            setattr(self, key, value)
-        return self
-
-
-class GAPreprocessWrapper(BaseEstimator, RegressorMixin):
-    """
-    Sklearn-compatible wrapper for GA/NSGA preprocessing.
-
-    Stores preprocessing config (not the transform function) so it can be cloned.
-    The transform function is recreated from config when needed.
-    """
-
-    def __init__(self, pipeline=None, preprocess_config=None):
-        self.pipeline = pipeline
-        self.preprocess_config = preprocess_config
-        self._transform = None
-
-    @property
-    def transform(self):
-        """Lazily create transform function from config."""
-        if self._transform is None and self.preprocess_config:
-            self._transform = _build_transform_from_config(self.preprocess_config)
-        return self._transform
-
-    def fit(self, X, y):
-        X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
-        self.pipeline.fit(X_preproc, y)
-        return self
-
-    def predict(self, X):
-        X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
-        return self.pipeline.predict(X_preproc)
-
-    def get_params(self, deep=True):
-        return {'pipeline': self.pipeline, 'preprocess_config': self.preprocess_config}
-
-    def set_params(self, **params):
-        for key, value in params.items():
-            setattr(self, key, value)
-        # Reset transform cache if config changes
-        if 'preprocess_config' in params:
-            self._transform = None
-        return self
-
-
-class CombinedPreprocessWrapper(BaseEstimator, RegressorMixin):
-    """
-    Sklearn-compatible wrapper for combined preprocessing + wavelength selection (NSGA-II).
-
-    Stores preprocessing config and column info (not the transform function) so it can be cloned.
-    The transform function is recreated from config when needed.
-    """
-
-    def __init__(self, pipeline=None, preprocess_config=None, wavelength_cols=None, all_columns=None):
-        self.pipeline = pipeline
-        self.preprocess_config = preprocess_config
-        self.wavelength_cols = wavelength_cols
-        self.all_columns = all_columns
-        self._transform = None
-        self._col_indices = None
-
-    @property
-    def transform(self):
-        """Lazily create transform function from config."""
-        if self._transform is None and self.preprocess_config:
-            self._transform = _build_transform_from_config(self.preprocess_config)
-        return self._transform
-
-    @property
-    def col_indices(self):
-        """Lazily compute column indices."""
-        if self._col_indices is None and self.all_columns is not None and self.wavelength_cols is not None:
-            all_cols_list = list(self.all_columns)
-            self._col_indices = [all_cols_list.index(c) for c in self.wavelength_cols]
-        return self._col_indices
-
-    def _preprocess_and_subset(self, X):
-        X_arr = X.values if hasattr(X, 'values') else X
-        X_preproc = self.transform(X_arr)
-        # Subset to selected wavelengths (after preprocessing)
-        return X_preproc[:, self.col_indices]
-
-    def fit(self, X, y):
-        X_processed = self._preprocess_and_subset(X)
-        self.pipeline.fit(X_processed, y)
-        return self
-
-    def predict(self, X):
-        X_processed = self._preprocess_and_subset(X)
-        return self.pipeline.predict(X_processed)
-
-    def get_params(self, deep=True):
-        return {
-            'pipeline': self.pipeline,
-            'preprocess_config': self.preprocess_config,
-            'wavelength_cols': self.wavelength_cols,
-            'all_columns': self.all_columns
-        }
-
-    def set_params(self, **params):
-        for key, value in params.items():
-            setattr(self, key, value)
-        # Reset caches if relevant params change
-        if 'preprocess_config' in params:
-            self._transform = None
-        if 'all_columns' in params or 'wavelength_cols' in params:
-            self._col_indices = None
-        return self
-
-
-# ==================== CLASSIFIER WRAPPERS ====================
-# These are classification-specific versions of the wrappers above.
-# They inherit ClassifierMixin, expose predict_proba(), and have a classes_ property.
-
-
-class WavelengthSubsetClassifierWrapper(BaseEstimator, ClassifierMixin):
-    """
-    Sklearn-compatible classifier wrapper that applies wavelength subsetting during fit and predict.
-
-    This wrapper is clonable via sklearn.clone() because it inherits from BaseEstimator
-    and implements get_params/set_params properly.
-
-    FIXED: Uses exact precision matching instead of tolerance-based matching (±0.5nm)
-    to solve the CARS wavelength mismatch bug in ensembles.
-    """
-
-    def __init__(self, pipeline=None, wavelength_cols=None):
-        self.pipeline = pipeline
-        self.wavelength_cols = wavelength_cols
-
-    def _subset(self, X):
-        """
-        Subset X to selected wavelengths using exact precision matching.
-
-        This method solves the CARS wavelength matching bug where tolerance-based
-        matching (±0.5nm) could match wrong wavelengths or fail silently.
-        """
-        if self.wavelength_cols is None:
-            return X
-
-        if hasattr(X, 'loc'):
-            # DataFrame - use column selection
-            try:
-                return X[self.wavelength_cols]
-            except KeyError:
-                # Column name type mismatch - use normalized precision matching
-                # This fixes the CARS ensemble bug where float vs string columns caused issues
-                matching_cols = _match_wavelengths_normalized(
-                    self.wavelength_cols, X.columns, precision=1
-                )
-                return X[matching_cols]
-        else:
-            # numpy array - assume columns are already matched
-            return X
-
-    def fit(self, X, y):
-        X_subset = self._subset(X)
-        self.pipeline.fit(X_subset, y)
-        return self
-
-    def predict(self, X):
-        X_subset = self._subset(X)
-        return self.pipeline.predict(X_subset)
-
-    def predict_proba(self, X):
-        """Return probability predictions for classification."""
-        X_subset = self._subset(X)
-        if hasattr(self.pipeline, 'predict_proba'):
-            return self.pipeline.predict_proba(X_subset)
-        raise AttributeError(f"{type(self.pipeline).__name__} does not support predict_proba")
-
-    @property
-    def classes_(self):
-        """Return classes from the underlying classifier."""
-        if hasattr(self.pipeline, 'classes_'):
-            return self.pipeline.classes_
-        raise AttributeError(f"{type(self.pipeline).__name__} does not have classes_ attribute")
-
-    def get_params(self, deep=True):
-        return {'pipeline': self.pipeline, 'wavelength_cols': self.wavelength_cols}
-
-    def set_params(self, **params):
-        for key, value in params.items():
-            setattr(self, key, value)
-        return self
-
-
-class GAPreprocessClassifierWrapper(BaseEstimator, ClassifierMixin):
-    """
-    Sklearn-compatible classifier wrapper for GA/NSGA preprocessing.
-
-    Stores preprocessing config (not the transform function) so it can be cloned.
-    The transform function is recreated from config when needed.
-    """
-
-    def __init__(self, pipeline=None, preprocess_config=None):
-        self.pipeline = pipeline
-        self.preprocess_config = preprocess_config
-        self._transform = None
-
-    @property
-    def transform(self):
-        """Lazily create transform function from config."""
-        if self._transform is None and self.preprocess_config:
-            self._transform = _build_transform_from_config(self.preprocess_config)
-        return self._transform
-
-    def fit(self, X, y):
-        X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
-        self.pipeline.fit(X_preproc, y)
-        return self
-
-    def predict(self, X):
-        X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
-        return self.pipeline.predict(X_preproc)
-
-    def predict_proba(self, X):
-        """Return probability predictions for classification."""
-        X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
-        if hasattr(self.pipeline, 'predict_proba'):
-            return self.pipeline.predict_proba(X_preproc)
-        raise AttributeError(f"{type(self.pipeline).__name__} does not support predict_proba")
-
-    @property
-    def classes_(self):
-        """Return classes from the underlying classifier."""
-        if hasattr(self.pipeline, 'classes_'):
-            return self.pipeline.classes_
-        raise AttributeError(f"{type(self.pipeline).__name__} does not have classes_ attribute")
-
-    def get_params(self, deep=True):
-        return {'pipeline': self.pipeline, 'preprocess_config': self.preprocess_config}
-
-    def set_params(self, **params):
-        for key, value in params.items():
-            setattr(self, key, value)
-        # Reset transform cache if config changes
-        if 'preprocess_config' in params:
-            self._transform = None
-        return self
-
-
-class CombinedPreprocessClassifierWrapper(BaseEstimator, ClassifierMixin):
-    """
-    Sklearn-compatible classifier wrapper for combined preprocessing + wavelength selection (NSGA-II).
-
-    Stores preprocessing config and column info (not the transform function) so it can be cloned.
-    The transform function is recreated from config when needed.
-    """
-
-    def __init__(self, pipeline=None, preprocess_config=None, wavelength_cols=None, all_columns=None):
-        self.pipeline = pipeline
-        self.preprocess_config = preprocess_config
-        self.wavelength_cols = wavelength_cols
-        self.all_columns = all_columns
-        self._transform = None
-        self._col_indices = None
-
-    @property
-    def transform(self):
-        """Lazily create transform function from config."""
-        if self._transform is None and self.preprocess_config:
-            self._transform = _build_transform_from_config(self.preprocess_config)
-        return self._transform
-
-    @property
-    def col_indices(self):
-        """Lazily compute column indices."""
-        if self._col_indices is None and self.all_columns is not None and self.wavelength_cols is not None:
-            all_cols_list = list(self.all_columns)
-            self._col_indices = [all_cols_list.index(c) for c in self.wavelength_cols]
-        return self._col_indices
-
-    def _preprocess_and_subset(self, X):
-        X_arr = X.values if hasattr(X, 'values') else X
-        X_preproc = self.transform(X_arr)
-        # Subset to selected wavelengths (after preprocessing)
-        return X_preproc[:, self.col_indices]
-
-    def fit(self, X, y):
-        X_processed = self._preprocess_and_subset(X)
-        self.pipeline.fit(X_processed, y)
-        return self
-
-    def predict(self, X):
-        X_processed = self._preprocess_and_subset(X)
-        return self.pipeline.predict(X_processed)
-
-    def predict_proba(self, X):
-        """Return probability predictions for classification."""
-        X_processed = self._preprocess_and_subset(X)
-        if hasattr(self.pipeline, 'predict_proba'):
-            return self.pipeline.predict_proba(X_processed)
-        raise AttributeError(f"{type(self.pipeline).__name__} does not support predict_proba")
-
-    @property
-    def classes_(self):
-        """Return classes from the underlying classifier."""
-        if hasattr(self.pipeline, 'classes_'):
-            return self.pipeline.classes_
-        raise AttributeError(f"{type(self.pipeline).__name__} does not have classes_ attribute")
-
-    def get_params(self, deep=True):
-        return {
-            'pipeline': self.pipeline,
-            'preprocess_config': self.preprocess_config,
-            'wavelength_cols': self.wavelength_cols,
-            'all_columns': self.all_columns
-        }
-
-    def set_params(self, **params):
-        for key, value in params.items():
-            setattr(self, key, value)
-        # Reset caches if relevant params change
-        if 'preprocess_config' in params:
-            self._transform = None
-        if 'all_columns' in params or 'wavelength_cols' in params:
-            self._col_indices = None
-        return self
-
-
-def _is_wrapped_model(model):
-    """
-    Check if a model is a CARS/NSGA-II wrapped model.
-
-    These wrappers contain pipelines with StandardScaler whose parameters
-    should be preserved during ensemble CV. When models are wrapped, ensemble
-    methods should use refit_base_models=False to prevent StandardScaler
-    divergence that causes ~0.03 R² loss.
-
-    Parameters
-    ----------
-    model : object
-        A fitted model to check
-
-    Returns
-    -------
-    bool
-        True if the model is a wrapped model that should not be refitted
-    """
-    WRAPPED_TYPES = (
-        'WavelengthSubsetWrapper', 'WavelengthSubsetClassifierWrapper',
-        'GAPreprocessWrapper', 'GAPreprocessClassifierWrapper',
-        'CombinedPreprocessWrapper', 'CombinedPreprocessClassifierWrapper'
-    )
-    return type(model).__name__ in WRAPPED_TYPES
+# The ensemble base-model wrappers are persisted in saved .dasp files, so they live in
+# an importable backend module (pickles must not depend on this script being __main__).
+from spectral_predict.model_wrappers import (  # noqa: E402,F401 - re-exported names
+    CombinedPreprocessClassifierWrapper,
+    CombinedPreprocessWrapper,
+    GAPreprocessClassifierWrapper,
+    GAPreprocessWrapper,
+    WavelengthSubsetClassifierWrapper,
+    WavelengthSubsetWrapper,
+    _build_transform_from_config,
+    _match_wavelengths_normalized,
+    _subset_wavelength_columns,
+)
 
 
 def _infer_task_type_from_y(y) -> "str | None":
@@ -2677,15 +2564,33 @@ def _round_truncation_metadata(refined_config, selected_model_config) -> dict:
     return {k: source.get(k) for k in keys}
 
 
+class _ContamNothingToRemove(ValueError):
+    """Automatic EPO found no contaminant direction; shown as information, not error."""
+
+
+class _ContamCancelled(Exception):
+    """The user cancelled the EPO count confirmation; nothing is changed."""
+
+
 class SpectralPredictApp:
     """Main application window with 6-tab design."""
+
+    # The automatic EPO direction count only suggests; the user confirms before
+    # anything is removed. Set False to apply the suggestion directly.
+    _CONTAM_AUTO_COUNT_ADVISORY = True
 
     def __init__(self, root):
         self.root = root
         self.root.title(f"ASP - Advanced Spectral Prediction  —  BETA {_DASP_VERSION}")
 
-        # Set minimum window size for usability
-        self.root.minsize(1200, 700)
+        # High-DPI: scale the 96-dpi pixel constants and build the named fonts before
+        # any widget is created (no-op scale of 1.0 in a DPI-unaware process).
+        _apply_ui_scale(self.root)
+        self.fonts = _init_named_fonts(self.root)
+
+        # Set minimum window size for usability (clamped so it never exceeds the screen)
+        self.root.minsize(min(_px(1200), self.root.winfo_screenwidth()),
+                          min(_px(700), self.root.winfo_screenheight()))
 
         # Set window size - use zoomed/maximized for better visibility
         try:
@@ -2777,6 +2682,7 @@ class SpectralPredictApp:
         self.loaded_models = []  # List of model dicts from load_model()
         self.prediction_data = None  # DataFrame with new spectral data
         self.prediction_data_type = None  # Data type of prediction data (absorbance/reflectance)
+        self.pred_source_data_type = None  # What the prediction file held (e.g. transmittance)
         self.predictions_df = None  # Results dataframe
         self.predictions_model_map = {}  # Map column names to model metadata
         self.consensus_info = {}  # Store consensus model details for display
@@ -2881,10 +2787,6 @@ class SpectralPredictApp:
         self.ct_equalized_X = None  # Equalized spectra
         self.ct_equalized_sample_ids = None  # Sample IDs with instrument prefixes
 
-        # Transfer Model Registry - persistent storage of built transfer models
-        self.transfer_model_registry = {}  # Dict of model_key -> TransferModel
-        # model_key format: "PrimaryID_SatelliteID_Method"
-
         # Interference Removal Tab (Tab 11) variables - Phase 4: Advanced GUI
         # Tab 11A: Interferent Library Management
         self.interferent_libraries = {}  # Dict of {name: {'wavelengths': arr, 'X': arr, 'metadata': dict}}
@@ -2911,7 +2813,10 @@ class SpectralPredictApp:
                 'method': tk.StringVar(value='covariance'),
                 'n_components': tk.StringVar(value='auto'),  # Replaced window_size with n_components
                 'regularization': tk.StringVar(value='1e-6'),
-                'apply_to_analysis': tk.BooleanVar(value=True)
+                # Read by nothing: the search hand-off is disabled (see the
+                # interference_settings comment at the run_search call). Kept False
+                # and the checkbox disabled so the UI does not promise otherwise.
+                'apply_to_analysis': tk.BooleanVar(value=False)
             }
         }
 
@@ -2931,6 +2836,14 @@ class SpectralPredictApp:
         self.contam_group_paths = {}  # Dict of {label: filepath}
         self.contam_wavelengths = None
         self.contam_results = None  # Analysis results dict
+        # R113: the main dataset as it was before a contaminant correction wrote to
+        # it, and the exact frame that correction wrote (Restore only acts while
+        # self.X is still that frame, so it never brings back an older dataset).
+        self.X_before_contam_correction = None
+        self._contam_X_written = None
+        self._contam_X_fingerprint = None
+        # R114: last corrected spectra (DataFrame) for "Export Corrected Spectra".
+        self.contam_corrected_X = None
         self.contam_method = tk.StringVar(value='Estimated EPO')
         self.contam_threshold = tk.DoubleVar(value=0.15)
         self.contam_n_components = tk.IntVar(value=2)
@@ -3349,7 +3262,6 @@ class SpectralPredictApp:
         # Interference removal methods (Phase 3: Basic integration)
         self.enable_wavelength_exclusion = tk.BooleanVar(value=False)
         self.wavelength_exclude_ranges = tk.StringVar(value="1400-1500, 1900-2000")  # Default moisture bands
-        self.use_msc = tk.BooleanVar(value=False)  # Multiplicative Scatter Correction
         self.use_osc = tk.BooleanVar(value=False)  # Orthogonal Signal Correction
         self.osc_n_components = tk.IntVar(value=2)  # Number of OSC components (default: 2)
 
@@ -4668,26 +4580,17 @@ class SpectralPredictApp:
         # Configure root window
         self.root.configure(bg=self.colors['bg'])
 
-        # Get modern font stack (try Inter, SF Pro, fallback to system fonts)
-        import platform
-        system = platform.system()
-        if system == 'Darwin':  # macOS
-            heading_font = ('SF Pro Display', 'Helvetica Neue', 'Arial')
-            body_font = ('SF Pro Text', 'Helvetica Neue', 'Arial')
-        elif system == 'Windows':
-            heading_font = ('Segoe UI', 'Arial')
-            body_font = ('Segoe UI', 'Arial')
-        else:  # Linux
-            heading_font = ('Inter', 'Ubuntu', 'DejaVu Sans', 'Arial')
-            body_font = ('Inter', 'Ubuntu', 'DejaVu Sans', 'Arial')
+        # Named fonts (one installed family, see _init_named_fonts). Paddings below
+        # are pixels at 96 dpi and go through _px(); font sizes are points and do not.
+        fonts = self.fonts
 
         style = ttk.Style()
 
         # Modern button styles with gradients (simulated with colors)
         # Unified sizing to match accent buttons for visual consistency
         style.configure('Modern.TButton',
-                       font=(body_font, 10),
-                       padding=(15, 10),  # Increased vertical padding for better alignment
+                       font=fonts['body'],
+                       padding=(_px(15), _px(10)),  # Increased vertical padding for better alignment
                        borderwidth=0,
                        relief='flat',
                        foreground=self.colors['text'])
@@ -4698,8 +4601,8 @@ class SpectralPredictApp:
                            ('!disabled', self.colors['text'])])
 
         style.configure('Accent.TButton',
-                       font=(body_font, 11, 'bold'),
-                       padding=(20, 12),
+                       font=fonts['strong'],
+                       padding=(_px(20), _px(12)),
                        background='#0078D4',  # Explicit blue background
                        foreground='#FFFFFF',  # Explicit white text
                        borderwidth=1,
@@ -4712,8 +4615,8 @@ class SpectralPredictApp:
 
         # Default style for all ttk.Button widgets (IMPORTANT: prevents invisible text)
         style.configure('TButton',
-                       font=(body_font, 10),
-                       padding=(15, 8),
+                       font=fonts['body'],
+                       padding=(_px(15), _px(8)),
                        borderwidth=1,  # Add border for visibility
                        relief='solid',
                        foreground='#000000',  # Explicit black text
@@ -4727,8 +4630,8 @@ class SpectralPredictApp:
 
         # Secondary button style (for less prominent actions)
         style.configure('Secondary.TButton',
-                       font=(body_font, 10),
-                       padding=(12, 6),
+                       font=fonts['body'],
+                       padding=(_px(12), _px(6)),
                        borderwidth=1,
                        relief='solid',
                        foreground=self.colors['text'],
@@ -4749,32 +4652,34 @@ class SpectralPredictApp:
         style.configure('TLabel',
                        background=self.colors['bg'],
                        foreground=self.colors['text'],
-                       font=(body_font, 10))
+                       font=fonts['body'])
+        # Title.TLabel (was 28 pt) has no live users; it shares the title font.
         style.configure('Title.TLabel',
-                       font=(heading_font, 28, 'bold'),
+                       font=fonts['title'],
                        foreground=self.colors['text'],
                        background=self.colors['bg'])
         style.configure('Heading.TLabel',
-                       font=(heading_font, 16, 'bold'),
+                       font=fonts['title'],
                        foreground=self.colors['text'],
                        background=self.colors['bg'])
         style.configure('Subheading.TLabel',
-                       font=(heading_font, 12, 'bold'),
+                       font=fonts['heading'],
                        foreground=self.colors['accent'],
                        background=self.colors['bg'])
         style.configure('Caption.TLabel',
-                       font=(body_font, 9),
+                       font=fonts['small'],
                        foreground=self.colors['text_light'],
                        background=self.colors['bg'])
+        # SidebarLabel.TLabel (was 11 pt) has no live users; it uses the body font.
         style.configure('SidebarLabel.TLabel',
-                       font=(body_font, 11),
+                       font=fonts['body'],
                        foreground=self.colors['text_inverse'],
                        background=self.colors['sidebar'],
-                       padding=(15, 10))
+                       padding=(_px(15), _px(10)))
         style.configure('CardLabel.TLabel',
                        background=self.colors['card_bg'],
                        foreground=self.colors['text'],
-                       font=(body_font, 10))
+                       font=fonts['body'])
 
         # Notebook styling - Default style for subtabs (keep tabs visible)
         style.configure('TNotebook',
@@ -4782,8 +4687,8 @@ class SpectralPredictApp:
                        borderwidth=0,
                        tabmargins=[0, 0, 0, 0])
         style.configure('TNotebook.Tab',
-                       font=(body_font, 10),
-                       padding=(12, 6),
+                       font=fonts['body'],
+                       padding=(_px(12), _px(6)),
                        borderwidth=0)
         style.map('TNotebook.Tab',
                  background=[('selected', self.colors['bg']),
@@ -4818,7 +4723,7 @@ class SpectralPredictApp:
         style.configure('TLabelframe.Label',
                        background=self.colors['bg'],
                        foreground=self.colors['text'],
-                       font=(body_font, 11, 'bold'))
+                       font=fonts['strong'])
 
         # Combobox styling - add stronger borders for better definition
         style.configure('TCombobox',
@@ -4838,79 +4743,78 @@ class SpectralPredictApp:
         style.configure('TCheckbutton',
                        background=self.colors['bg'],
                        foreground=self.colors['text'],
-                       font=(body_font, 10))
+                       font=fonts['body'])
 
         # Radiobutton styling
         style.configure('TRadiobutton',
                        background=self.colors['bg'],
                        foreground=self.colors['text'],
-                       font=(body_font, 10))
+                       font=fonts['body'])
+
+        # Treeview row height. Tk 9 sets it once, at style init, from the row font
+        # (linespace + 2) and does not re-sync it later; Tk 8.6 (the DASP_BUILD_PYTHON=312
+        # rollback build) fixes it at 20 px whatever the font, so once the process is DPI
+        # aware the rows clip at 125% and above. Setting it explicitly from the row font
+        # gives the same rows on both Tk versions (_px(2) is 1-2 px more than Tk 9's own
+        # value at 150%/200%, which is harmless).
+        # INVARIANT: Treeview tag fonts (tag_configure(font=...)) must not be taller than
+        # TkDefaultFont, or their rows clip; size this from the tallest font if that changes.
+        row_font = tkfont.nametofont('TkDefaultFont', root=self.root)
+        style.configure('Treeview', rowheight=row_font.metrics('linespace') + _px(2))
 
     def _create_top_bar(self):
         """Create a beautiful top bar with app title and theme switcher."""
-        # Get platform-appropriate font
-        import platform
-        system = platform.system()
-        if system == 'Darwin':  # macOS
-            title_font = ('SF Pro Display', 32, 'bold')
-            subtitle_font = ('SF Pro Text', 12)
-            label_font = ('SF Pro Text', 11)
-            button_font = ('SF Pro Text', 10, 'bold')
-        elif system == 'Windows':
-            title_font = ('Segoe UI', 32, 'bold')
-            subtitle_font = ('Segoe UI', 12)
-            label_font = ('Segoe UI', 11)
-            button_font = ('Segoe UI', 10, 'bold')
-        else:  # Linux
-            title_font = ('Ubuntu', 32, 'bold')
-            subtitle_font = ('Ubuntu', 12)
-            label_font = ('Ubuntu', 11)
-            button_font = ('Ubuntu', 10, 'bold')
+        # Sizes here have no named-font equivalent, so they reuse the resolved family.
+        ui_family = self.fonts['body'].cget('family')
+        label_font = (ui_family, 11)
+        button_font = (ui_family, 10, 'bold')
 
-        top_bar = tk.Frame(self.root, bg=self.colors['bg'], height=70)
-        top_bar.pack(fill='x', padx=10, pady=(10, 5))
+        # Fixed-height bar (pack_propagate off), so its pixel height must be scaled.
+        top_bar = tk.Frame(self.root, bg=self.colors['bg'], height=_px(70))
+        top_bar.pack(fill='x', padx=_px(10), pady=(_px(10), _px(5)))
         top_bar.pack_propagate(False)
 
         # Left side: Logo and title (compact layout)
         title_frame = tk.Frame(top_bar, bg=self.colors['bg'])
         title_frame.pack(side='left', fill='y')
 
-        # ASP Logo - Rainbow cobra with spectral bar (reduced to 75px)
-        self.logo_label = self._create_logo_label(title_frame, size=75)
-        self.logo_label.pack(side='left', padx=(0, 10), pady=0)
+        # ASP Logo - Rainbow cobra with spectral bar (reduced to 75px at 96 dpi)
+        self.logo_label = self._create_logo_label(title_frame, size=_px(75))
+        self.logo_label.pack(side='left', padx=(0, _px(10)), pady=0)
 
         # "Advanced Spectral Prediction" text to the right of logo (reduced font)
         text_frame = tk.Frame(title_frame, bg=self.colors['bg'])
-        text_frame.pack(side='left', fill='y', pady=15)
+        text_frame.pack(side='left', fill='y', pady=_px(15))
 
         tk.Label(text_frame,
                 text="Advanced Spectral Prediction",
-                font=('Segoe UI', 16, 'bold'),
+                font=self.fonts['title'],
                 fg=self.colors['text'],
-                bg=self.colors['bg']).pack(side='left', anchor='s', pady=(0, 2))
+                bg=self.colors['bg']).pack(side='left', anchor='s', pady=(0, _px(2)))
 
         # Subtle amber BETA marker + muted version (same row, baseline-aligned)
         tk.Label(text_frame,
                 text="BETA",
-                font=('Segoe UI', 9, 'bold'),
+                font=(ui_family, 9, 'bold'),
                 fg='#D97706',  # amber-600 — attractive but unobtrusive
-                bg=self.colors['bg']).pack(side='left', padx=(10, 4), anchor='s', pady=(0, 5))
+                bg=self.colors['bg']).pack(side='left', padx=(_px(10), _px(4)), anchor='s',
+                                           pady=(0, _px(5)))
 
         tk.Label(text_frame,
                 text=f"v{_DASP_VERSION}",
-                font=('Segoe UI', 9),
+                font=self.fonts['small'],
                 fg=self.colors['text_light'],
-                bg=self.colors['bg']).pack(side='left', anchor='s', pady=(0, 5))
+                bg=self.colors['bg']).pack(side='left', anchor='s', pady=(0, _px(5)))
 
         # Right side: Theme switcher with beautiful buttons
         theme_frame = tk.Frame(top_bar, bg=self.colors['bg'])
-        theme_frame.pack(side='right', fill='y', padx=10)
+        theme_frame.pack(side='right', fill='y', padx=_px(10))
 
         tk.Label(theme_frame,
                 text="Theme:",
                 font=label_font,
                 fg=self.colors['text_light'],
-                bg=self.colors['bg']).pack(side='left', padx=(0, 10))
+                bg=self.colors['bg']).pack(side='left', padx=(0, _px(10)))
 
         # Create theme buttons with hover effects (compact)
         self.theme_buttons = {}
@@ -4923,11 +4827,11 @@ class SpectralPredictApp:
                           activebackground=theme_data['accent_dark'],
                           relief='flat',
                           borderwidth=0,
-                          padx=10,
-                          pady=4,
+                          padx=_px(10),
+                          pady=_px(4),
                           cursor='hand2',
                           command=lambda tn=theme_name: self._switch_theme(tn))
-            btn.pack(side='left', padx=2)
+            btn.pack(side='left', padx=_px(2))
 
             # Add hover effect
             def on_enter(e, b=btn, td=theme_data):
@@ -4942,8 +4846,8 @@ class SpectralPredictApp:
             self.theme_buttons[theme_name] = btn
 
         # Add a stronger separator line for better visual definition
-        separator = tk.Frame(self.root, bg=self.colors['border'], height=3)
-        separator.pack(fill='x', padx=20)
+        separator = tk.Frame(self.root, bg=self.colors['border'], height=_px(3))
+        separator.pack(fill='x', padx=_px(20))
 
     def _switch_theme(self, theme_name):
         """Switch to a new theme with smooth transition effect."""
@@ -5055,15 +4959,7 @@ class SpectralPredictApp:
 
     def _show_theme_notification(self, theme_name):
         """Show a beautiful notification when theme changes."""
-        # Get platform-appropriate font
-        import platform
-        system = platform.system()
-        if system == 'Darwin':  # macOS
-            notif_font = ('SF Pro Text', 11)
-        elif system == 'Windows':
-            notif_font = ('Segoe UI', 11)
-        else:  # Linux
-            notif_font = ('Ubuntu', 11)
+        notif_font = (self.fonts['body'].cget('family'), 11)
 
         # Create a temporary notification label
         notif = tk.Label(self.root,
@@ -5071,8 +4967,8 @@ class SpectralPredictApp:
                         font=notif_font,
                         fg=self.colors['text_inverse'],
                         bg=self.colors['accent'],
-                        padx=20,
-                        pady=10)
+                        padx=_px(20),
+                        pady=_px(10))
         notif.place(relx=0.5, rely=0.95, anchor='center')
 
         # Fade out after 2 seconds
@@ -5095,20 +4991,10 @@ class SpectralPredictApp:
         when background and text are the same color. tk.Button provides reliable
         cross-platform color control for accent-colored buttons.
         """
-        # Get platform-appropriate font
-        import platform
-        system = platform.system()
-        if system == 'Darwin':
-            button_font = ('SF Pro Text', 11, 'bold')
-        elif system == 'Windows':
-            button_font = ('Segoe UI', 11, 'bold')
-        else:
-            button_font = ('Ubuntu', 11, 'bold')
-
         btn = tk.Button(parent,
                        text=text,
                        command=command,
-                       font=button_font,
+                       font=self.fonts['strong'],
                        fg=self.colors['text_inverse'],  # White text
                        bg=self.colors['accent'],  # Colored background
                        activeforeground=self.colors['text_inverse'],
@@ -5116,8 +5002,8 @@ class SpectralPredictApp:
                        disabledforeground=self.colors['text_inverse'],  # Keep white text when disabled
                        relief='flat',
                        borderwidth=0,
-                       padx=20,
-                       pady=12,
+                       padx=_px(20),
+                       pady=_px(12),
                        cursor='hand2',
                        **kwargs)
 
@@ -5141,11 +5027,16 @@ class SpectralPredictApp:
 
         Uses the beautiful rainbow cobra logo with spectral bar and UV/IR label.
         Automatically removes white background for transparency.
+
+        ``size`` is in screen pixels (already display-scaled). The text fallback's
+        font is in points, which Tk scales itself, so its size comes from the 96-dpi
+        base to avoid scaling twice.
         """
+        text_pt = max(1, int(round(size / _UI_SCALE)) // 3)
         if not HAS_PIL:
             # Fallback to text if PIL not available
             logo_label = tk.Label(parent, text="ASP",
-                                 font=('Arial', size//3, 'bold'),
+                                 font=('Arial', text_pt, 'bold'),
                                  fg=self.colors['accent'], bg=self.colors['bg'])
             return logo_label
 
@@ -5158,7 +5049,7 @@ class SpectralPredictApp:
                 if not logo_path.exists():
                     # Fallback to text
                     logo_label = tk.Label(parent, text="ASP",
-                                         font=('Arial', size//3, 'bold'),
+                                         font=('Arial', text_pt, 'bold'),
                                          fg=self.colors['accent'], bg=self.colors['bg'])
                     return logo_label
 
@@ -5182,7 +5073,7 @@ class SpectralPredictApp:
         except Exception as e:
             # Fallback to text if image loading fails
             logo_label = tk.Label(parent, text="ASP",
-                                 font=('Arial', size//3, 'bold'),
+                                 font=('Arial', text_pt, 'bold'),
                                  fg=self.colors['accent'], bg=self.colors['bg'])
             return logo_label
 
@@ -9345,7 +9236,7 @@ class SpectralPredictApp:
 
         dialog = tk.Toplevel(self.root)
         dialog.title("Peak Calculator")
-        dialog.geometry("520x720")
+        dialog.geometry(_px_geometry("520x720", self.root))
         dialog.configure(bg='#f0f0f0')
         dialog.transient(self.root)
         dialog.resizable(True, True)
@@ -10262,12 +10153,20 @@ class SpectralPredictApp:
             return
 
         # Validate absorbance
+        # 'absorbance' includes the absorbance-equivalent OPUS log-reflectance and
+        # ATR blocks; Kubelka-Munk, Raman etc. load as 'other' and are refused here.
         if hasattr(self, 'current_data_type') and self.current_data_type.get() != "absorbance":
+            current = self.current_data_type.get()
+            hint = (
+                "Convert in Data Management first."
+                if _is_convertible_data_type(current)
+                else "This data type cannot be converted to absorbance."
+            )
             messagebox.showwarning(
                 "Wrong Data Type",
                 "Auto Bone FTIR requires absorbance data.\n"
                 "Current data type is "
-                f"{self.current_data_type.get()}. Convert in Data Management first.",
+                f"{_data_type_label(current, getattr(self, 'source_data_type', None))}. {hint}",
             )
             return
 
@@ -12066,6 +11965,7 @@ class SpectralPredictApp:
         importance_combo = ttk.Combobox(self.smart_preproc_options_frame, textvariable=self.smart_preprocess_importance,
                                      values=["cars_tree", "model_specific", "lightgbm", "vip"], state="readonly", width=14)
         importance_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
+        self.smart_importance_combo = importance_combo
 
         # Importance method descriptions
         self.importance_desc_label = ttk.Label(self.smart_preproc_options_frame,
@@ -17314,6 +17214,7 @@ class SpectralPredictApp:
     def _update_one_class_controls_visibility(self):
         """Show/hide one-class specific controls based on task type."""
         task_type = self.task_type.get()
+        self._refresh_smart_importance_state()
         if task_type == "one_class":
             # Ensure the multi-class panels are hidden.
             if hasattr(self, 'mc_model_config_frame'):
@@ -19174,6 +19075,7 @@ class SpectralPredictApp:
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
                 self._apply_x_unit_metadata(metadata)
+                self._show_import_warnings(metadata, "ASCII")
 
                 if self.reference_file.get():
                     # Load reference data and align
@@ -19212,6 +19114,7 @@ class SpectralPredictApp:
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
                 self._apply_x_unit_metadata(metadata)
+                self._show_import_warnings(metadata, "OPUS")
 
                 if self.reference_file.get():
                     # Load reference data and align
@@ -19250,6 +19153,7 @@ class SpectralPredictApp:
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
                 self._apply_x_unit_metadata(metadata)
+                self._show_import_warnings(metadata, "PerkinElmer")
 
                 if self.reference_file.get():
                     # Load reference data and align
@@ -19588,7 +19492,7 @@ class SpectralPredictApp:
             # Create a custom dialog with scrollable text
             dialog = tk.Toplevel(self.root)
             dialog.title("Data Alignment Report")
-            dialog.geometry("600x500")
+            dialog.geometry(_px_geometry("600x500", self.root))
 
             # Add text widget with scrollbar
             frame = ttk.Frame(dialog, padding=10)
@@ -19903,18 +19807,22 @@ class SpectralPredictApp:
         if self.X is None:
             return
 
-        # Update the conversion button text based on current selection
+        # Update the conversion button text based on current selection (the radios only
+        # offer reflectance/absorbance, so an override of an 'other' load enables it)
         current = self.current_data_type.get()
         if current == "reflectance":
-            self.convert_data_button.config(text="Convert to Absorbance")
+            self.convert_data_button.config(text="Convert to Absorbance", state='normal')
+        elif current == "absorbance":
+            self.convert_data_button.config(text="Convert to Reflectance", state='normal')
         else:
-            self.convert_data_button.config(text="Convert to Reflectance")
+            self.convert_data_button.config(text="No conversion", state='disabled')
 
         # Update status label to show user override
         original = self.original_data_type.get()
         if current != original:
+            original_label = _data_type_label(original, self.source_data_type)
             self.data_type_status_label.config(
-                text=f"[!]  User override: Treating as {current.capitalize()} (originally {original.capitalize()})",
+                text=f"[!]  User override: Treating as {current.capitalize()} (originally {original_label})",
                 foreground=self.colors['warning']
             )
         else:
@@ -20052,6 +19960,14 @@ class SpectralPredictApp:
 
         # Determine current and target types
         current_type = self.current_data_type.get()
+        if not _is_convertible_data_type(current_type):
+            messagebox.showwarning(
+                "No Conversion",
+                f"{_data_type_label(current_type, self.source_data_type)} data has no "
+                "reflectance/absorbance conversion.\n\nIf the data really is reflectance "
+                "or absorbance, select that type first.",
+            )
+            return
         target_type = "absorbance" if current_type == "reflectance" else "reflectance"
 
         # Confirm with user if this seems unusual
@@ -20148,6 +20064,47 @@ class SpectralPredictApp:
         self.x_unit_confidence = metadata.get('x_unit_confidence', 50.0)
         self.x_unit_detection_method = metadata.get('x_unit_detection_method', 'default')
         self.x_unit_has_been_converted = False
+
+    def _convert_with_source(self, data, from_type, to_type, source_data_type, value_scale=1.0):
+        """Convert data that is not the main tab's dataset.
+
+        ``_convert_data_type`` reads the main tab's ``source_data_type`` (transmittance
+        formula) and ``data_value_scale`` (percent reflectance); other datasets must use
+        their own, so both are swapped in and restored.
+
+        Returns:
+            ``(converted, value_scale)``: the scale after conversion (the converter may
+            detect percent reflectance); the caller keeps it with its dataset so that a
+            percent-reflectance round trip returns percent values.
+        """
+        saved_scale = self.data_value_scale
+        saved_source = self.source_data_type
+        try:
+            self.data_value_scale = value_scale
+            self.source_data_type = source_data_type
+            converted = self._convert_data_type(data, from_type, to_type)
+            return converted, self.data_value_scale
+        finally:
+            self.data_value_scale = saved_scale
+            self.source_data_type = saved_source
+
+    def _show_import_warnings(self, metadata, source_label):
+        """Show a reader's ``metadata['import_warnings']`` in a dialog.
+
+        Folder readers (OPUS, ASCII, PerkinElmer) collect problems the user must see,
+        such as single-channel OPUS blocks or ambiguous x units; warnings.warn and
+        print output never reach the GUI.
+        """
+        messages = [str(m) for m in (metadata or {}).get('import_warnings') or []]
+        if not messages:
+            return
+        print(f"[!] {source_label} import warnings:")
+        for message in messages:
+            print(f"    - {message}")
+        messagebox.showwarning(
+            f"{source_label} import warnings",
+            "\n\n".join(messages),
+        )
 
     def _get_spectral_xlabel(self) -> str:
         """Return the x-axis label for spectral plots based on current x-unit."""
@@ -20323,12 +20280,15 @@ class SpectralPredictApp:
             color = self.colors['warning']
 
         # Update status label
-        status_text = f"Detected: {data_type.capitalize()} ({conf_str} confidence: {confidence:.0f}%)"
+        type_label = _data_type_label(data_type, self.source_data_type)
+        status_text = f"Detected: {type_label} ({conf_str} confidence: {confidence:.0f}%)"
         if confidence < 70:
             status_text += " [!]"
         extra_notes = []
         if self.source_data_type == "transmittance":
             extra_notes.append("OPUS transmittance")
+        elif self.source_data_type in ("sample", "reference"):
+            extra_notes.append("OPUS single-channel: raw intensities")
         if self.data_value_scale == 100.0:
             extra_notes.append("% reflectance")
         if extra_notes:
@@ -20337,8 +20297,11 @@ class SpectralPredictApp:
         self.data_type_status_label.config(text=status_text, foreground=color)
 
         # Update button text
-        opposite_type = "Absorbance" if data_type == "reflectance" else "Reflectance"
-        self.convert_data_button.config(text=f"Convert to {opposite_type}", state='normal')
+        if _is_convertible_data_type(data_type):
+            opposite_type = "Absorbance" if data_type == "reflectance" else "Reflectance"
+            self.convert_data_button.config(text=f"Convert to {opposite_type}", state='normal')
+        else:
+            self.convert_data_button.config(text="No conversion", state='disabled')
 
         # Enable radio buttons for manual override
         self.reflectance_radio.config(state='normal')
@@ -20380,7 +20343,10 @@ class SpectralPredictApp:
         if self.data_has_been_converted:
             status_text = f"Current: {data_type.capitalize()} (converted from {self.original_data_type.get()})"
         else:
-            status_text = f"Detected: {data_type.capitalize()} ({conf_str} confidence)"
+            status_text = (
+                f"Detected: {_data_type_label(data_type, self.source_data_type)} "
+                f"({conf_str} confidence)"
+            )
 
         color = self.colors.get('success', 'green') if confidence >= 70 else self.colors.get('warning', 'orange')
         self.dm_data_type_label.config(text=status_text, foreground=color)
@@ -21506,7 +21472,7 @@ class SpectralPredictApp:
         """
         if self.source_data_type == "transmittance" and self.current_data_type.get() == "reflectance" and not self.data_has_been_converted:
             return "Transmittance"
-        return self.current_data_type.get().capitalize()
+        return _data_type_label(self.current_data_type.get(), self.source_data_type)
 
     def _generate_plots(self):
         """Generate spectral plots in the plot notebook."""
@@ -23656,6 +23622,25 @@ class SpectralPredictApp:
         else:
             self.tpe_preproc_options_frame.grid_remove()
 
+    def _refresh_smart_importance_state(self):
+        """Grey out the discovery importance dropdown for one-class (QW6).
+
+        One-class discovery never computes importance: the initial scan skips it
+        and the per-model expansion needs models_to_test, which the one-class
+        search does not pass. So the dropdown would have no effect.
+        """
+        combo = getattr(self, 'smart_importance_combo', None)
+        if combo is None:
+            return
+        if self.task_type.get() == 'one_class':
+            combo.config(state='disabled')
+            if hasattr(self, 'importance_desc_label'):
+                self.importance_desc_label.config(
+                    text="Not used for one-class: one-class discovery computes no importance")
+        else:
+            combo.config(state='readonly')
+            self._update_importance_description()
+
     def _update_importance_description(self, event=None):
         """Update importance method description label based on selection."""
         method = self.smart_preprocess_importance.get()
@@ -25127,15 +25112,19 @@ class SpectralPredictApp:
                     pipeline.fit(X_train, y_train)  # Wrapper handles preprocessing internally
 
                 elif wavelength_subset is not None and shared_prep is None:
-                    # Legacy preprocessing names with wavelength selection
-                    # Subset X_train to selected wavelengths and wrap model
-                    X_train_subset = X_train[wavelength_subset]
-                    pipeline.fit(X_train_subset, y_train)
+                    # Legacy preprocessing names with wavelength selection: the wrapper
+                    # subsets (by name, or by position for a full-width array) in both
+                    # fit and predict, so a clone refits exactly like this fit.
                     # Use classifier wrapper for classification tasks to expose predict_proba and classes_
-                    if task_type == 'classification':
-                        pipeline = WavelengthSubsetClassifierWrapper(pipeline, wavelength_subset)
-                    else:
-                        pipeline = WavelengthSubsetWrapper(pipeline, wavelength_subset)
+                    wrapper_cls = (
+                        WavelengthSubsetClassifierWrapper
+                        if task_type == "classification"
+                        else WavelengthSubsetWrapper
+                    )
+                    pipeline = wrapper_cls(
+                        pipeline, wavelength_subset, all_columns=list(X_train.columns)
+                    )
+                    pipeline.fit(X_train, y_train)
                 else:
                     # Fit on training data (standard path - full spectrum)
                     pipeline.fit(X_train, y_train)
@@ -25380,8 +25369,17 @@ class SpectralPredictApp:
                 self._log_progress(f"RUNNING ENSEMBLE METHODS")
             self._log_progress(f"{'='*70}")
 
-            from spectral_predict.ensemble import create_ensemble
-            from sklearn.model_selection import cross_val_predict
+            if task_type != 'regression':
+                # Every caller should already stop here; this keeps a classification run
+                # (string or numeric class labels) from being fitted as regression.
+                self._log_progress(
+                    f"[!] Ensemble methods support regression only (task: {task_type}); "
+                    f"skipping ensembles."
+                )
+                return None, None
+
+            from spectral_predict.ensemble import create_ensemble, cross_validate_ensembles
+            from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
             # Select models for ensemble based on context
             if is_manual_retrain:
@@ -25427,11 +25425,9 @@ class SpectralPredictApp:
             models = [m[0] for m in reconstructed]
             model_names = [m[1] for m in reconstructed]
 
-            # Detect wrapped models (CARS/NSGA-II) - these should not be refitted during
-            # ensemble CV to avoid StandardScaler divergence that causes ~0.03 R² loss
-            any_wrapped = any(_is_wrapped_model(m) for m in models)
-            if any_wrapped:
-                self._log_progress(f"[*] Detected wrapped models (CARS/NSGA-II) - using original fitted models")
+            # Positional targets for every ensemble fit and CV split. y_filtered keeps the
+            # specimen-ID index; y_filtered[train_idx] is a label lookup under pandas 3.
+            y_arr = np.asarray(y_filtered, dtype=float).ravel()
 
             # NOTE: We do NOT extract preprocessor_configs here because the reconstructed
             # models are already wrapped with preprocessing (GAPreprocessWrapper,
@@ -25460,78 +25456,80 @@ class SpectralPredictApp:
             n_regions = self.ensemble_n_regions.get()
             self._log_progress(f"Number of regions: {n_regions}")
 
+            def _outer_cv(cv_models, cv_names):
+                """Honest ensemble CV: base models refitted inside every outer fold."""
+                n_outer = min(5, len(y_arr))
+                self._log_progress(
+                    f"Cross-validating ensembles ({n_outer}-fold): base models are refitted "
+                    f"on each outer training fold; weights are learned from inner "
+                    f"out-of-fold predictions."
+                )
+                cv_result = cross_validate_ensembles(
+                    cv_models,
+                    cv_names,
+                    X_filtered,
+                    y_arr,
+                    [etype for etype, _ in ensemble_methods],
+                    n_regions=n_regions,
+                    n_splits=n_outer,
+                    inner_cv=5,
+                    random_state=42,
+                )
+                for note in cv_result.notes:
+                    self._log_progress(f"   [CV] {note}")
+                return cv_result
+
+            def _log_excluded(ens):
+                for excluded_name, reason in getattr(ens, "excluded_models_", []) or []:
+                    self._log_progress(
+                        f"   [!] {excluded_name} excluded from this ensemble: its "
+                        f"out-of-fold refit failed ({reason})"
+                    )
+
             # Train and evaluate each ensemble method
             ensemble_results = []
             trained_ensembles = {}
+            cv_result = _outer_cv(models, model_names)
 
             for ensemble_type, ensemble_name in ensemble_methods:
                 try:
                     self._log_progress(f"\n--- Training {ensemble_name} ---")
 
-                    # Create ensemble
+                    if ensemble_type in cv_result.errors:
+                        # No honest CV estimate -> do not offer the ensemble at all.
+                        self._log_progress(
+                            f"[X] {ensemble_name} failed in cross-validation: "
+                            f"{cv_result.errors[ensemble_type]}"
+                        )
+                        continue
+
+                    # Deployed ensemble: full-data base models; weights / meta-model from
+                    # inner out-of-fold refits over all calibration rows.
                     # NOTE: No preprocessor_configs - models already have preprocessing built-in
-                    # For wrapped models (CARS/NSGA-II), disable refitting to preserve scaler stats
                     ensemble = create_ensemble(
                         models=models,
                         model_names=model_names,
                         X=X_filtered,
-                        y=y_filtered,
+                        y=y_arr,
                         ensemble_type=ensemble_type,
                         n_regions=n_regions,
-                        cv=min(5, len(y_filtered)),  # Use 5-fold or less if small dataset
-                        refit_base_models=not any_wrapped,  # False for wrapped models
+                        cv=min(5, len(y_arr)),  # Use 5-fold or less if small dataset
+                        refit_base_models=True,
                     )
+                    _log_excluded(ensemble)
 
-                    # Use cross-validation to get realistic metrics (comparable to RMSECV)
-                    # Without CV, ensemble metrics on training data would be inflated
-                    from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
-                    from sklearn.model_selection import KFold
-                    import numpy as np
-
-                    n_cv_folds = min(5, len(y_filtered))
-                    if n_cv_folds >= 2:
-                        kf = KFold(n_splits=n_cv_folds, shuffle=True, random_state=42)
-                        cv_predictions = np.full(len(y_filtered), np.nan)
-
-                        for train_idx, val_idx in kf.split(X_filtered):
-                            # Re-fit ensemble on CV training fold
-                            # Use iloc for DataFrame row indexing, direct indexing for numpy arrays
-                            if hasattr(X_filtered, 'iloc'):
-                                X_cv_train, X_cv_val = X_filtered.iloc[train_idx], X_filtered.iloc[val_idx]
-                            else:
-                                X_cv_train, X_cv_val = X_filtered[train_idx], X_filtered[val_idx]
-                            y_cv_train = y_filtered[train_idx]
-
-                            cv_ensemble = create_ensemble(
-                                models=models,
-                                model_names=model_names,
-                                X=X_cv_train,
-                                y=y_cv_train,
-                                ensemble_type=ensemble_type,
-                                n_regions=n_regions,
-                                cv=min(5, len(y_cv_train)),
-                                refit_base_models=not any_wrapped,  # False for wrapped models
-                            )
-                            cv_predictions[val_idx] = cv_ensemble.predict(X_cv_val)
-
-                        # Calculate CV metrics (realistic, comparable to individual models)
-                        rmse = np.sqrt(mean_squared_error(y_filtered, cv_predictions))
-                        r2 = r2_score(y_filtered, cv_predictions)
-                        mae = mean_absolute_error(y_filtered, cv_predictions)
-                    else:
-                        # Fallback for very small datasets
-                        ensemble_pred = ensemble.predict(X_filtered)
-                        rmse = np.sqrt(mean_squared_error(y_filtered, ensemble_pred))
-                        r2 = r2_score(y_filtered, ensemble_pred)
-                        mae = mean_absolute_error(y_filtered, ensemble_pred)
+                    cv_predictions = cv_result.predictions[ensemble_type]
+                    rmse = np.sqrt(mean_squared_error(y_arr, cv_predictions))
+                    r2 = r2_score(y_arr, cv_predictions)
+                    mae = mean_absolute_error(y_arr, cv_predictions)
 
                     # Calculate RPD (Ratio of Performance to Deviation)
-                    rpd = np.std(y_filtered) / rmse if rmse > 0 else 0
+                    rpd = np.std(y_arr) / rmse if rmse > 0 else 0
 
                     # Compute calibration metrics (ensemble prediction on training data)
                     cal_predictions = ensemble.predict(X_filtered)
-                    cal_rmse = np.sqrt(mean_squared_error(y_filtered, cal_predictions))
-                    cal_r2 = r2_score(y_filtered, cal_predictions)
+                    cal_rmse = np.sqrt(mean_squared_error(y_arr, cal_predictions))
+                    cal_r2 = r2_score(y_arr, cal_predictions)
 
                     # Compute validation metrics if validation set is available
                     val_rmse = None
@@ -25587,7 +25585,9 @@ class SpectralPredictApp:
                         'r2': r2,              # CV R² (displayed as R²cv)
                         'mae': mae,
                         'rpd': rpd,
-                        'ensemble': ensemble
+                        'ensemble': ensemble,
+                        # Honest out-of-fold predictions (saved for uncertainty intervals)
+                        'cv_predictions': cv_predictions,
                     })
 
                     # Store trained ensemble
@@ -25609,9 +25609,6 @@ class SpectralPredictApp:
                 self._log_progress(f"{'='*70}")
 
                 from spectral_predict.ensemble import select_top_models_quartile_flat
-                from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
-                from sklearn.model_selection import KFold
-                import numpy as np
 
                 quartile_top_n = self.ensemble_quartile_top_n.get()
                 quartile_selection = select_top_models_quartile_flat(
@@ -25653,62 +25650,45 @@ class SpectralPredictApp:
                         q_models = [m[0] for m in quartile_reconstructed]
                         q_model_names = [m[1] for m in quartile_reconstructed]
 
+                        q_cv_result = _outer_cv(q_models, q_model_names)
+
                         # Run same ensemble methods with "(Quartile)" suffix
                         for ensemble_type, ensemble_name in ensemble_methods:
                             quartile_ensemble_name = f"{ensemble_name} (Quartile)"
                             try:
                                 self._log_progress(f"\n--- Training {quartile_ensemble_name} ---")
 
+                                if ensemble_type in q_cv_result.errors:
+                                    self._log_progress(
+                                        f"[X] {quartile_ensemble_name} failed in "
+                                        f"cross-validation: {q_cv_result.errors[ensemble_type]}"
+                                    )
+                                    continue
+
                                 # Create ensemble with quartile-selected models
                                 q_ensemble = create_ensemble(
                                     models=q_models,
                                     model_names=q_model_names,
                                     X=X_filtered,
-                                    y=y_filtered,
+                                    y=y_arr,
                                     ensemble_type=ensemble_type,
                                     n_regions=n_regions,
-                                    cv=min(5, len(y_filtered)),
+                                    cv=min(5, len(y_arr)),
+                                    refit_base_models=True,
                                 )
+                                _log_excluded(q_ensemble)
 
-                                # Use cross-validation for realistic metrics
-                                n_cv_folds = min(5, len(y_filtered))
-                                if n_cv_folds >= 2:
-                                    kf = KFold(n_splits=n_cv_folds, shuffle=True, random_state=42)
-                                    q_cv_predictions = np.full(len(y_filtered), np.nan)
+                                q_cv_predictions = q_cv_result.predictions[ensemble_type]
+                                q_rmse = np.sqrt(mean_squared_error(y_arr, q_cv_predictions))
+                                q_r2 = r2_score(y_arr, q_cv_predictions)
+                                q_mae = mean_absolute_error(y_arr, q_cv_predictions)
 
-                                    for train_idx, val_idx in kf.split(X_filtered):
-                                        if hasattr(X_filtered, 'iloc'):
-                                            X_cv_train, X_cv_val = X_filtered.iloc[train_idx], X_filtered.iloc[val_idx]
-                                        else:
-                                            X_cv_train, X_cv_val = X_filtered[train_idx], X_filtered[val_idx]
-                                        y_cv_train = y_filtered[train_idx]
-
-                                        q_cv_ensemble = create_ensemble(
-                                            models=q_models,
-                                            model_names=q_model_names,
-                                            X=X_cv_train,
-                                            y=y_cv_train,
-                                            ensemble_type=ensemble_type,
-                                            n_regions=n_regions,
-                                            cv=min(5, len(y_cv_train)),
-                                        )
-                                        q_cv_predictions[val_idx] = q_cv_ensemble.predict(X_cv_val)
-
-                                    q_rmse = np.sqrt(mean_squared_error(y_filtered, q_cv_predictions))
-                                    q_r2 = r2_score(y_filtered, q_cv_predictions)
-                                    q_mae = mean_absolute_error(y_filtered, q_cv_predictions)
-                                else:
-                                    q_ensemble_pred = q_ensemble.predict(X_filtered)
-                                    q_rmse = np.sqrt(mean_squared_error(y_filtered, q_ensemble_pred))
-                                    q_r2 = r2_score(y_filtered, q_ensemble_pred)
-                                    q_mae = mean_absolute_error(y_filtered, q_ensemble_pred)
-
-                                q_rpd = np.std(y_filtered) / q_rmse if q_rmse > 0 else 0
+                                q_rpd = np.std(y_arr) / q_rmse if q_rmse > 0 else 0
 
                                 # Compute calibration metrics
                                 q_cal_predictions = q_ensemble.predict(X_filtered)
-                                q_cal_rmse = np.sqrt(mean_squared_error(y_filtered, q_cal_predictions))
-                                q_cal_r2 = r2_score(y_filtered, q_cal_predictions)
+                                q_cal_rmse = np.sqrt(mean_squared_error(y_arr, q_cal_predictions))
+                                q_cal_r2 = r2_score(y_arr, q_cal_predictions)
 
                                 self._log_progress(f"> {quartile_ensemble_name} Results:")
                                 self._log_progress(f"   RMSE:   {q_cal_rmse:.4f} (cal)")
@@ -25728,7 +25708,8 @@ class SpectralPredictApp:
                                     'r2': q_r2,
                                     'mae': q_mae,
                                     'rpd': q_rpd,
-                                    'ensemble': q_ensemble
+                                    'ensemble': q_ensemble,
+                                    'cv_predictions': q_cv_predictions,
                                 })
 
                                 # Store trained ensemble
@@ -31875,7 +31856,7 @@ For detailed documentation, see the User Guide.
 
             win = tk.Toplevel(self.root)
             win.title("Multi-Class Decision Matrix")
-            win.geometry("980x720")
+            win.geometry(_px_geometry("980x720", self.root))
 
             header = ttk.Frame(win)
             header.pack(fill='x', padx=10, pady=(10, 4))
@@ -32607,21 +32588,10 @@ For detailed documentation, see the User Guide.
             # Set up columns
             self.results_tree['columns'] = columns
 
-            # Configure column widths and anchors
+            # Configure column widths and anchors (see _results_column_width)
+            row_font = tkfont.nametofont('TkDefaultFont', root=self.root)
             for col in columns:
-                # Set column width based on content
-                if col == 'Select':
-                    width = 60
-                elif col in ['Model', 'Preprocess', 'Subset']:
-                    width = 120
-                elif col in ['top_vars']:
-                    width = 200
-                elif col in ['BestRegion', 'BestClass']:
-                    width = 100
-                elif col.startswith('RMSE_') or col.startswith('F1_Class'):
-                    width = 70  # Quartile RMSE or Class F1 columns
-                else:
-                    width = 80
+                width = _results_column_width(col, results_df[col], row_font)
                 self.results_tree.column(col, width=width, anchor='center', stretch=False)
 
             # Store default widths for reset functionality
@@ -32663,8 +32633,8 @@ For detailed documentation, see the User Guide.
             # Widen sorted columns so arrow/superscript isn't clipped
             if is_sorted and col in sorted_col_names:
                 cur_width = self.results_tree.column(col, 'width')
-                if cur_width < 200:  # don't widen already-wide columns
-                    self.results_tree.column(col, width=cur_width + 22, stretch=False)
+                if cur_width < _px(200):  # don't widen already-wide columns
+                    self.results_tree.column(col, width=cur_width + _px(22), stretch=False)
 
         # Update sort hint label — prominent blue bar when sorting, subtle hint otherwise
         if hasattr(self, 'sort_hint_label'):
@@ -34489,7 +34459,8 @@ For detailed documentation, see the User Guide.
             imbalance_suffix = _get_imbalance_suffix(
                 self.imbalance_method.get() if self.enable_imbalance_handling.get() else None
             )
-            data_type_suffix = "_abs" if self.current_data_type.get() == "absorbance" else "_ref"
+            data_type_suffix = _data_type_suffix(
+                self.current_data_type.get(), getattr(self, 'source_data_type', None))
             default_name = f"ensemble_{ensemble_type}_{timestamp}{imbalance_suffix}{data_type_suffix}.dasp"
 
             filepath = filedialog.asksaveasfilename(
@@ -34514,17 +34485,10 @@ For detailed documentation, see the User Guide.
                 messagebox.showerror("Error", "Cannot determine wavelengths from training data.")
                 return
 
-            # Determine task type from target column or results
-            task_type = 'regression'  # Default
-            if hasattr(self, 'task_type'):
-                task_type = self.task_type.get()
-            elif hasattr(self, 'y') and self.y is not None:
-                # Infer from data
-                import numpy as np
-                if not pd.api.types.is_numeric_dtype(self.y.dtype):
-                    task_type = 'classification'
-                elif len(self.y.dropna().unique()) < 20:
-                    task_type = 'classification'
+            # GUI ensembles are regression-only (_train_ensembles is never run for
+            # classification). Reading the task radio here saved 'auto' when it was left
+            # on auto-detect, which also dropped the CV residuals below.
+            task_type = "regression"
 
             # Get preprocessing information from results DataFrame if available
             preprocessing = 'unknown'
@@ -34560,20 +34524,27 @@ For detailed documentation, see the User Guide.
                 X_train = self.ensemble_X.values
                 self._log_progress(f"Including applicability domain data ({X_train.shape[0]} samples)")
 
-            # Get CV data if available (from ensemble predictions)
+            # CV data for uncertainty: the honest out-of-fold predictions from ensemble
+            # training. Never re-predict the training rows with the deployed ensemble:
+            # those are calibration predictions, and intervals from them are too narrow.
             cv_residuals = None
             cv_predictions = None
             cv_actuals = None
-            if hasattr(self, 'ensemble_y') and self.ensemble_y is not None:
-                cv_actuals = self.ensemble_y.values if hasattr(self.ensemble_y, 'values') else np.array(self.ensemble_y)
-                # Get ensemble predictions
-                try:
-                    cv_predictions = ensemble.predict(self.ensemble_X.values if hasattr(self.ensemble_X, 'values') else self.ensemble_X)
-                    if task_type == 'regression':
+            oof_predictions = selected_result.get("cv_predictions")
+            if getattr(self, "ensemble_y", None) is not None and oof_predictions is not None:
+                actuals = np.asarray(self.ensemble_y, dtype=float).ravel()
+                oof_predictions = np.asarray(oof_predictions, dtype=float).ravel()
+                if len(oof_predictions) == len(actuals):
+                    cv_actuals = actuals
+                    cv_predictions = oof_predictions
+                    if task_type == "regression":
                         cv_residuals = cv_predictions - cv_actuals
-                    self._log_progress(f"Including uncertainty estimation data")
-                except Exception as e:
-                    self._log_progress(f"Warning: Could not generate CV predictions: {e}")
+                    self._log_progress("Including out-of-fold CV predictions for uncertainty")
+            if cv_predictions is None:
+                self._log_progress(
+                    "No out-of-fold CV predictions stored for this ensemble (re-train "
+                    "ensembles to include them); uncertainty data omitted"
+                )
 
             # Get preprocessor if available (usually None for ensembles as preprocessing is in pipelines)
             preprocessor = None
@@ -34603,6 +34574,16 @@ For detailed documentation, see the User Guide.
                 # Wavelength restriction info (for transparency and reproducibility)
                 'analysis_wl_min': analysis_wl_min_saved,
                 'analysis_wl_max': analysis_wl_max_saved,
+
+                # Ordinate type of the training data (save_ensemble copies these to
+                # every embedded base model)
+                'data_type': self.current_data_type.get(),
+                'source_data_type': getattr(self, 'source_data_type', None),
+                'data_type_converted_from': (
+                    self.original_data_type.get()
+                    if getattr(self, 'data_has_been_converted', False)
+                    else None
+                ),
 
                 # Performance metrics
                 'performance': {
@@ -35632,8 +35613,9 @@ For detailed documentation, see the User Guide.
 
         dialog = tk.Toplevel(self.root)
         dialog.title("Set Analysis Subset")
-        dialog.geometry("520x500")
-        dialog.resizable(False, False)
+        dialog.geometry(_px_geometry("520x500", self.root))
+        # Resizable: _px_geometry may shrink it to fit a small monitor's work area.
+        dialog.resizable(True, True)
         dialog.transient(self.root)
         dialog.grab_set()
 
@@ -42441,7 +42423,8 @@ External Validation Performance (n={n_val}):
             imbalance_suffix = _get_imbalance_suffix(
                 self.selected_model_config.get('imbalance_method') if self.selected_model_config else None
             )
-            data_type_suffix = "_abs" if self.current_data_type.get() == "absorbance" else "_ref"
+            data_type_suffix = _data_type_suffix(
+                self.current_data_type.get(), getattr(self, 'source_data_type', None))
 
             # Build descriptive filename tokens
             preprocess_token = (self.refined_config.get('preprocessing') or 'raw').lower().replace(' ', '')
@@ -42511,7 +42494,15 @@ External Validation Performance (n={n_val}):
                 'performance': {},
                 'use_full_spectrum_preprocessing': self.refined_config.get('use_full_spectrum_preprocessing', False),
                 'full_wavelengths': self.refined_full_wavelengths,  # All wavelengths for derivative+subset
-                'data_type': self.current_data_type.get(),  # Store data type (absorbance/reflectance)
+                'data_type': self.current_data_type.get(),  # Store data type (absorbance/reflectance/other)
+                # What the file held (e.g. 'transmittance', 'log_reflectance', 'kubelka_munk')
+                # and, if the user converted, the type before conversion.
+                'source_data_type': getattr(self, 'source_data_type', None),
+                'data_type_converted_from': (
+                    self.original_data_type.get()
+                    if getattr(self, 'data_has_been_converted', False)
+                    else None
+                ),
                 'x_unit': self.current_x_unit.get(),  # Store x-axis unit (nm/cm-1)
                 # Validation set metadata
                 'validation_set_enabled': self.validation_enabled.get(),
@@ -42734,7 +42725,7 @@ External Validation Performance (n={n_val}):
         # Simple dialog - just ask for format and export directly
         dialog = tk.Toplevel(self.root)
         dialog.title("Export Code")
-        dialog.geometry("550x520")
+        dialog.geometry(_px_geometry("550x520", self.root))
         dialog.configure(bg='#f0f0f0')
         dialog.transient(self.root)
         dialog.resizable(True, True)
@@ -43519,7 +43510,7 @@ External Validation Performance (n={n_val}):
         # Create preview window
         preview_window = tk.Toplevel(self.root)
         preview_window.title("Wavelength Selection Preview")
-        preview_window.geometry("800x500")
+        preview_window.geometry(_px_geometry("800x500", self.root))
 
         # Info text
         info_text = f"Selected {len(selected_wl)} wavelengths out of {len(available_wl)} available"
@@ -43634,7 +43625,7 @@ External Validation Performance (n={n_val}):
         """Show dialog for custom wavelength range."""
         dialog = tk.Toplevel(self.root)
         dialog.title("Custom Wavelength Range")
-        dialog.geometry("350x180")
+        dialog.geometry(_px_geometry("350x200", self.root))
         dialog.transient(self.root)
         dialog.grab_set()
 
@@ -44262,6 +44253,9 @@ External Validation Performance (n={n_val}):
 
                 # For validation set, use the same data type as the training data
                 self.prediction_data_type = self.current_data_type.get()
+                self.pred_source_data_type = (
+                    None if self.data_has_been_converted else self.source_data_type
+                )
 
                 self.pred_data_status.config(
                     text=f"> Loaded validation set: {n_samples} spectra with {n_wavelengths} wavelengths ({self.prediction_data_type.upper()})"
@@ -44294,6 +44288,7 @@ External Validation Performance (n={n_val}):
             from spectral_predict.io import (read_asd_dir, read_spc_dir, read_csv_spectra,
                                              read_jcamp_dir, read_ascii_spectra)
 
+            pred_metadata = None  # reader metadata, when the reader returns any
             if source == 'directory':
                 # Try to detect file type
                 asd_files = list_asd_files(path)
@@ -44305,24 +44300,24 @@ External Validation Performance (n={n_val}):
                 if asd_files:
                     self.pred_status.config(text="Loading ASD files...")
                     self.root.update()
-                    self.prediction_data, _ = read_asd_dir(str(path))  # Unpack tuple, discard metadata
+                    self.prediction_data, pred_metadata = read_asd_dir(str(path))
                 elif spc_files:
                     self.pred_status.config(text="Loading SPC files...")
                     self.root.update()
-                    self.prediction_data, _ = read_spc_dir(str(path))  # Unpack tuple, discard metadata
+                    self.prediction_data, pred_metadata = read_spc_dir(str(path))
                 elif jcamp_files:
                     self.pred_status.config(text="Loading JCAMP-DX files...")
                     self.root.update()
-                    self.prediction_data, _ = read_jcamp_dir(str(path))  # Unpack tuple, discard metadata
+                    self.prediction_data, pred_metadata = read_jcamp_dir(str(path))
                 elif ascii_files:
                     self.pred_status.config(text="Loading ASCII files...")
                     self.root.update()
-                    self.prediction_data, _ = read_ascii_spectra(str(path))  # Unpack tuple, discard metadata
+                    self.prediction_data, pred_metadata = read_ascii_spectra(str(path))
                 elif list(path.glob("*.spa")) + list(path.glob("*.SPA")) + list(path.glob("*.spg")) + list(path.glob("*.SPG")):
                     self.pred_status.config(text="Loading Omnic files...")
                     self.root.update()
                     from spectral_predict.io import read_omnic_dir
-                    self.prediction_data, _ = read_omnic_dir(str(path))
+                    self.prediction_data, pred_metadata = read_omnic_dir(str(path))
                 else:
                     messagebox.showerror("No Files",
                         "No supported spectral files found in the selected directory.\n"
@@ -44336,21 +44331,25 @@ External Validation Performance (n={n_val}):
                 else:
                     self.pred_status.config(text="Loading CSV file...")
                     self.root.update()
-                    self.prediction_data, _ = read_csv_spectra(str(path))  # Unpack tuple, discard metadata
+                    self.prediction_data, pred_metadata = read_csv_spectra(str(path))
 
             # Update status
             n_samples = len(self.prediction_data)
             n_wavelengths = len(self.prediction_data.columns)
 
-            # Detect data type for prediction data
+            # Data type: the reader's metadata first, value heuristic only as fallback
+            self.pred_source_data_type = None
             try:
-                from spectral_predict.io import detect_spectral_data_type
-                data_type, confidence, _ = detect_spectral_data_type(self.prediction_data)
+                data_type, confidence, source_type = _resolve_loaded_data_type(
+                    pred_metadata, self.prediction_data
+                )
                 self.prediction_data_type = data_type
+                self.pred_source_data_type = source_type
 
                 # Update status to include detected type
                 self.pred_data_status.config(
-                    text=f"> Loaded {n_samples} spectra with {n_wavelengths} wavelengths ({data_type.upper()} detected)"
+                    text=f"> Loaded {n_samples} spectra with {n_wavelengths} wavelengths "
+                         f"({_data_type_label(data_type, source_type).upper()} detected)"
                 )
             except Exception as e:
                 print(f"Could not detect prediction data type: {e}")
@@ -44358,6 +44357,7 @@ External Validation Performance (n={n_val}):
                 self.pred_data_status.config(
                     text=f"> Loaded {n_samples} spectra with {n_wavelengths} wavelengths"
                 )
+            self._show_import_warnings(pred_metadata, "Prediction data")
             # Infer reflectance scale for prediction data
             if self.prediction_data_type == 'reflectance':
                 try:
@@ -44391,7 +44391,9 @@ External Validation Performance (n={n_val}):
         for model_dict in self.loaded_models:
             metadata = model_dict.get('metadata', {})
             dt = metadata.get('data_type')
-            if dt and dt.lower() in ('absorbance', 'reflectance'):
+            # 'other' (e.g. Kubelka-Munk) counts so a mismatch is shown, but
+            # _update_pred_data_type_ui never offers a conversion to or from it.
+            if dt and dt.lower() in ('absorbance', 'reflectance', 'other'):
                 types.add(dt.lower())
 
         if len(types) == 1:
@@ -44412,8 +44414,9 @@ External Validation Performance (n={n_val}):
 
         # Update prediction data type label
         if pred_type:
+            pred_label = _data_type_label(pred_type, getattr(self, 'pred_source_data_type', None))
             self.pred_type_status_label.config(
-                text=f"Prediction data: {pred_type.upper()}",
+                text=f"Prediction data: {pred_label.upper()}",
                 foreground=self.colors.get('text', '#000000'))
         else:
             self.pred_type_status_label.config(
@@ -44424,7 +44427,21 @@ External Validation Performance (n={n_val}):
         self.pred_model_expects_label.config(text=model_text)
 
         # Determine button state and match indicator
-        if pred_type and model_type:
+        if pred_type and not _is_convertible_data_type(pred_type):
+            # e.g. Kubelka-Munk or single-channel data: nothing to convert to
+            self.pred_convert_btn.config(state='disabled', text="Convert")
+            if model_type and model_type != pred_type:
+                self.pred_type_match_label.config(
+                    text="\u26a0 Mismatch", foreground=self.colors.get('warning', '#e67e22'))
+            else:
+                self.pred_type_match_label.config(text="")
+        elif pred_type and model_type and not _is_convertible_data_type(model_type):
+            self.pred_convert_btn.config(state='disabled', text="Convert")
+            self.pred_type_match_label.config(
+                text="\u2713 Match" if pred_type == model_type else "\u26a0 Mismatch",
+                foreground=self.colors.get(
+                    'success' if pred_type == model_type else 'warning', '#e67e22'))
+        elif pred_type and model_type:
             if pred_type == model_type:
                 # Match
                 self.pred_convert_btn.config(state='disabled', text="Convert")
@@ -44463,10 +44480,16 @@ External Validation Performance (n={n_val}):
             messagebox.showerror("Unknown Type",
                 "Cannot convert: prediction data type is unknown.")
             return
+        if not _is_convertible_data_type(current_type):
+            messagebox.showwarning(
+                "No Conversion",
+                f"{_data_type_label(current_type, getattr(self, 'pred_source_data_type', None))} "
+                "data has no reflectance/absorbance conversion.")
+            return
 
         # Determine target type
         model_type, _ = self._get_models_expected_data_type()
-        if model_type and model_type != current_type:
+        if model_type and model_type != current_type and _is_convertible_data_type(model_type):
             target_type = model_type
         else:
             # Toggle to opposite type
@@ -44477,7 +44500,9 @@ External Validation Performance (n={n_val}):
         saved_source = self.source_data_type
         try:
             self.data_value_scale = self.pred_data_value_scale
-            self.source_data_type = None  # Disable transmittance formula
+            # The prediction file's own source type (transmittance formula if the reader
+            # said so), never the main tab's.
+            self.source_data_type = getattr(self, 'pred_source_data_type', None)
             converted = self._convert_data_type(
                 self.prediction_data.values, current_type, target_type)
             # Capture any auto-detected scale change before restoring
@@ -44590,7 +44615,11 @@ External Validation Performance (n={n_val}):
                         model_dict,
                         self.prediction_data,
                         validate_wavelengths=True,
-                        prediction_data_type=self.prediction_data_type
+                        prediction_data_type=self.prediction_data_type,
+                        prediction_source_data_type=(
+                            None if self.pred_data_has_been_converted
+                            else getattr(self, 'pred_source_data_type', None)
+                        ),
                     )
 
                     predictions = pred_result['predictions']
@@ -46403,8 +46432,11 @@ External Validation Performance (n={n_val}):
             return model_dict
 
         if suffix == '.pkl':
+            from spectral_predict.model_wrappers import LegacyWrapperUnpickler
+
+            # A raw pickle may hold a GUI-era wrapper (__main__.GAPreprocessWrapper, ...).
             with open(path, 'rb') as f:
-                model_data = pickle.load(f)
+                model_data = LegacyWrapperUnpickler(f).load()
 
             normalized = self._normalize_legacy_model_dict(model_data, filepath=str(path))
             if normalized is not None:
@@ -46512,179 +46544,6 @@ External Validation Performance (n={n_val}):
     #     self.ct_satellite_instrument_combo['values'] = inst_ids
     #
     #     messagebox.showinfo("Success", f"Loaded {len(inst_ids)} instruments from registry")
-
-    def _refresh_ct_registry(self):
-        """Refresh the transfer model registry view and instruments list."""
-        # Update instruments listbox
-        self.ct_instrument_listbox.delete(0, tk.END)
-        for inst_id in sorted(self.instrument_spectral_data.keys()):
-            self.ct_instrument_listbox.insert(tk.END, inst_id)
-
-        # Update transfer models treeview
-        for item in self.ct_registry_tree.get_children():
-            self.ct_registry_tree.delete(item)
-
-        for model_key, model_data in self.transfer_model_registry.items():
-            primary_id = model_data['primary_id']
-            satellite_id = model_data['satellite_id']
-            method = model_data['method']
-            date_built = model_data['date_built']
-            n_samples = model_data['n_samples']
-
-            self.ct_registry_tree.insert('', 'end', iid=model_key,
-                                        values=(primary_id, satellite_id, method, date_built, n_samples))
-
-        # Update registry combos in sections C and D
-        registry_keys = list(self.transfer_model_registry.keys())
-        if hasattr(self, 'ct_eq_registry_combo'):
-            self.ct_eq_registry_combo['values'] = registry_keys
-        if hasattr(self, 'ct_pred_registry_combo'):
-            self.ct_pred_registry_combo['values'] = registry_keys
-
-    def _load_model_from_registry(self):
-        """Load selected transfer model from registry to current model."""
-        selected = self.ct_registry_tree.selection()
-        if not selected:
-            messagebox.showwarning("Warning", "Please select a transfer model from the registry")
-            return
-
-        model_key = selected[0]
-        model_data = self.transfer_model_registry[model_key]
-
-        self.ct_transfer_model = model_data['model']
-
-        messagebox.showinfo("Success",
-            f"Loaded transfer model from registry:\n"
-            f"Primary: {model_data['primary_id']}\n"
-            f"Satellite: {model_data['satellite_id']}\n"
-            f"Method: {model_data['method'].upper()}")
-
-    def _delete_from_registry(self):
-        """Delete selected transfer model from registry."""
-        selected = self.ct_registry_tree.selection()
-        if not selected:
-            messagebox.showwarning("Warning", "Please select a transfer model to delete")
-            return
-
-        model_key = selected[0]
-        model_data = self.transfer_model_registry[model_key]
-
-        response = messagebox.askyesno("Confirm Delete",
-            f"Delete transfer model?\n\n"
-            f"Primary: {model_data['primary_id']}\n"
-            f"Satellite: {model_data['satellite_id']}\n"
-            f"Method: {model_data['method'].upper()}\n\n"
-            f"This cannot be undone.")
-
-        if response:
-            del self.transfer_model_registry[model_key]
-            self._refresh_ct_registry()
-            messagebox.showinfo("Success", "Transfer model deleted from registry")
-
-    def _import_model_to_registry(self):
-        """Import a transfer model from file into the registry."""
-        if not HAS_CALIBRATION_TRANSFER:
-            messagebox.showerror("Error", "Calibration transfer modules not available")
-            return
-
-        from spectral_predict.calibration_transfer import load_transfer_model
-
-        file_path = filedialog.askopenfilename(
-            title="Select Transfer Model JSON File",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
-        )
-
-        if not file_path:
-            return
-
-        try:
-            # Load the model
-            transfer_model = load_transfer_model(file_path)
-
-            # Try to extract primary/satellite IDs and method from the model
-            # These might be stored as metadata in the model
-            primary_id = getattr(transfer_model, 'primary_id', 'Unknown_Primary')
-            satellite_id = getattr(transfer_model, 'satellite_id', 'Unknown_Satellite')
-            method = transfer_model.method
-
-            # Create registry key
-            import datetime
-            model_key = f"{primary_id}_{satellite_id}_{method}"
-
-            # Check if already exists
-            if model_key in self.transfer_model_registry:
-                response = messagebox.askyesno("Model Exists",
-                    f"A model with key '{model_key}' already exists in the registry.\n\n"
-                    f"Do you want to replace it?")
-                if not response:
-                    return
-
-            # Store in registry
-            self.transfer_model_registry[model_key] = {
-                'model': transfer_model,
-                'primary_id': primary_id,
-                'satellite_id': satellite_id,
-                'method': method,
-                'date_built': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                'n_samples': 0,  # Unknown from loaded file
-                'n_features': 0  # Unknown from loaded file
-            }
-
-            self._refresh_ct_registry()
-
-            messagebox.showinfo("Success",
-                f"Transfer model imported to registry:\n"
-                f"Key: {model_key}")
-
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to import transfer model:\n{str(e)}")
-
-    def _load_ct_eq_from_registry(self):
-        """Load transfer model from registry for file equalization (Section C)."""
-        model_key = self.ct_eq_registry_combo_var.get()
-        if not model_key or model_key not in self.transfer_model_registry:
-            messagebox.showwarning("Warning", "Please select a valid transfer model from the registry")
-            return
-
-        model_data = self.transfer_model_registry[model_key]
-        self.ct_transfer_model = model_data['model']
-
-        messagebox.showinfo("Success",
-            f"Loaded transfer model from registry for file equalization:\n"
-            f"Primary: {model_data['primary_id']}\n"
-            f"Satellite: {model_data['satellite_id']}\n"
-            f"Method: {model_data['method'].upper()}")
-
-    def _load_ct_pred_from_registry(self):
-        """Load transfer model from registry for prediction (Section D)."""
-        model_key = self.ct_pred_registry_combo_var.get()
-        if not model_key or model_key not in self.transfer_model_registry:
-            messagebox.showwarning("Warning", "Please select a valid transfer model from the registry")
-            return
-
-        model_data = self.transfer_model_registry[model_key]
-        self.ct_transfer_model = model_data['model']
-
-        messagebox.showinfo("Success",
-            f"Loaded transfer model from registry for prediction:\n"
-            f"Primary: {model_data['primary_id']}\n"
-            f"Satellite: {model_data['satellite_id']}\n"
-            f"Method: {model_data['method'].upper()}")
-
-    def _on_pred_tm_source_changed(self):
-        """Handle transfer model source change in Section D."""
-        source = self.ct_pred_tm_source_var.get()
-
-        # Hide/show appropriate frames
-        if source == 'registry':
-            self.ct_pred_registry_frame.pack(fill='x', pady=(5, 0))
-            self.ct_pred_load_tm_frame.pack_forget()
-        elif source == 'file':
-            self.ct_pred_registry_frame.pack_forget()
-            self.ct_pred_load_tm_frame.pack(fill='x', pady=(5, 0))
-        else:  # current
-            self.ct_pred_registry_frame.pack_forget()
-            self.ct_pred_load_tm_frame.pack_forget()
 
     def _browse_ct_pred_primary_model(self):
         """Browse for primary calibration model in Section D."""
@@ -47038,412 +46897,6 @@ External Validation Performance (n={n_val}):
     #     except Exception as e:
     #         messagebox.showerror("Error", f"Failed to import from Instrument Lab:\n{str(e)}")
 
-    def _build_ct_transfer_model(self):
-        """Build calibration transfer model (DS or PDS)."""
-        if not HAS_CALIBRATION_TRANSFER:
-            messagebox.showerror("Error", "Calibration transfer modules not available")
-            return
-
-        # VALIDATION: Data Loaded Check
-        if not hasattr(self, 'ct_X_primary_common') or not hasattr(self, 'ct_X_satellite_common'):
-            messagebox.showerror(
-                "No Paired Spectra Loaded",
-                "Please load paired standardization spectra in Section B first."
-            )
-            return
-
-        if self.ct_X_primary_common is None or self.ct_X_satellite_common is None:
-            messagebox.showerror(
-                "No Paired Spectra Loaded",
-                "Please load paired standardization spectra in Section B first."
-            )
-            return
-
-        method = self.ct_method_var.get()
-        primary_id = self.ct_primary_instrument_id.get()
-        satellite_id = self.ct_satellite_instrument_id.get()
-
-        # VALIDATION: Different Instruments Check
-        if primary_id == satellite_id:
-            messagebox.showerror(
-                "Same Instrument Selected",
-                "Primary and satellite instruments must be different for calibration transfer."
-            )
-            return
-
-        try:
-            # --- ROI: optionally clip to region for estimation ---
-            roi_config = self._get_roi_config()
-            roi_meta = {}
-            X_primary_est = self.ct_X_primary_common
-            X_satellite_est = self.ct_X_satellite_common
-            wl_est = self.ct_wavelengths_common
-            if roi_config['enabled']:
-                from spectral_predict.calibration_transfer import clip_wavelengths_to_region
-                X_primary_est, wl_roi, roi_indices = clip_wavelengths_to_region(
-                    X_primary_est, wl_est, roi_config['start'], roi_config['end'])
-                X_satellite_est, _, _ = clip_wavelengths_to_region(
-                    X_satellite_est, wl_est, roi_config['start'], roi_config['end'])
-                roi_meta = {
-                    'enabled': True,
-                    'start': roi_config['start'],
-                    'end': roi_config['end'],
-                    'indices': roi_indices.tolist(),
-                    'n_wavelengths_region': len(roi_indices),
-                    'n_wavelengths_full': len(wl_est),
-                }
-                messagebox.showinfo("ROI",
-                    f"Estimating transfer on region {roi_config['start']:.1f}–{roi_config['end']:.1f} nm\n"
-                    f"({len(roi_indices)} of {len(wl_est)} wavelengths)")
-
-            if method == 'ds':
-                # Build DS transfer model
-                # VALIDATION: DS Ridge Lambda parameter
-                try:
-                    lam = float(self.ct_ds_lambda_var.get())
-                    if lam <= 0 or lam > 100:
-                        messagebox.showerror(
-                            "Invalid Parameter",
-                            f"DS Ridge Lambda must be between 0 and 100.\nYou entered: {lam}"
-                        )
-                        return
-                except ValueError:
-                    messagebox.showerror("Invalid Parameter", "DS Ridge Lambda must be a number.")
-                    return
-                A = estimate_ds(X_primary_est, X_satellite_est, lam=lam)
-
-                # Create TransferModel object
-                from spectral_predict.calibration_transfer import TransferModel
-                meta_ds = {'lambda': lam, 'note': 'DS transfer built in GUI'}
-                if roi_meta:
-                    meta_ds['region_of_interest'] = roi_meta
-                self.ct_transfer_model = TransferModel(
-                    primary_id=primary_id,
-                    satellite_id=satellite_id,
-                    method='ds',
-                    wavelengths_common=self.ct_wavelengths_common,
-                    params={'A': A},
-                    meta=meta_ds
-                )
-
-                info_text = (f"Transfer Method: Direct Standardization (DS)\n"
-                            f"Primary: {primary_id} -> Satellite: {satellite_id}\n"
-                            f"Ridge Lambda: {lam}\n"
-                            f"Matrix Shape: {A.shape}")
-
-            elif method == 'pds':
-                # Build PDS transfer model
-                # VALIDATION: PDS Window parameter
-                try:
-                    window = int(self.ct_pds_window_var.get())
-                    if window < 5 or window > 101:
-                        messagebox.showerror(
-                            "Invalid Parameter",
-                            f"PDS Window must be between 5 and 101.\nYou entered: {window}"
-                        )
-                        return
-                    if window % 2 == 0:
-                        messagebox.showerror(
-                            "Invalid Parameter",
-                            f"PDS Window must be an odd number.\nYou entered: {window} (even)"
-                        )
-                        return
-                except ValueError:
-                    messagebox.showerror("Invalid Parameter", "PDS Window must be an integer.")
-                    return
-                B = estimate_pds(X_primary_est, X_satellite_est, window=window)
-
-                from spectral_predict.calibration_transfer import TransferModel
-                meta_pds = {'note': 'PDS transfer built in GUI'}
-                if roi_meta:
-                    meta_pds['region_of_interest'] = roi_meta
-                self.ct_transfer_model = TransferModel(
-                    primary_id=primary_id,
-                    satellite_id=satellite_id,
-                    method='pds',
-                    wavelengths_common=self.ct_wavelengths_common,
-                    params={'B': B, 'window': window},
-                    meta=meta_pds
-                )
-
-                info_text = (f"Transfer Method: Piecewise Direct Standardization (PDS)\n"
-                            f"Primary: {primary_id} -> Satellite: {satellite_id}\n"
-                            f"Window Size: {window}\n"
-                            f"Coefficient Matrix Shape: {B.shape}")
-
-            elif method == 'tsr':
-                # Build TSR (Transfer Sample Regression) model
-                from spectral_predict.calibration_transfer import estimate_tsr, TransferModel
-                from spectral_predict.sample_selection import kennard_stone
-
-                # Get number of transfer samples (default 12)
-                try:
-                    n_transfer = int(getattr(self, 'ct_tsr_n_samples_var', tk.IntVar(value=12)).get())
-                    if n_transfer < 2:
-                        messagebox.showerror("Invalid Parameter", "Need at least 2 transfer samples")
-                        return
-                    if n_transfer > self.ct_X_primary_common.shape[0]:
-                        messagebox.showerror("Invalid Parameter",
-                            f"Cannot select {n_transfer} samples from {self.ct_X_primary_common.shape[0]} available")
-                        return
-                except (ValueError, AttributeError):
-                    n_transfer = 12  # Default
-
-                # Select transfer samples using Kennard-Stone (on full data for sample selection)
-                transfer_indices = kennard_stone(self.ct_X_primary_common, n_samples=n_transfer)
-
-                # Estimate TSR model (on ROI-clipped data if applicable)
-                tsr_params = estimate_tsr(
-                    X_primary_est,
-                    X_satellite_est,
-                    transfer_indices
-                )
-
-                meta_tsr = {'note': 'TSR transfer built in GUI', 'n_transfer_samples': n_transfer}
-                if roi_meta:
-                    meta_tsr['region_of_interest'] = roi_meta
-                self.ct_transfer_model = TransferModel(
-                    primary_id=primary_id,
-                    satellite_id=satellite_id,
-                    method='tsr',
-                    wavelengths_common=self.ct_wavelengths_common,
-                    params=tsr_params,
-                    meta=meta_tsr
-                )
-
-                info_text = (f"Transfer Method: Transfer Sample Regression (TSR)\n"
-                            f"Primary: {primary_id} -> Satellite: {satellite_id}\n"
-                            f"Transfer Samples: {n_transfer} (Kennard-Stone selection)\n"
-                            f"Mean R²: {tsr_params['mean_r_squared']:.4f}\n"
-                            f"Slope Range: [{tsr_params['slope'].min():.3f}, {tsr_params['slope'].max():.3f}]")
-
-            elif method == 'ctai':
-                # Build CTAI (Affine Invariance) model - NO transfer samples needed!
-                from spectral_predict.calibration_transfer import estimate_ctai, TransferModel
-
-                # Estimate CTAI model
-                ctai_params = estimate_ctai(
-                    X_primary_est,
-                    X_satellite_est
-                )
-
-                meta_ctai = {'note': 'CTAI transfer built in GUI (no standards needed)'}
-                if roi_meta:
-                    meta_ctai['region_of_interest'] = roi_meta
-                self.ct_transfer_model = TransferModel(
-                    primary_id=primary_id,
-                    satellite_id=satellite_id,
-                    method='ctai',
-                    wavelengths_common=self.ct_wavelengths_common,
-                    params=ctai_params,
-                    meta=meta_ctai
-                )
-
-                info_text = (f"Transfer Method: CTAI (Affine Invariance)\n"
-                            f"Primary: {primary_id} -> Satellite: {satellite_id}\n"
-                            f"NO TRANSFER SAMPLES NEEDED >\n"
-                            f"Components: {ctai_params['n_components']}\n"
-                            f"Explained Variance: {ctai_params['explained_variance']:.4f}\n"
-                            f"Reconstruction RMSE: {ctai_params['reconstruction_error']:.6f}")
-
-            elif method == 'jypls-inv':
-                # Build JYPLS-inv (Joint-Y PLS with Inversion) model
-                from spectral_predict.calibration_transfer import estimate_jypls_inv, TransferModel
-                from spectral_predict.sample_selection import kennard_stone
-
-                # Get number of transfer samples
-                try:
-                    n_transfer = int(getattr(self, 'ct_jypls_n_samples_var', tk.IntVar(value=12)).get())
-                    if n_transfer < 5:
-                        messagebox.showerror("Invalid Parameter", "JYPLS-inv needs at least 5 transfer samples")
-                        return
-                    if n_transfer > self.ct_X_primary_common.shape[0]:
-                        messagebox.showerror("Invalid Parameter",
-                            f"Cannot select {n_transfer} samples from {self.ct_X_primary_common.shape[0]} available")
-                        return
-                except (ValueError, AttributeError):
-                    n_transfer = 12  # Default
-
-                # Get PLS components
-                n_comp_str = self.ct_jypls_n_components_var.get()
-                if n_comp_str == 'Auto':
-                    n_components = None  # Auto-select via CV
-                else:
-                    n_components = int(n_comp_str)
-
-                # Select transfer samples using Kennard-Stone
-                transfer_indices = kennard_stone(self.ct_X_primary_common, n_samples=n_transfer)
-
-                # Need Y values for JYPLS-inv - use spectral mean as pseudo-Y
-                # In real applications, user would provide reference values
-                y_transfer = X_primary_est[transfer_indices].mean(axis=1)
-
-                # Estimate JYPLS-inv model (on ROI-clipped data if applicable)
-                jypls_params = estimate_jypls_inv(
-                    X_primary_est,
-                    X_satellite_est,
-                    y_transfer,
-                    transfer_indices,
-                    n_components=n_components
-                )
-
-                meta_jypls = {'note': 'JYPLS-inv transfer built in GUI', 'n_transfer_samples': n_transfer}
-                if roi_meta:
-                    meta_jypls['region_of_interest'] = roi_meta
-                self.ct_transfer_model = TransferModel(
-                    primary_id=primary_id,
-                    satellite_id=satellite_id,
-                    method='jypls-inv',
-                    wavelengths_common=self.ct_wavelengths_common,
-                    params=jypls_params,
-                    meta=meta_jypls
-                )
-
-                info_text = (f"Transfer Method: JYPLS-inv (Joint-Y PLS with Inversion)\n"
-                            f"Primary: {primary_id} -> Satellite: {satellite_id}\n"
-                            f"Transfer Samples: {n_transfer} (Kennard-Stone selection)\n"
-                            f"PLS Components: {jypls_params['n_components']}\n"
-                            f"CV RMSE: {jypls_params['cv_rmse']:.6f}\n"
-                            f"Explained Variance: {jypls_params['explained_variance_ratio']:.4f}")
-
-            elif method == 'nspfce':
-                # Build NS-PFCE (Non-supervised Parameter-Free Calibration Enhancement) model
-                from spectral_predict.calibration_transfer import estimate_nspfce, TransferModel
-
-                # Get NS-PFCE parameters
-                use_wavelength_selection = self.ct_nspfce_use_wavelength_selection_var.get()
-                wavelength_selector = self.ct_nspfce_selector_var.get()
-
-                try:
-                    max_iterations = int(self.ct_nspfce_max_iterations_var.get())
-                    if max_iterations < 10 or max_iterations > 500:
-                        messagebox.showerror(
-                            "Invalid Parameter",
-                            f"NS-PFCE Max Iterations must be between 10 and 500.\nYou entered: {max_iterations}"
-                        )
-                        return
-                except ValueError:
-                    messagebox.showerror("Invalid Parameter", "NS-PFCE Max Iterations must be an integer.")
-                    return
-
-                # Estimate NS-PFCE model (on ROI-clipped data if applicable)
-                # NS-PFCE needs wavelengths array matching the spectral columns
-                wl_for_nspfce = wl_roi if roi_meta else wl_est
-                nspfce_params = estimate_nspfce(
-                    X_primary_est,
-                    X_satellite_est,
-                    wl_for_nspfce,
-                    use_wavelength_selection=use_wavelength_selection,
-                    wavelength_selector=wavelength_selector,
-                    max_iterations=max_iterations
-                )
-
-                meta_nspfce = {
-                    'note': 'NS-PFCE transfer built in GUI',
-                    'use_wavelength_selection': use_wavelength_selection,
-                    'wavelength_selector': wavelength_selector if use_wavelength_selection else 'N/A'
-                }
-                if roi_meta:
-                    meta_nspfce['region_of_interest'] = roi_meta
-                self.ct_transfer_model = TransferModel(
-                    primary_id=primary_id,
-                    satellite_id=satellite_id,
-                    method='nspfce',
-                    wavelengths_common=self.ct_wavelengths_common,
-                    params=nspfce_params,
-                    meta=meta_nspfce
-                )
-
-                # Build info text
-                info_lines = [
-                    f"Transfer Method: NS-PFCE (Non-supervised Parameter-Free)",
-                    f"Primary: {primary_id} -> Satellite: {satellite_id}",
-                    f"Iterations: {nspfce_params['n_iterations']} / {max_iterations}",
-                    f"Converged: {'Yes >' if nspfce_params['converged'] else 'No (max iter reached)'}",
-                ]
-
-                if use_wavelength_selection:
-                    n_selected = len(nspfce_params.get('selected_wavelength_indices', []))
-                    n_total = len(self.ct_wavelengths_common)
-                    info_lines.append(f"Wavelength Selection: {wavelength_selector.upper()}")
-                    info_lines.append(f"Selected Wavelengths: {n_selected} / {n_total} ({100*n_selected/n_total:.1f}%)")
-                else:
-                    info_lines.append(f"Wavelength Selection: Not used")
-
-                if nspfce_params['convergence_history']:
-                    final_error = nspfce_params['convergence_history'][-1]
-                    info_lines.append(f"Final RMSE: {final_error:.6f}")
-
-                info_text = "\n".join(info_lines)
-
-            # Display transfer model info
-            self.ct_transfer_info_text.config(state='normal')
-            self.ct_transfer_info_text.delete('1.0', tk.END)
-            self.ct_transfer_info_text.insert('1.0', info_text)
-            self.ct_transfer_info_text.config(state='disabled')
-
-            # Generate transfer quality plots
-            self._plot_transfer_quality(method)
-
-            # Update active transfer model status
-            self._update_active_transfer_model_status()
-
-            # Save to transfer model registry
-            primary_id = self.ct_primary_instrument_id.get()
-            satellite_id = self.ct_satellite_instrument_id.get()
-            if primary_id and satellite_id:
-                import datetime
-                model_key = f"{primary_id}_{satellite_id}_{method}"
-                # Store model with metadata
-                self.transfer_model_registry[model_key] = {
-                    'model': self.ct_transfer_model,
-                    'primary_id': primary_id,
-                    'satellite_id': satellite_id,
-                    'method': method,
-                    'date_built': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    'n_samples': self.ct_X_primary_common.shape[0] if self.ct_X_primary_common is not None else 0,
-                    'n_features': self.ct_wavelengths_common.shape[0] if self.ct_wavelengths_common is not None else 0
-                }
-
-            messagebox.showinfo("Success",
-                f"{method.upper()} transfer model built successfully\n\n"
-                f"Model saved to registry: {model_key}" if primary_id and satellite_id else
-                f"{method.upper()} transfer model built successfully")
-        except KeyError as e:
-            # Specific handling for missing dictionary keys
-            messagebox.showerror(
-                "Configuration Error",
-                f"Failed to build transfer model - missing expected parameter:\n{str(e)}\n\n"
-                f"This may indicate a version mismatch or incomplete calibration transfer implementation."
-            )
-        except ValueError as e:
-            # Specific handling for validation errors
-            messagebox.showerror(
-                "Data Validation Error",
-                f"Failed to build transfer model due to invalid data:\n{str(e)}\n\n"
-                f"Please check your data for NaN/inf values or ensure data shapes are correct."
-            )
-        except np.linalg.LinAlgError as e:
-            # Specific handling for numerical errors
-            messagebox.showerror(
-                "Numerical Error",
-                f"Failed to build transfer model due to numerical instability:\n{str(e)}\n\n"
-                f"This often occurs with poorly conditioned data. Try:\n"
-                f"- Preprocessing your data (scaling, normalization)\n"
-                f"- Using more samples\n"
-                f"- Checking for duplicate or near-duplicate spectra"
-            )
-        except Exception as e:
-            # Generic fallback for unexpected errors
-            import traceback
-            error_details = traceback.format_exc()
-            print(f"Transfer model build error:\n{error_details}")  # Log to console
-            messagebox.showerror(
-                "Error",
-                f"Failed to build transfer model:\n{str(e)}\n\n"
-                f"Check the console for detailed traceback."
-            )
-
     def _save_ct_transfer_model(self):
         """Save current transfer model to disk."""
         if not HAS_CALIBRATION_TRANSFER:
@@ -47460,7 +46913,8 @@ External Validation Performance (n={n_val}):
 
         try:
             ct_data_type = self.ct_primary_data_type.get() if hasattr(self, 'ct_primary_data_type') else 'reflectance'
-            data_type_suffix = "_abs" if ct_data_type == "absorbance" else "_ref"
+            data_type_suffix = _data_type_suffix(
+                ct_data_type, getattr(self, 'ct_primary_source_data_type', None))
             path_prefix = save_transfer_model(
                 self.ct_transfer_model,
                 directory=directory,
@@ -47744,7 +47198,7 @@ External Validation Performance (n={n_val}):
             self.ct_pred_transfer_model = load_transfer_model(path_prefix)
             messagebox.showinfo("Success",
                 f"Transfer model loaded:\n"
-                f"Method: {self.ct_pred_transfer_model.method.upper()}\n"
+                f"Method: {ct_method_display_name(self.ct_pred_transfer_model.method)}\n"
                 f"Primary: {self.ct_pred_transfer_model.primary_id}\n"
                 f"Satellite: {self.ct_pred_transfer_model.satellite_id}")
         except Exception as e:
@@ -47850,7 +47304,7 @@ External Validation Performance (n={n_val}):
             self.ct_pred_sample_ids = [f"Sample_{i+1}" for i in range(len(y_pred))]
 
             # Display results
-            pred_text = f"Transferred {len(y_pred)} spectra using {self.ct_pred_transfer_model.method.upper()}\n"
+            pred_text = f"Transferred {len(y_pred)} spectra using {ct_method_display_name(self.ct_pred_transfer_model.method)}\n"
             pred_text += f"Predictions (first 10):\n"
             y_pred_arr = np.array(y_pred)
             is_numeric = pd.api.types.is_numeric_dtype(y_pred_arr.dtype)
@@ -47978,11 +47432,13 @@ External Validation Performance (n={n_val}):
             tm = TransferModel.load(filepath)
             self.ct_eq_loaded_transfer_model = tm
 
-            info_text = (f"Loaded Transfer Model:\n"
-                        f"  Primary: {tm.primary_id}\n"
-                        f"  Satellite: {tm.satellite_id}\n"
-                        f"  Method: {tm.method.upper()}\n"
-                        f"  Wavelengths: {len(tm.wavelengths_common)}")
+            info_text = (
+                f"Loaded Transfer Model:\n"
+                f"  Primary: {tm.primary_id}\n"
+                f"  Satellite: {tm.satellite_id}\n"
+                f"  Method: {ct_method_display_name(tm.method)}\n"
+                f"  Wavelengths: {len(tm.wavelengths_common)}"
+            )
 
             self.ct_eq_status_text.config(state='normal')
             self.ct_eq_status_text.delete('1.0', tk.END)
@@ -48094,7 +47550,10 @@ External Validation Performance (n={n_val}):
 
             # Apply transfer transformation
             self.ct_eq_status_text.config(state='normal')
-            self.ct_eq_status_text.insert(tk.END, f"Applying {transfer_model.method.upper()} transformation...\n")
+            self.ct_eq_status_text.insert(
+                tk.END,
+                f"Applying {ct_method_display_name(transfer_model.method)} transformation...\n",
+            )
             self.ct_eq_status_text.config(state='disabled')
             self.root.update()
 
@@ -48252,7 +47711,7 @@ External Validation Performance (n={n_val}):
 
         Shows:
         1. Transfer Quality Plot (3 subplots): Primary, Satellite before, Satellite after
-        2. Transfer Scatter Plot: Primary vs Transferred with R²
+        2. Spectral agreement scatter on the fitting standards with R² (not a validation)
         """
         if not HAS_MATPLOTLIB:
             return
@@ -48262,26 +47721,35 @@ External Validation Performance (n={n_val}):
             for widget in self.ct_transfer_plot_frame.winfo_children():
                 widget.destroy()
 
+            # A model built on a region of interest was fitted on the clipped columns,
+            # so plot (and apply it to) the same columns.
+            X_pri, X_sat, wl_plot = ct_region_arrays(
+                self.ct_X_primary_common,
+                self.ct_X_satellite_common,
+                self.ct_wavelengths_common,
+                getattr(self.ct_transfer_model, 'meta', None),
+            )
+
             # Apply transfer to get transferred spectra
             if method == 'ds':
                 A = self.ct_transfer_model.params['A']
-                X_transferred = apply_ds(self.ct_X_satellite_common, A)
+                X_transferred = apply_ds(X_sat, A)
             elif method == 'pds':
                 B = self.ct_transfer_model.params['B']
                 window = self.ct_transfer_model.params['window']
-                X_transferred = apply_pds(self.ct_X_satellite_common, B, window)
+                X_transferred = apply_pds(X_sat, B, window)
             elif method == 'tsr':
                 from spectral_predict.calibration_transfer import apply_tsr
-                X_transferred = apply_tsr(self.ct_X_satellite_common, self.ct_transfer_model.params)
+                X_transferred = apply_tsr(X_sat, self.ct_transfer_model.params)
             elif method == 'ctai':
                 from spectral_predict.calibration_transfer import apply_ctai
-                X_transferred = apply_ctai(self.ct_X_satellite_common, self.ct_transfer_model.params)
+                X_transferred = apply_ctai(X_sat, self.ct_transfer_model.params)
             elif method == 'jypls-inv':
                 from spectral_predict.calibration_transfer import apply_jypls_inv
-                X_transferred = apply_jypls_inv(self.ct_X_satellite_common, self.ct_transfer_model.params)
+                X_transferred = apply_jypls_inv(X_sat, self.ct_transfer_model.params)
             elif method == 'nspfce':
                 from spectral_predict.calibration_transfer import apply_nspfce
-                X_transferred = apply_nspfce(self.ct_X_satellite_common, self.ct_transfer_model.params)
+                X_transferred = apply_nspfce(X_sat, self.ct_transfer_model.params)
             else:
                 # Unsupported method for plotting
                 return
@@ -48293,20 +47761,18 @@ External Validation Performance (n={n_val}):
             derivative_notebook = ttk.Notebook(self.ct_transfer_plot_frame)
             derivative_notebook.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
+            # Savitzky-Golay window for the derivative tabs; None when the plotted
+            # region is too narrow for any derivative (e.g. an ROI of 1-2 wavelengths).
+            deriv_window = ct_derivative_window(len(wl_plot))
+
             # Helper function to compute derivatives
             def compute_derivative(X, wavelengths, deriv_order):
                 """Compute derivative using Savitzky-Golay filter."""
                 from scipy.signal import savgol_filter
                 if deriv_order == 0:
                     return X
-                # Use window length of 11 and polynomial order 2 (common for NIR)
-                window_length = min(11, len(wavelengths) - 1)
-                if window_length % 2 == 0:
-                    window_length -= 1  # Must be odd
-                if window_length < 5:
-                    window_length = 5
                 X_deriv = np.apply_along_axis(
-                    lambda y: savgol_filter(y, window_length, polyorder=2, deriv=deriv_order),
+                    lambda y: savgol_filter(y, deriv_window, polyorder=2, deriv=deriv_order),
                     axis=1, arr=X
                 )
                 return X_deriv
@@ -48321,8 +47787,8 @@ External Validation Performance (n={n_val}):
                 ax1 = fig.add_subplot(131)
                 primary_mean = np.mean(primary_data, axis=0)
                 primary_std = np.std(primary_data, axis=0)
-                ax1.plot(self.ct_wavelengths_common, primary_mean, 'b-', linewidth=2, label='Mean')
-                ax1.fill_between(self.ct_wavelengths_common,
+                ax1.plot(wl_plot, primary_mean, 'b-', linewidth=2, label='Mean')
+                ax1.fill_between(wl_plot,
                                primary_mean - primary_std,
                                primary_mean + primary_std,
                                alpha=0.3, color='b', label='±1 Std')
@@ -48336,8 +47802,8 @@ External Validation Performance (n={n_val}):
                 ax2 = fig.add_subplot(132)
                 satellite_mean = np.mean(satellite_data, axis=0)
                 satellite_std = np.std(satellite_data, axis=0)
-                ax2.plot(self.ct_wavelengths_common, satellite_mean, 'r-', linewidth=2, label='Mean')
-                ax2.fill_between(self.ct_wavelengths_common,
+                ax2.plot(wl_plot, satellite_mean, 'r-', linewidth=2, label='Mean')
+                ax2.fill_between(wl_plot,
                                satellite_mean - satellite_std,
                                satellite_mean + satellite_std,
                                alpha=0.3, color='r', label='±1 Std')
@@ -48351,8 +47817,8 @@ External Validation Performance (n={n_val}):
                 ax3 = fig.add_subplot(133)
                 trans_mean = np.mean(transferred_data, axis=0)
                 trans_std = np.std(transferred_data, axis=0)
-                ax3.plot(self.ct_wavelengths_common, trans_mean, 'g-', linewidth=2, label='Mean')
-                ax3.fill_between(self.ct_wavelengths_common,
+                ax3.plot(wl_plot, trans_mean, 'g-', linewidth=2, label='Mean')
+                ax3.fill_between(wl_plot,
                                trans_mean - trans_std,
                                trans_mean + trans_std,
                                alpha=0.3, color='g', label='±1 Std')
@@ -48365,21 +47831,12 @@ External Validation Performance (n={n_val}):
                 fig.tight_layout()
                 return fig
 
-            # Compute all derivatives
-            primary_d1 = compute_derivative(self.ct_X_primary_common, self.ct_wavelengths_common, 1)
-            satellite_d1 = compute_derivative(self.ct_X_satellite_common, self.ct_wavelengths_common, 1)
-            transferred_d1 = compute_derivative(X_transferred, self.ct_wavelengths_common, 1)
-
-            primary_d2 = compute_derivative(self.ct_X_primary_common, self.ct_wavelengths_common, 2)
-            satellite_d2 = compute_derivative(self.ct_X_satellite_common, self.ct_wavelengths_common, 2)
-            transferred_d2 = compute_derivative(X_transferred, self.ct_wavelengths_common, 2)
-
-            # Tab 1: Raw spectra
+            # Tab 1: Raw spectra (drawn first so a derivative failure cannot hide it)
             tab_raw = ttk.Frame(derivative_notebook)
             derivative_notebook.add(tab_raw, text='Raw Spectra')
 
             fig_raw = create_comparison_figure(
-                self.ct_X_primary_common, self.ct_X_satellite_common, X_transferred,
+                X_pri, X_sat, X_transferred,
                 self._get_spectral_ylabel(), 'Spectra'
             )
 
@@ -48388,45 +47845,50 @@ External Validation Performance (n={n_val}):
             canvas_raw.get_tk_widget().pack(fill=tk.BOTH, expand=True)
             self._add_plot_export_button(tab_raw, fig_raw, "transfer_quality_raw")
 
-            # Tab 2: 1st derivative
-            tab_d1 = ttk.Frame(derivative_notebook)
-            derivative_notebook.add(tab_d1, text='1st Derivative')
-
-            fig_d1 = create_comparison_figure(
-                primary_d1, satellite_d1, transferred_d1,
-                '1st Derivative', '(1st Derivative)'
-            )
-
-            canvas_d1 = FigureCanvasTkAgg(fig_d1, tab_d1)
-            canvas_d1.draw()
-            canvas_d1.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-            self._add_plot_export_button(tab_d1, fig_d1, "transfer_quality_1st_deriv")
-
-            # Tab 3: 2nd derivative
-            tab_d2 = ttk.Frame(derivative_notebook)
-            derivative_notebook.add(tab_d2, text='2nd Derivative')
-
-            fig_d2 = create_comparison_figure(
-                primary_d2, satellite_d2, transferred_d2,
-                '2nd Derivative', '(2nd Derivative)'
-            )
-
-            canvas_d2 = FigureCanvasTkAgg(fig_d2, tab_d2)
-            canvas_d2.draw()
-            canvas_d2.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-            self._add_plot_export_button(tab_d2, fig_d2, "transfer_quality_2nd_deriv")
+            # Tabs 2-3: derivatives, only when the region is wide enough
+            if deriv_window is None:
+                tab_note = ttk.Frame(derivative_notebook)
+                derivative_notebook.add(tab_note, text='Derivatives')
+                ttk.Label(
+                    tab_note,
+                    text=(f"Derivative plots need at least 3 wavelengths; "
+                          f"this region has {len(wl_plot)}."),
+                ).pack(anchor='w', padx=10, pady=10)
+            else:
+                try:
+                    for order, tab_text, ylabel, suffix, export_name in (
+                        (1, '1st Derivative', '1st Derivative', '(1st Derivative)',
+                         "transfer_quality_1st_deriv"),
+                        (2, '2nd Derivative', '2nd Derivative', '(2nd Derivative)',
+                         "transfer_quality_2nd_deriv"),
+                    ):
+                        tab_d = ttk.Frame(derivative_notebook)
+                        derivative_notebook.add(tab_d, text=tab_text)
+                        fig_d = create_comparison_figure(
+                            compute_derivative(X_pri, wl_plot, order),
+                            compute_derivative(X_sat, wl_plot, order),
+                            compute_derivative(X_transferred, wl_plot, order),
+                            ylabel, suffix,
+                        )
+                        canvas_d = FigureCanvasTkAgg(fig_d, tab_d)
+                        canvas_d.draw()
+                        canvas_d.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+                        self._add_plot_export_button(tab_d, fig_d, export_name)
+                except Exception:
+                    logging.getLogger(__name__).exception("Transfer derivative plots failed")
 
             # === Plot 2: Transfer Scatter Plot ===
             fig2 = Figure(figsize=(7, 6))
             ax = fig2.add_subplot(111)
 
-            # Flatten arrays for scatter plot
-            primary_flat = self.ct_X_primary_common.ravel()
-            transferred_flat = X_transferred.ravel()
-
-            # Calculate R²
-            from sklearn.metrics import r2_score
-            r2 = r2_score(primary_flat, transferred_flat)
+            # Agreement on the standards the transfer was fitted on (resubstitution,
+            # not a validation). For slope/bias only the selected standards were
+            # fitted, so the other loaded rows are left out rather than mixed in.
+            r2, fit_rows = ct_spectral_agreement_on_fit_rows(
+                X_pri, X_transferred, method, self.ct_transfer_model.params
+            )
+            primary_flat = X_pri[fit_rows].ravel()
+            transferred_flat = X_transferred[fit_rows].ravel()
 
             # Scatter plot with alpha for density
             ax.scatter(primary_flat, transferred_flat, alpha=0.3, s=10, edgecolors='none')
@@ -48438,8 +47900,11 @@ External Validation Performance (n={n_val}):
 
             ax.set_xlabel('Primary Spectra Values', fontsize=11)
             ax.set_ylabel('Transferred Satellite Values', fontsize=11)
-            ax.set_title(f'Transfer Quality Scatter Plot (R² = {r2:.4f})',
-                        fontsize=12, fontweight='bold')
+            ax.set_title(
+                f"{CT_AGREEMENT_TITLE}\nR² = {r2:.4f} on the {len(fit_rows)} fitting standards",
+                fontsize=11,
+                fontweight="bold",
+            )
             ax.legend(fontsize=10)
             ax.grid(True, alpha=0.3)
 
@@ -48454,6 +47919,7 @@ External Validation Performance (n={n_val}):
             self._add_plot_export_button(self.ct_transfer_plot_frame, fig2, "transfer_scatter")
 
         except Exception as e:
+            logging.getLogger(__name__).exception("Transfer quality plot failed")
             print(f"Error creating transfer quality plots: {str(e)}")
 
     def _plot_equalization_quality(self, instruments_data, equalized_data, common_grid):
@@ -48672,6 +48138,12 @@ External Validation Performance (n={n_val}):
             print(f"Error creating prediction plots: {str(e)}")
 
     def _load_spectra_from_directory(self, directory):
+        # Reader metadata of the last directory load, for callers that need the data
+        # type (this method returns arrays only).
+        self._last_dir_load_metadata = None
+        return self._load_spectra_from_directory_impl(directory)
+
+    def _load_spectra_from_directory_impl(self, directory):
         """Helper method to load spectra from a directory. Returns (wavelengths, X)."""
         import glob
 
@@ -48684,6 +48156,7 @@ External Validation Performance (n={n_val}):
             # Load ASD files
             from spectral_predict.io import read_asd_dir
             df, metadata = read_asd_dir(directory)
+            self._last_dir_load_metadata = metadata
             wavelengths = df.columns.astype(float).values
             X = df.values
             return wavelengths, X
@@ -48724,6 +48197,7 @@ External Validation Performance (n={n_val}):
             # Load SPC files
             from spectral_predict.io import read_spc_dir
             df, metadata = read_spc_dir(directory)
+            self._last_dir_load_metadata = metadata
             wavelengths = df.columns.astype(float).values
             X = df.values
             return wavelengths, X
@@ -48733,6 +48207,7 @@ External Validation Performance (n={n_val}):
             if omnic_files:
                 from spectral_predict.io import read_omnic_dir
                 df, metadata = read_omnic_dir(directory)
+                self._last_dir_load_metadata = metadata
                 wavelengths = df.columns.astype(float).values
                 X = df.values
                 return wavelengths, X
@@ -48748,6 +48223,7 @@ External Validation Performance (n={n_val}):
         from pathlib import Path
 
         dir_path = Path(directory)
+        self._last_dir_load_metadata = None  # reader metadata, for the data type
 
         asd_files = list_asd_files(dir_path)
         spc_files = sorted(dir_path.glob("*.spc"))
@@ -48764,26 +48240,28 @@ External Validation Performance (n={n_val}):
 
         if asd_files:
             from spectral_predict.io import read_asd_dir
-            df, _ = read_asd_dir(str(directory))
+            df, self._last_dir_load_metadata = read_asd_dir(str(directory))
             return df
         elif spc_files:
             from spectral_predict.io import read_spc_dir
-            df, _ = read_spc_dir(str(directory))
+            df, self._last_dir_load_metadata = read_spc_dir(str(directory))
             return df
         elif jcamp_files:
             from spectral_predict.io import read_jcamp_dir
-            df, _ = read_jcamp_dir(str(directory))
+            df, self._last_dir_load_metadata = read_jcamp_dir(str(directory))
             return df
         elif ascii_files:
             from spectral_predict.io import read_ascii_spectra
-            df, _ = read_ascii_spectra(str(directory))
+            df, metadata = read_ascii_spectra(str(directory))
+            self._last_dir_load_metadata = metadata
+            self._show_import_warnings(metadata, "ASCII")
             return df
         elif sorted(set(
             list(dir_path.glob("*.spa")) + list(dir_path.glob("*.SPA"))
             + list(dir_path.glob("*.spg")) + list(dir_path.glob("*.SPG"))
         )):
             from spectral_predict.io import read_omnic_dir
-            df, _ = read_omnic_dir(str(directory))
+            df, self._last_dir_load_metadata = read_omnic_dir(str(directory))
             return df
         elif csv_files:
             # CSV directory: use existing loader for parsing, then set meaningful index
@@ -48902,7 +48380,7 @@ External Validation Performance (n={n_val}):
 
     def _display_transfer_model_info(self, method, primary_id, satellite_id, date_created, n_samples, wavelengths, model_data_type=None):
         """Display transfer model information in text widget."""
-        info_text = f"Method: {method}\n"
+        info_text = f"Method: {ct_method_display_name(method)} (saved key '{method}')\n"
         info_text += f"Primary ID: {primary_id}\n"
         info_text += f"Satellite ID: {satellite_id}\n"
         info_text += f"Date Created: {date_created}\n"
@@ -48958,7 +48436,7 @@ External Validation Performance (n={n_val}):
             # Extract model info
             method = getattr(transfer_model, 'method', 'Unknown')
             if isinstance(method, str):
-                method_str = method.upper()
+                method_str = ct_method_display_name(method)
             else:
                 method_str = str(method).upper()
 
@@ -49079,13 +48557,17 @@ External Validation Performance (n={n_val}):
 
             # Store data
             self.current_primary_data = (wavelengths, X)
+            dir_metadata = (
+                getattr(self, '_last_dir_load_metadata', None) if os.path.isdir(path) else None
+            )
 
-            # Detect spectral data type (reflectance vs absorbance)
+            # Data type: reader metadata first, value heuristic only as fallback
             try:
-                from spectral_predict.io import detect_spectral_data_type, infer_reflectance_scale
                 temp_df = pd.DataFrame(X, columns=[str(w) for w in wavelengths])
-                data_type, confidence, method = detect_spectral_data_type(temp_df)
-                scale = infer_reflectance_scale(temp_df) if data_type == "reflectance" else 1.0
+                data_type, confidence, self.ct_primary_source_data_type = (
+                    _resolve_loaded_data_type(dir_metadata, temp_df)
+                )
+                scale = _loaded_value_scale(dir_metadata, X, data_type)
 
                 # Store detection results
                 self.ct_primary_original_data_type = data_type
@@ -49096,8 +48578,9 @@ External Validation Performance (n={n_val}):
 
                 # Update UI
                 color = self.colors['success'] if confidence >= 70 else self.colors['warning']
+                type_label = _data_type_label(data_type, self.ct_primary_source_data_type)
                 self.ct_primary_type_status_label.config(
-                    text=f"Detected: {data_type.capitalize()} ({confidence:.0f}%)",
+                    text=f"Detected: {type_label} ({confidence:.0f}%)",
                     foreground=color)
 
                 # Enable controls
@@ -49108,8 +48591,10 @@ External Validation Performance (n={n_val}):
                 # Set button text based on detected type
                 if data_type == "reflectance":
                     self.ct_primary_convert_btn.config(text="Convert to Absorbance")
-                else:
+                elif data_type == "absorbance":
                     self.ct_primary_convert_btn.config(text="Convert to Reflectance")
+                else:
+                    self.ct_primary_convert_btn.config(text="No conversion", state='disabled')
             except Exception as e:
                 print(f"Warning: Could not detect primary data type: {e}")
 
@@ -49164,13 +48649,17 @@ External Validation Performance (n={n_val}):
 
             # Store data
             self.current_satellite_data = (wavelengths, X)
+            dir_metadata = (
+                getattr(self, '_last_dir_load_metadata', None) if os.path.isdir(path) else None
+            )
 
-            # Detect spectral data type (reflectance vs absorbance)
+            # Data type: reader metadata first, value heuristic only as fallback
             try:
-                from spectral_predict.io import detect_spectral_data_type, infer_reflectance_scale
                 temp_df = pd.DataFrame(X, columns=[str(w) for w in wavelengths])
-                data_type, confidence, method = detect_spectral_data_type(temp_df)
-                scale = infer_reflectance_scale(temp_df) if data_type == "reflectance" else 1.0
+                data_type, confidence, self.ct_satellite_source_data_type = (
+                    _resolve_loaded_data_type(dir_metadata, temp_df)
+                )
+                scale = _loaded_value_scale(dir_metadata, X, data_type)
 
                 # Store detection results
                 self.ct_satellite_original_data_type = data_type
@@ -49181,8 +48670,9 @@ External Validation Performance (n={n_val}):
 
                 # Update UI
                 color = self.colors['success'] if confidence >= 70 else self.colors['warning']
+                type_label = _data_type_label(data_type, self.ct_satellite_source_data_type)
                 self.ct_satellite_type_status_label.config(
-                    text=f"Detected: {data_type.capitalize()} ({confidence:.0f}%)",
+                    text=f"Detected: {type_label} ({confidence:.0f}%)",
                     foreground=color)
 
                 # Enable controls
@@ -49193,8 +48683,10 @@ External Validation Performance (n={n_val}):
                 # Set button text based on detected type
                 if data_type == "reflectance":
                     self.ct_satellite_convert_btn.config(text="Convert to Absorbance")
-                else:
+                elif data_type == "absorbance":
                     self.ct_satellite_convert_btn.config(text="Convert to Reflectance")
+                else:
+                    self.ct_satellite_convert_btn.config(text="No conversion", state='disabled')
             except Exception as e:
                 print(f"Warning: Could not detect satellite data type: {e}")
 
@@ -49428,13 +48920,17 @@ External Validation Performance (n={n_val}):
                 params = {'B': B, 'window': window}
 
             elif method == 'tsr':
-                n_samples = int(self.ct_tsr_n_samples_var.get())
-                if n_samples > X_primary_common.shape[0]:
-                    raise ValueError(f"TSR requires {n_samples} samples, but only {X_primary_common.shape[0]} available.")
-                # TSR requires transfer_indices: assume all loaded samples are paired
-                transfer_indices = np.arange(n_samples)
-                params = estimate_tsr(X_primary_common[:n_samples], X_satellite_common[:n_samples],
-                                     transfer_indices)
+                # Per-wavelength slope/bias. Loaded rows are paired standards; use all
+                # of them, or a Kennard-Stone subset of the requested size (QW2: this
+                # used to take the first n rows although the tooltip promised KS).
+                from spectral_predict.calibration_transfer import select_transfer_standards
+
+                n_standards = parse_transfer_standards_count(self.ct_tsr_n_samples_var.get())
+                transfer_indices = select_transfer_standards(X_primary_common, n_standards)
+                params = estimate_tsr(X_primary_common, X_satellite_common, transfer_indices)
+                params["standard_selection"] = (
+                    "all" if len(transfer_indices) == X_primary_common.shape[0] else "kennard-stone"
+                )
 
             elif method == 'ctai':
                 params = estimate_ctai(X_primary_common, X_satellite_common)
@@ -49486,10 +48982,6 @@ External Validation Performance (n={n_val}):
                     # Extract Y values for selected transfer samples (REAL VALUES!)
                     y_transfer = y_paired[transfer_indices]
 
-                    # Use selected samples for building
-                    X_primary_transfer = X_primary_paired[transfer_indices]
-                    X_satellite_transfer = X_satellite_paired[transfer_indices]
-
                     # Show info about Y values used
                     y_min, y_max = y_transfer.min(), y_transfer.max()
                     y_mean, y_std = y_transfer.mean(), y_transfer.std()
@@ -49500,27 +48992,23 @@ External Validation Performance (n={n_val}):
                         f"Y mean: {y_mean:.3f} ± {y_std:.3f}\n\n"
                         f"Selected using Kennard-Stone algorithm.")
 
-                    params = estimate_jypls_inv(X_primary_transfer, X_satellite_transfer,
-                                               y_transfer, transfer_indices,
-                                               n_components=n_components)
+                    # transfer_indices index the paired arrays, so pass those (passing
+                    # the already-subset rows indexed them twice).
+                    params = estimate_jypls_inv(
+                        X_primary_paired,
+                        X_satellite_paired,
+                        y_transfer,
+                        transfer_indices,
+                        n_components=n_components,
+                    )
 
                 else:
-                    # Simple loading: Fall back to placeholder (not recommended)
-                    if n_samples > X_primary_common.shape[0]:
-                        raise ValueError(f"JYPLS-inv requires {n_samples} samples, but only {X_primary_common.shape[0]} available.")
-
-                    messagebox.showwarning("JYPLS-inv Limitation",
-                        "JYPLS-inv requires reference property values (Y) for transfer samples.\n\n"
-                        "Building with placeholder zeros because enhanced loading was not used.\n\n"
-                        "For accurate results, use the 'Load Primary/Satellite Data with Y values' section above.\n"
-                        "Otherwise, consider using CTAI or NS-PFCE instead, which don't require reference values.")
-
-                    y_transfer = np.zeros(n_samples)  # Placeholder
-                    transfer_indices = np.arange(n_samples)
-
-                    params = estimate_jypls_inv(X_primary_common[:n_samples], X_satellite_common[:n_samples],
-                                               y_transfer, transfer_indices,
-                                               n_components=n_components)
+                    # No measured reference values: refuse rather than substitute zeros (R091).
+                    raise ValueError(
+                        "JYPLS-inv needs a measured reference value (y) for every transfer "
+                        "standard. Load primary and satellite data with y values, or use "
+                        "another method."
+                    )
 
             else:
                 raise ValueError(f"Unknown method: {method}")
@@ -49566,8 +49054,15 @@ External Validation Performance (n={n_val}):
 
             # Update info display
             info_text = f"Transfer Model Built Successfully!\n"
-            info_text += f"Method: {method.upper()}\n"
-            info_text += f"Training Samples: {X_primary_common.shape[0]}\n"
+            info_text += f"Method: {ct_method_display_name(method)}\n"
+            info_text += f"Paired standards loaded: {X_primary_common.shape[0]}\n"
+            if method == "tsr":
+                how = (
+                    "all loaded pairs"
+                    if params.get("standard_selection") == "all"
+                    else "Kennard-Stone subset"
+                )
+                info_text += f"Standards used in fit: {len(params['transfer_indices'])} ({how})\n"
             info_text += f"Wavelength Range: {wl_common[0]:.1f} - {wl_common[-1]:.1f} nm ({len(wl_common)} points)\n"
             if roi_meta:
                 info_text += (
@@ -49610,7 +49105,8 @@ External Validation Performance (n={n_val}):
         # Generate default filename with data type suffix
         method = self.ct_transfer_model.method
         ct_data_type = self.ct_primary_data_type.get() if hasattr(self, 'ct_primary_data_type') else 'reflectance'
-        data_type_suffix = "_abs" if ct_data_type == "absorbance" else "_ref"
+        data_type_suffix = _data_type_suffix(
+            ct_data_type, getattr(self, 'ct_primary_source_data_type', None))
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         default_name = f"transfer_{method}_{timestamp}{data_type_suffix}.pkl"
 
@@ -49745,11 +49241,12 @@ External Validation Performance (n={n_val}):
             # Track spectral data type (absorbance vs reflectance) for filename suffix
             self.ct_primary_spectral_type = metadata.get('data_type', 'reflectance')
 
-            # Sync data type detection with Section A controls
+            # Sync data type with Section A controls: reader metadata first
             try:
-                from spectral_predict.io import detect_spectral_data_type, infer_reflectance_scale
-                data_type, confidence, _ = detect_spectral_data_type(df)
-                scale = infer_reflectance_scale(df) if data_type == "reflectance" else 1.0
+                data_type, confidence, self.ct_primary_source_data_type = (
+                    _resolve_loaded_data_type(metadata, df)
+                )
+                scale = _loaded_value_scale(metadata, df, data_type)
                 self.ct_primary_original_data_type = data_type
                 self.ct_primary_type_confidence = confidence
                 self.ct_primary_reflectance_scale = scale
@@ -49809,11 +49306,12 @@ External Validation Performance (n={n_val}):
             self.satellite_data_format = self.ct_satellite_detected_type + '_folder'
             self.satellite_source_filenames = list(df.index)  # Preserve filenames for export
 
-            # Sync data type detection with Section A controls
+            # Sync data type with Section A controls: reader metadata first
             try:
-                from spectral_predict.io import detect_spectral_data_type, infer_reflectance_scale
-                data_type, confidence, _ = detect_spectral_data_type(df)
-                scale = infer_reflectance_scale(df) if data_type == "reflectance" else 1.0
+                data_type, confidence, self.ct_satellite_source_data_type = (
+                    _resolve_loaded_data_type(metadata, df)
+                )
+                scale = _loaded_value_scale(metadata, df, data_type)
                 self.ct_satellite_original_data_type = data_type
                 self.ct_satellite_type_confidence = confidence
                 self.ct_satellite_reflectance_scale = scale
@@ -50023,11 +49521,12 @@ External Validation Performance (n={n_val}):
             # Track spectral data type (absorbance vs reflectance) for filename suffix
             self.ct_primary_spectral_type = metadata.get('data_type', 'reflectance')
 
-            # Sync data type detection with Section A controls
+            # Sync data type with Section A controls: reader metadata first
             try:
-                from spectral_predict.io import detect_spectral_data_type, infer_reflectance_scale
-                data_type, confidence, _ = detect_spectral_data_type(X_aligned)
-                scale = infer_reflectance_scale(X_aligned) if data_type == "reflectance" else 1.0
+                data_type, confidence, self.ct_primary_source_data_type = (
+                    _resolve_loaded_data_type(metadata, X_aligned)
+                )
+                scale = _loaded_value_scale(metadata, X_aligned, data_type)
                 self.ct_primary_original_data_type = data_type
                 self.ct_primary_type_confidence = confidence
                 self.ct_primary_reflectance_scale = scale
@@ -50277,11 +49776,12 @@ External Validation Performance (n={n_val}):
             self.ct_satellite_y = y_aligned
             self.ct_satellite_wavelengths = X_aligned.columns.astype(float).values
 
-            # Sync data type detection with Section A controls
+            # Sync data type with Section A controls: reader metadata first
             try:
-                from spectral_predict.io import detect_spectral_data_type, infer_reflectance_scale
-                data_type, confidence, _ = detect_spectral_data_type(X_aligned)
-                scale = infer_reflectance_scale(X_aligned) if data_type == "reflectance" else 1.0
+                data_type, confidence, self.ct_satellite_source_data_type = (
+                    _resolve_loaded_data_type(metadata, X_aligned)
+                )
+                scale = _loaded_value_scale(metadata, X_aligned, data_type)
                 self.ct_satellite_original_data_type = data_type
                 self.ct_satellite_type_confidence = confidence
                 self.ct_satellite_reflectance_scale = scale
@@ -50591,6 +50091,7 @@ External Validation Performance (n={n_val}):
         try:
             is_directory = os.path.isdir(filepath)
             format_type = None
+            metadata = None  # reader metadata, when the reader returns any
 
             if is_directory:
                 # Directory - detect format by scanning files
@@ -50804,9 +50305,12 @@ External Validation Performance (n={n_val}):
             self.new_satellite_data_predict = (wavelengths, X)
             self.ct_pred_loaded_sample_ids = sample_ids  # Store extracted sample IDs
 
-            # Auto-detect data type
-            from spectral_predict.io import detect_spectral_data_type
-            data_type, confidence, _ = detect_spectral_data_type(X)
+            # Data type: the reader's metadata first, value heuristic only as fallback
+            data_type, confidence, self.ct_pred_source_data_type = _resolve_loaded_data_type(
+                metadata, X
+            )
+            self.ct_pred_value_scale = _loaded_value_scale(metadata, X, data_type)
+            self._show_import_warnings(metadata, "Satellite spectra")
             self.ct_pred_data_type.set(data_type)
             self.ct_pred_original_data_type = data_type
             self.ct_pred_type_confidence = confidence
@@ -50821,7 +50325,8 @@ External Validation Performance (n={n_val}):
             info_text += f"Wavelengths: {len(wavelengths)} ({wavelengths[0]:.1f} - {wavelengths[-1]:.1f} nm)\n"
             if resampled:
                 info_text += "Status: Resampled to match transfer model\n"
-            info_text += f"Data Type: {data_type.capitalize()} ({confidence:.0f}% confidence)\n"
+            type_label = _data_type_label(data_type, self.ct_pred_source_data_type)
+            info_text += f"Data Type: {type_label} ({confidence:.0f}% confidence)\n"
             info_text += f"Path: {filepath}"
 
             self.ct_pred_satellite_info_text.config(state='normal')
@@ -50869,14 +50374,18 @@ External Validation Performance (n={n_val}):
         else:
             # Normal detection display
             color = self.colors['success'] if confidence >= 70 else self.colors['warning']
+            type_label = _data_type_label(data_type, getattr(self, 'ct_pred_source_data_type', None))
             self.ct_pred_data_type_status.config(
-                text=f"{data_type.capitalize()} ({confidence:.0f}% confidence)",
+                text=f"{type_label} ({confidence:.0f}% confidence)",
                 foreground=color
             )
 
         # Update conversion button text
-        target = "Absorbance" if data_type == "reflectance" else "Reflectance"
-        self.ct_pred_convert_btn.config(text=f"Convert to {target}")
+        if _is_convertible_data_type(data_type):
+            target = "Absorbance" if data_type == "reflectance" else "Reflectance"
+            self.ct_pred_convert_btn.config(text=f"Convert to {target}")
+        else:
+            self.ct_pred_convert_btn.config(text="No conversion", state='disabled')
 
     def _on_ct_pred_data_type_override(self):
         """Handle manual override of data type in Mode A (no conversion)."""
@@ -50888,7 +50397,9 @@ External Validation Performance (n={n_val}):
 
         # Update conversion button text
         target = "Absorbance" if current == "reflectance" else "Reflectance"
-        self.ct_pred_convert_btn.config(text=f"Convert to {target}")
+        self.ct_pred_convert_btn.config(
+            text=f"Convert to {target}",
+            state='normal' if _is_convertible_data_type(current) else 'disabled')
 
         # Update status to show override
         if current != original and not self.ct_pred_data_converted:
@@ -50912,13 +50423,20 @@ External Validation Performance (n={n_val}):
 
         wavelengths, X = self.new_satellite_data_predict
         current_type = self.ct_pred_data_type.get()
+        if not _is_convertible_data_type(current_type):
+            messagebox.showwarning(
+                "No Conversion",
+                f"{_data_type_label(current_type, getattr(self, 'ct_pred_source_data_type', None))} "
+                "data has no reflectance/absorbance conversion.")
+            return
         target_type = "absorbance" if current_type == "reflectance" else "reflectance"
 
-        # Convert using existing conversion functions
-        if target_type == "absorbance":
-            X_converted = self._convert_reflectance_to_absorbance(X)
-        else:
-            X_converted = self._convert_absorbance_to_reflectance(X)
+        # Convert with this data's own source type (transmittance formula), not the
+        # main tab's
+        X_converted, self.ct_pred_value_scale = self._convert_with_source(
+            X, current_type, target_type,
+            None if self.ct_pred_data_converted else getattr(self, 'ct_pred_source_data_type', None),
+            getattr(self, 'ct_pred_value_scale', 1.0))
 
         # Update stored data
         self.new_satellite_data_predict = (wavelengths, X_converted)
@@ -51042,8 +50560,20 @@ External Validation Performance (n={n_val}):
 
             # Step 2: Use prediction model to predict properties
             if self.current_prediction_model_dict is not None:
-                from spectral_predict.model_io import predict_with_model
+                from spectral_predict.model_io import (
+                    check_data_type_compatibility, predict_with_model)
                 metadata = self.current_prediction_model_dict.get('metadata', {})
+                type_warning = check_data_type_compatibility(
+                    metadata,
+                    self.ct_pred_data_type.get(),
+                    None if self.ct_pred_data_converted
+                    else getattr(self, 'ct_pred_source_data_type', None),
+                )
+                if type_warning:
+                    messagebox.showwarning(
+                        "Data Type Mismatch",
+                        type_warning + "\n\nUse the Convert button in C2 to match the model's "
+                        "data type, then predict again.")
                 use_full = metadata.get('use_full_spectrum_preprocessing', False) and metadata.get('full_wavelengths') is not None
                 required_wl = metadata.get('full_wavelengths') if use_full else metadata.get('wavelengths')
 
@@ -51246,6 +50776,7 @@ External Validation Performance (n={n_val}):
         self._update_ct_use_as_working_btn_state()
 
         try:
+            metadata = None  # reader metadata, when the reader returns any
             # Detect format (will be updated for directory formats)
             detected_format = self._detect_data_format(path)
             self.satellite_data_format = detected_format  # Store for export
@@ -51486,9 +51017,12 @@ External Validation Performance (n={n_val}):
             # Store data
             self.new_satellite_data_export = (wavelengths, X)
 
-            # Auto-detect data type
-            from spectral_predict.io import detect_spectral_data_type
-            data_type, confidence, _ = detect_spectral_data_type(X)
+            # Data type: the reader's metadata first, value heuristic only as fallback
+            data_type, confidence, self.ct_export_source_data_type = _resolve_loaded_data_type(
+                metadata, X
+            )
+            self.ct_export_value_scale = _loaded_value_scale(metadata, X, data_type)
+            self._show_import_warnings(metadata, "Satellite spectra")
             self.ct_export_data_type.set(data_type)
             self.ct_export_original_data_type = data_type  # Store original for override warning
             self.ct_export_type_confidence = confidence  # Store confidence
@@ -51511,7 +51045,8 @@ External Validation Performance (n={n_val}):
                     if len(meta_cols) > 5:
                         info_text += f" ... +{len(meta_cols) - 5} more"
 
-            info_text += f"\nData Type: {data_type.capitalize()} ({confidence:.0f}% confidence)"
+            type_label = _data_type_label(data_type, self.ct_export_source_data_type)
+            info_text += f"\nData Type: {type_label} ({confidence:.0f}% confidence)"
 
             self.ct_export_data_info_text.config(state='normal')
             self.ct_export_data_info_text.delete('1.0', tk.END)
@@ -51521,7 +51056,7 @@ External Validation Performance (n={n_val}):
             # Update data type detection UI
             color = self.colors['success'] if confidence >= 70 else self.colors['warning']
             self.ct_export_detected_type_label.config(
-                text=f"{data_type.capitalize()} ({confidence:.0f}% confidence)",
+                text=f"{type_label} ({confidence:.0f}% confidence)",
                 foreground=color)
 
             # Enable radio buttons
@@ -51530,6 +51065,9 @@ External Validation Performance (n={n_val}):
 
             if data_type == 'reflectance':
                 self.ct_convert_to_abs_btn.config(state='normal')
+                self.ct_convert_to_refl_btn.config(state='disabled')
+            elif not _is_convertible_data_type(data_type):
+                self.ct_convert_to_abs_btn.config(state='disabled')
                 self.ct_convert_to_refl_btn.config(state='disabled')
             else:
                 self.ct_convert_to_abs_btn.config(state='disabled')
@@ -51588,8 +51126,10 @@ External Validation Performance (n={n_val}):
             # Apply transfer (ROI-aware: splices region back into full spectrum)
             X_transferred = self._apply_transfer_with_roi(X_satellite_resampled, transfer_model)
 
-            # Store transformed spectra
+            # Store transformed spectra, with the data type they carry (after any
+            # conversion), for "use as working data"
             self.transformed_spectra = (model_wavelengths, X_transferred)
+            self._record_transformed_spectra_type()
 
             # Calculate statistics
             rmse = np.sqrt(np.mean((X_transferred - X_satellite_resampled) ** 2))
@@ -51630,6 +51170,24 @@ External Validation Performance (n={n_val}):
             self.ct_use_as_working_btn.config(state='normal')
         else:
             self.ct_use_as_working_btn.config(state='disabled')
+
+    def _record_transformed_spectra_type(self):
+        """Record the Mode B data type (after any conversion) with the transformed spectra.
+
+        "Use as working data" applies it instead of re-detecting from values; the
+        value scale travels with it so percent reflectance converted to absorbance
+        converts back to percent.
+        """
+        export_type = self.ct_export_data_type.get()
+        self.transformed_spectra_type = {
+            'data_type': export_type,
+            'type_confidence': getattr(self, 'ct_export_type_confidence', 50.0),
+            'source_data_type': (
+                None if self.ct_export_data_converted
+                else getattr(self, 'ct_export_source_data_type', None)
+            ),
+            'value_scale': getattr(self, 'ct_export_value_scale', 1.0),
+        } if export_type else None
 
     def _ct_use_as_working_data(self):
         """Push transformed spectra from Mode B into the main working data pipeline.
@@ -51723,14 +51281,18 @@ External Validation Performance (n={n_val}):
             if hasattr(self, 'validation_indices'):
                 self.validation_indices = None
 
-            # --- Detect data type from spectral values ---
+            # --- Data type: what the transformed spectra carry (Mode B type after any
+            # conversion); the value heuristic only if that is unknown ---
             try:
-                from spectral_predict.io import detect_spectral_data_type
+                carried = getattr(self, 'transformed_spectra_type', None)
                 temp_df = pd.DataFrame(X_transferred[:min(50, len(X_transferred))],
                                        columns=col_floats)
-                data_type, confidence, method = detect_spectral_data_type(temp_df)
+                data_type, confidence, source_type = _resolve_loaded_data_type(carried, temp_df)
                 self.original_data_type.set(data_type)
                 self.current_data_type.set(data_type)
+                self.type_confidence = confidence
+                self.source_data_type = source_type
+                self.data_value_scale = _loaded_value_scale(carried, X_transferred, data_type)
                 self.data_has_been_converted = False
             except Exception:
                 self.current_data_type.set('reflectance')
@@ -51844,7 +51406,8 @@ External Validation Performance (n={n_val}):
                 ax.plot(wavelengths, X[i, :], alpha=alpha, linewidth=1.0)
 
             ax.set_xlabel(self._get_spectral_xlabel())
-            ax.set_ylabel(self.ct_export_data_type.get().capitalize())
+            ax.set_ylabel(_data_type_label(
+                self.ct_export_data_type.get(), getattr(self, 'ct_export_source_data_type', None)))
             ax.set_title(f'Loaded Spectra ({n_samples} samples)')
             ax.grid(True, alpha=0.3)
             fig.tight_layout()
@@ -51892,6 +51455,12 @@ External Validation Performance (n={n_val}):
 
         current = self.ct_primary_data_type.get()
         wavelengths, X = self.current_primary_data
+        if not _is_convertible_data_type(current):
+            messagebox.showwarning(
+                "No Conversion",
+                f"{_data_type_label(current, getattr(self, 'ct_primary_source_data_type', None))} "
+                "data has no reflectance/absorbance conversion.")
+            return
 
         # Save/restore shared state to avoid cross-tab interference
         saved_scale = self.data_value_scale
@@ -51962,6 +51531,12 @@ External Validation Performance (n={n_val}):
 
         current = self.ct_satellite_data_type.get()
         wavelengths, X = self.current_satellite_data
+        if not _is_convertible_data_type(current):
+            messagebox.showwarning(
+                "No Conversion",
+                f"{_data_type_label(current, getattr(self, 'ct_satellite_source_data_type', None))} "
+                "data has no reflectance/absorbance conversion.")
+            return
 
         # Save/restore shared state to avoid cross-tab interference
         saved_scale = self.data_value_scale
@@ -52047,8 +51622,14 @@ External Validation Performance (n={n_val}):
         """Convert loaded Mode B spectra from reflectance to absorbance."""
         if self.new_satellite_data_export is None:
             return
+        if self.ct_export_data_type.get() != "reflectance":
+            return
         wavelengths, X = self.new_satellite_data_export
-        X_converted = self._convert_reflectance_to_absorbance(X)
+        X_converted, self.ct_export_value_scale = self._convert_with_source(
+            X, "reflectance", "absorbance",
+            None if self.ct_export_data_converted
+            else getattr(self, 'ct_export_source_data_type', None),
+            getattr(self, 'ct_export_value_scale', 1.0))
         self.new_satellite_data_export = (wavelengths, X_converted)
         self.ct_export_data_type.set("absorbance")
         self.ct_export_data_converted = True
@@ -52070,8 +51651,11 @@ External Validation Performance (n={n_val}):
         """Convert loaded Mode B spectra from absorbance to reflectance."""
         if self.new_satellite_data_export is None:
             return
+        if self.ct_export_data_type.get() != "absorbance":
+            return
         wavelengths, X = self.new_satellite_data_export
-        X_converted = self._convert_absorbance_to_reflectance(X)
+        X_converted, self.ct_export_value_scale = self._convert_with_source(
+            X, "absorbance", "reflectance", None, getattr(self, 'ct_export_value_scale', 1.0))
         self.new_satellite_data_export = (wavelengths, X_converted)
         self.ct_export_data_type.set("reflectance")
         self.ct_export_data_converted = True
@@ -53322,6 +52906,7 @@ External Validation Performance (n={n_val}):
         source = self.comparison_data_source.get()
 
         # Reset data type UI for fresh load
+        self.comparison_metadata = None  # reader metadata of this load
         self.comparison_data_converted = False
         self.comparison_data_type.set("unknown")
         self.comparison_original_data_type = "unknown"
@@ -53339,6 +52924,16 @@ External Validation Performance (n={n_val}):
                     return
 
                 self.comparison_data = self.validation_X.copy()
+                # The validation set has the main tab's current type (after any
+                # conversion), which the value heuristic cannot see
+                self.comparison_metadata = {
+                    'data_type': self.current_data_type.get(),
+                    'type_confidence': getattr(self, 'type_confidence', 50.0),
+                    'source_data_type': (
+                        None if self.data_has_been_converted else self.source_data_type
+                    ),
+                    'value_scale': self.data_value_scale,
+                }
                 self.comparison_data_status.config(
                     text=f"> Loaded {len(self.comparison_data)} samples from validation set",
                     foreground='green')
@@ -53352,6 +52947,7 @@ External Validation Performance (n={n_val}):
 
                 # Load as DataFrame with meaningful index (filenames as sample IDs)
                 self.comparison_data = self._load_spectra_from_directory_as_df(directory)
+                self.comparison_metadata = getattr(self, '_last_dir_load_metadata', None)
 
                 if self.comparison_data is None or len(self.comparison_data) == 0:
                     messagebox.showerror("Error", "No spectral files found in directory")
@@ -53370,10 +52966,10 @@ External Validation Performance (n={n_val}):
 
                 # Use io readers that set first column as index (sample IDs)
                 if file_path.lower().endswith(('.xlsx', '.xls')):
-                    self.comparison_data, _ = read_excel_spectra(file_path)
+                    self.comparison_data, self.comparison_metadata = read_excel_spectra(file_path)
                     file_type = "Excel"
                 else:
-                    self.comparison_data, _ = read_csv_spectra(file_path)
+                    self.comparison_data, self.comparison_metadata = read_csv_spectra(file_path)
                     file_type = "CSV"
 
                 self.comparison_data_status.config(
@@ -53396,9 +52992,13 @@ External Validation Performance (n={n_val}):
             return
 
         try:
-            from spectral_predict.io import detect_spectral_data_type
-
-            data_type, confidence, _ = detect_spectral_data_type(self.comparison_data)
+            metadata = getattr(self, 'comparison_metadata', None)
+            data_type, confidence, self.comparison_source_data_type = _resolve_loaded_data_type(
+                metadata, self.comparison_data
+            )
+            self.comparison_value_scale = _loaded_value_scale(
+                metadata, self.comparison_data, data_type
+            )
             self.comparison_data_type.set(data_type)
             self.comparison_original_data_type = data_type
             self.comparison_type_confidence = confidence
@@ -53441,14 +53041,19 @@ External Validation Performance (n={n_val}):
             )
         else:
             color = self.colors['success'] if confidence >= 70 else self.colors['warning']
+            type_label = _data_type_label(
+                data_type, getattr(self, 'comparison_source_data_type', None))
             self.comparison_type_status.config(
-                text=f"{data_type.capitalize()} ({confidence:.0f}% confidence)",
+                text=f"{type_label} ({confidence:.0f}% confidence)",
                 foreground=color
             )
 
         # Update conversion button text
-        target = "Absorbance" if data_type == "reflectance" else "Reflectance"
-        self.comparison_convert_btn.config(text=f"Convert to {target}")
+        if _is_convertible_data_type(data_type):
+            target = "Absorbance" if data_type == "reflectance" else "Reflectance"
+            self.comparison_convert_btn.config(text=f"Convert to {target}", state='normal')
+        else:
+            self.comparison_convert_btn.config(text="No conversion", state='disabled')
 
         self._update_comparison_match_indicator()
 
@@ -53472,7 +53077,7 @@ External Validation Performance (n={n_val}):
         types = set()
         for m in all_models:
             dt = m.get('metadata', {}).get('data_type')
-            if dt and dt.lower() in ('absorbance', 'reflectance'):
+            if dt and dt.lower() in ('absorbance', 'reflectance', 'other'):
                 types.add(dt.lower())
 
         if len(types) == 1:
@@ -53510,7 +53115,9 @@ External Validation Performance (n={n_val}):
 
         # Update conversion button text
         target = "Absorbance" if current == "reflectance" else "Reflectance"
-        self.comparison_convert_btn.config(text=f"Convert to {target}")
+        self.comparison_convert_btn.config(
+            text=f"Convert to {target}",
+            state='normal' if _is_convertible_data_type(current) else 'disabled')
 
         # Update status to show override
         if current != original and not self.comparison_data_converted:
@@ -53535,13 +53142,20 @@ External Validation Performance (n={n_val}):
             return
 
         current_type = self.comparison_data_type.get()
+        if not _is_convertible_data_type(current_type):
+            messagebox.showwarning(
+                "No Conversion",
+                f"{_data_type_label(current_type, getattr(self, 'comparison_source_data_type', None))} "
+                "data has no reflectance/absorbance conversion.")
+            return
         target_type = "absorbance" if current_type == "reflectance" else "reflectance"
 
-        # Convert using existing conversion functions
-        if target_type == "absorbance":
-            converted_values = self._convert_reflectance_to_absorbance(self.comparison_data.values)
-        else:
-            converted_values = self._convert_absorbance_to_reflectance(self.comparison_data.values)
+        # Convert with this dataset's own source type and scale
+        converted_values, self.comparison_value_scale = self._convert_with_source(
+            self.comparison_data.values, current_type, target_type,
+            None if self.comparison_data_converted
+            else getattr(self, 'comparison_source_data_type', None),
+            getattr(self, 'comparison_value_scale', 1.0))
 
         # Rebuild DataFrame preserving index and columns
         import pandas as pd
@@ -53691,6 +53305,7 @@ External Validation Performance (n={n_val}):
                 # Load data from folder as DataFrame with meaningful index
                 try:
                     self.comparison_data = self._load_spectra_from_directory_as_df(folder_path)
+                    self.comparison_metadata = getattr(self, '_last_dir_load_metadata', None)
                 except ValueError:
                     self.comparison_data = None
 
@@ -53773,7 +53388,7 @@ External Validation Performance (n={n_val}):
         # Create rule dialog
         dialog = tk.Toplevel(self.root)
         dialog.title("Add Conditional Flagging Rule")
-        dialog.geometry("550x450")
+        dialog.geometry(_px_geometry("550x450", self.root))
         dialog.configure(bg=self.colors['bg'])
 
         # Make modal
@@ -53882,7 +53497,7 @@ External Validation Performance (n={n_val}):
                     transfer_model = calibration_transfer.load_transfer_model(prefix)
 
                 # Create display description
-                description = f"{transfer_model.method.upper()}: {transfer_model.satellite_id} -> {transfer_model.primary_id}"
+                description = f"{ct_method_display_name(transfer_model.method)}: {transfer_model.satellite_id} -> {transfer_model.primary_id}"
 
                 # Add to list maintaining order
                 self.transfer_models.append({
@@ -54095,9 +53710,22 @@ External Validation Performance (n={n_val}):
             # Use filename instead of target_model_preprocessing
             primary_col_name = f"{primary_filename} {task_indicator}"
 
-            primary_result = model_io.predict_with_uncertainty(
-                self.comparison_primary_model, comparison_data_transformed
+            comparison_type = self.comparison_data_type.get()
+            comparison_type = comparison_type if comparison_type != 'unknown' else None
+            comparison_source = (
+                None if self.comparison_data_converted
+                else getattr(self, 'comparison_source_data_type', None)
             )
+            type_warnings = []
+            primary_result = model_io.predict_with_uncertainty(
+                self.comparison_primary_model, comparison_data_transformed,
+                prediction_data_type=comparison_type,
+                prediction_source_data_type=comparison_source,
+            )
+            if primary_result.get('data_type_warning'):
+                type_warnings.append(
+                    f"{self.comparison_primary_model.get('filename', 'Primary model')}: "
+                    f"{primary_result['data_type_warning']}")
             primary_predictions = primary_result['predictions']
             # Map one-class +1/-1 to human-readable labels
             if primary_task == 'one_class':
@@ -54134,8 +53762,12 @@ External Validation Performance (n={n_val}):
                     counter += 1
 
                 aux_result = model_io.predict_with_uncertainty(
-                    aux_model, comparison_data_transformed
+                    aux_model, comparison_data_transformed,
+                    prediction_data_type=comparison_type,
+                    prediction_source_data_type=comparison_source,
                 )
+                if aux_result.get('data_type_warning'):
+                    type_warnings.append(f"{aux_filename}: {aux_result['data_type_warning']}")
                 aux_predictions = aux_result['predictions']
                 # Map one-class +1/-1 to human-readable labels
                 if aux_task == 'one_class':
@@ -54150,6 +53782,9 @@ External Validation Performance (n={n_val}):
 
                 if aux_result.get('has_applicability_domain'):
                     domain_results[aux_col_name] = aux_result['applicability_domain']
+
+            if type_warnings:
+                messagebox.showwarning("Data Type Mismatch", "\n".join(type_warnings))
 
             # Store domain results for export
             self.comparison_domain_results = domain_results
@@ -54726,10 +54361,14 @@ External Validation Performance (n={n_val}):
         ct_guide_title.pack(anchor='w', pady=(0, 8))
 
         ct_decision_content = (
-            "Same wavelength range + 10+ standards:  PDS (Piecewise Direct Standardization)\n"
-            "Same wavelength range + <10 standards:  DS (Direct Standardization)\n"
-            "Different wavelength ranges:            CTAI (Cross-Transfer Adaptive Interpolation)\n"
-            "No transfer standards available:        Feature-based matching methods"
+            "Every method here needs paired standards: the same samples measured on both\n"
+            "instruments, row for row, on one common wavelength grid.\n"
+            "Default:                      Slope/bias per wavelength (2 coefficients per wavelength)\n"
+            "Wavelength shift / bandwidth: PDS (local window of neighbouring wavelengths)\n"
+            "DS, PC-DS, Iterative ridge DS: full-matrix maps; with few standards they can fit\n"
+            "                              the standards closely and do worse on new samples.\n"
+            "The agreement plot below is computed on the fitting standards, not a validation:\n"
+            "check any transfer on standards that were not used to fit it."
         )
         ct_decision_label = tk.Label(
             ct_guide_frame,
@@ -54936,7 +54575,8 @@ External Validation Performance (n={n_val}):
         method_buttons_frame = ttk.Frame(method_section)
         method_buttons_frame.pack(fill='x', pady=(0, 10))
 
-        self.ct_method_var = tk.StringVar(value='nspfce')
+        # Default: per-wavelength slope/bias (key 'tsr'); fewest coefficients (QW2).
+        self.ct_method_var = tk.StringVar(value=CT_DEFAULT_METHOD)
 
         # DS method
         ds_radio = ttk.Radiobutton(method_buttons_frame, text="DS",
@@ -54950,27 +54590,44 @@ External Validation Performance (n={n_val}):
         pds_radio.pack(side='left', padx=(0, 10))
         CreateToolTip(pds_radio, text=TOOLTIP_CONTENT['calibration_transfer']['method_PDS'], delay=500)
 
-        # TSR method
-        tsr_radio = ttk.Radiobutton(method_buttons_frame, text="TSR",
-                                    variable=self.ct_method_var, value='tsr')
+        # Slope/bias per wavelength (stored key 'tsr'; not trimmed scores regression)
+        tsr_radio = ttk.Radiobutton(
+            method_buttons_frame,
+            text=ct_method_display_name("tsr", short=True),
+            variable=self.ct_method_var,
+            value="tsr",
+        )
         tsr_radio.pack(side='left', padx=(0, 10))
         CreateToolTip(tsr_radio, text=TOOLTIP_CONTENT['calibration_transfer']['method_TSR'], delay=500)
 
-        # CTAI method
-        ctai_radio = ttk.Radiobutton(method_buttons_frame, text="CTAI",
-                                     variable=self.ct_method_var, value='ctai')
+        # PC-DS (stored key 'ctai'; not the published CTAI)
+        ctai_radio = ttk.Radiobutton(
+            method_buttons_frame,
+            text=ct_method_display_name("ctai", short=True),
+            variable=self.ct_method_var,
+            value="ctai",
+        )
         ctai_radio.pack(side='left', padx=(0, 10))
         CreateToolTip(ctai_radio, text=TOOLTIP_CONTENT['calibration_transfer']['method_CTAI'], delay=500)
 
-        # NS-PFCE method
-        nspfce_radio = ttk.Radiobutton(method_buttons_frame, text="NS-PFCE",
-                                       variable=self.ct_method_var, value='nspfce')
+        # Iterative ridge DS (stored key 'nspfce'; a dasp heuristic, not PFCE)
+        nspfce_radio = ttk.Radiobutton(
+            method_buttons_frame,
+            text=ct_method_display_name("nspfce", short=True),
+            variable=self.ct_method_var,
+            value="nspfce",
+        )
         nspfce_radio.pack(side='left', padx=(0, 10))
         CreateToolTip(nspfce_radio, text=TOOLTIP_CONTENT['calibration_transfer']['method_NSPFCE'], delay=500)
 
         # JYPLS-inv method
-        jypls_radio = ttk.Radiobutton(method_buttons_frame, text="JYPLS-inv",
-                                      variable=self.ct_method_var, value='jypls-inv', state='disabled')
+        jypls_radio = ttk.Radiobutton(
+            method_buttons_frame,
+            text=ct_method_display_name("jypls-inv", short=True),
+            variable=self.ct_method_var,
+            value="jypls-inv",
+            state="disabled",
+        )
         jypls_radio.pack(side='left')
         CreateToolTip(jypls_radio, text=TOOLTIP_CONTENT['calibration_transfer']['method_JYPLS'], delay=500)
 
@@ -55007,12 +54664,15 @@ External Validation Performance (n={n_val}):
         row2 = ttk.Frame(params_frame)
         row2.pack(fill='x', pady=(0, 5))
 
-        # TSR Samples
-        tsr_samples_label = ttk.Label(row2, text="TSR Samples:", style='CardLabel.TLabel', width=20)
+        # Slope/bias standards (stored as ct_tsr_n_samples_var)
+        tsr_samples_label = ttk.Label(
+            row2, text="Slope/bias standards:", style="CardLabel.TLabel", width=20
+        )
         tsr_samples_label.pack(side='left')
         CreateToolTip(tsr_samples_label, text=TOOLTIP_CONTENT['calibration_transfer']['param_tsr_samples'], delay=500)
 
-        self.ct_tsr_n_samples_var = tk.StringVar(value='12')
+        # 'All' = every loaded pair; a number = that many chosen by Kennard-Stone.
+        self.ct_tsr_n_samples_var = tk.StringVar(value="All")
         tsr_samples_entry = ttk.Entry(row2, textvariable=self.ct_tsr_n_samples_var, width=12)
         tsr_samples_entry.pack(side='left', padx=(0, 20))
         CreateToolTip(tsr_samples_entry, text=TOOLTIP_CONTENT['calibration_transfer']['param_tsr_samples'], delay=500)
@@ -55043,8 +54703,10 @@ External Validation Performance (n={n_val}):
         jypls_comp_combo.pack(side='left', padx=(0, 20))
         CreateToolTip(jypls_comp_combo, text=TOOLTIP_CONTENT['calibration_transfer']['param_jypls_components'], delay=500)
 
-        # NS-PFCE Max Iter
-        nspfce_maxiter_label = ttk.Label(row3, text="NS-PFCE Max Iter:", style='CardLabel.TLabel', width=20)
+        # Iterative ridge DS max iterations (stored as nspfce_*)
+        nspfce_maxiter_label = ttk.Label(
+            row3, text="Ridge DS Max Iter:", style="CardLabel.TLabel", width=20
+        )
         nspfce_maxiter_label.pack(side='left')
         CreateToolTip(nspfce_maxiter_label, text=TOOLTIP_CONTENT['calibration_transfer']['param_nspfce_max_iter'], delay=500)
 
@@ -55057,16 +54719,18 @@ External Validation Performance (n={n_val}):
         row4 = ttk.Frame(params_frame)
         row4.pack(fill='x')
 
-        # NS-PFCE Wavelength Selection
-        # Default to False - NS-PFCE works great without WL selection (faster, full spectrum output)
-        # When WL selection is enabled, output is reduced to only selected wavelengths
+        # Iterative ridge DS wavelength selection (stored as nspfce_*): off by default.
+        # When enabled, output is reduced to only the selected wavelengths.
         self.ct_nspfce_use_wavelength_selection_var = tk.BooleanVar(value=False)
-        nspfce_wavsel_check = ttk.Checkbutton(row4, text="NS-PFCE: Use Wavelength Selection",
-                                              variable=self.ct_nspfce_use_wavelength_selection_var)
+        nspfce_wavsel_check = ttk.Checkbutton(
+            row4,
+            text="Iterative ridge DS: Use Wavelength Selection",
+            variable=self.ct_nspfce_use_wavelength_selection_var,
+        )
         nspfce_wavsel_check.pack(side='left', padx=(0, 20))
         CreateToolTip(nspfce_wavsel_check, text=TOOLTIP_CONTENT['calibration_transfer']['param_nspfce_wavelength_selection'], delay=500)
 
-        # NS-PFCE Selector (only used when wavelength selection is enabled)
+        # Iterative ridge DS selector (only used when wavelength selection is enabled)
         nspfce_selector_label = ttk.Label(row4, text="Selector:", style='CardLabel.TLabel')
         nspfce_selector_label.pack(side='left')
         CreateToolTip(nspfce_selector_label, text=TOOLTIP_CONTENT['calibration_transfer']['param_nspfce_selector'], delay=500)
@@ -55760,6 +55424,20 @@ External Validation Performance (n={n_val}):
         self._create_section_header(content_frame, "Advanced Method Configuration", row=row, columnspan=2)
         row += 1
 
+        # QW6: nothing on this page reaches the model search. The hand-off
+        # (interference_settings at the run_search call) is disabled because it
+        # broke R² reproducibility, so every control here is greyed out rather
+        # than left looking active. Use the Application page to correct spectra.
+        self.interference_config_banner = ttk.Label(
+            content_frame,
+            text=("Not applied during analysis. These EPO, DOSC and GLSW settings are not "
+                  "passed to the model search, so they are disabled. To correct spectra "
+                  "explicitly, use the Application page."),
+            style='TLabel', foreground='#b45309', wraplength=640, justify=tk.LEFT)
+        self.interference_config_banner.grid(row=row, column=0, columnspan=2, sticky=tk.W,
+                                             pady=(0, 15))
+        row += 1
+
         # ========================================================================
         # EPO (External Parameter Orthogonalization)
         # ========================================================================
@@ -55767,12 +55445,14 @@ External Validation Performance (n={n_val}):
                                     row=row, columnspan=2)
         row += 1
 
-        # EPO Enable checkbox
-        ttk.Checkbutton(content_frame,
-                       text="Enable EPO",
-                       variable=self.advanced_interference_settings['epo']['enabled'],
-                       style='TCheckbutton',
-                       command=self._on_epo_toggled).grid(row=row, column=0, sticky=tk.W, pady=(0, 10))
+        # EPO Enable checkbox (disabled: not applied during analysis, see banner)
+        self.epo_enable_checkbox = ttk.Checkbutton(
+            content_frame,
+            text="Enable EPO (not applied during analysis)",
+            variable=self.advanced_interference_settings['epo']['enabled'],
+            style='TCheckbutton',
+            command=self._on_epo_toggled, state='disabled')
+        self.epo_enable_checkbox.grid(row=row, column=0, sticky=tk.W, pady=(0, 10))
         row += 1
 
         # EPO Description
@@ -55859,12 +55539,14 @@ External Validation Performance (n={n_val}):
                                     row=row, columnspan=2)
         row += 1
 
-        # DOSC Enable checkbox
-        ttk.Checkbutton(content_frame,
-                       text="Enable DOSC",
-                       variable=self.advanced_interference_settings['dosc']['enabled'],
-                       style='TCheckbutton',
-                       command=self._on_dosc_toggled).grid(row=row, column=0, sticky=tk.W, pady=(0, 10))
+        # DOSC Enable checkbox (disabled: not applied during analysis, see banner)
+        self.dosc_enable_checkbox = ttk.Checkbutton(
+            content_frame,
+            text="Enable DOSC (not applied during analysis)",
+            variable=self.advanced_interference_settings['dosc']['enabled'],
+            style='TCheckbutton',
+            command=self._on_dosc_toggled, state='disabled')
+        self.dosc_enable_checkbox.grid(row=row, column=0, sticky=tk.W, pady=(0, 10))
         row += 1
 
         # DOSC Description
@@ -55930,12 +55612,14 @@ External Validation Performance (n={n_val}):
                                     row=row, columnspan=2)
         row += 1
 
-        # GLSW Enable checkbox
-        ttk.Checkbutton(content_frame,
-                       text="Enable GLSW",
-                       variable=self.advanced_interference_settings['glsw']['enabled'],
-                       style='TCheckbutton',
-                       command=self._on_glsw_toggled).grid(row=row, column=0, sticky=tk.W, pady=(0, 10))
+        # GLSW Enable checkbox (disabled: not applied during analysis, see banner)
+        self.glsw_enable_checkbox = ttk.Checkbutton(
+            content_frame,
+            text="Enable GLSW (not applied during analysis)",
+            variable=self.advanced_interference_settings['glsw']['enabled'],
+            style='TCheckbutton',
+            command=self._on_glsw_toggled, state='disabled')
+        self.glsw_enable_checkbox.grid(row=row, column=0, sticky=tk.W, pady=(0, 10))
         row += 1
 
         # GLSW Description
@@ -55997,11 +55681,15 @@ External Validation Performance (n={n_val}):
                  style='Small.TLabel', foreground='gray').pack(side=tk.LEFT, padx=(10, 0))
         glsw_row += 1
 
-        # Apply to analysis
-        ttk.Checkbutton(self.glsw_settings_frame,
-                       text="Apply GLSW weighting to model training",
-                       variable=self.advanced_interference_settings['glsw']['apply_to_analysis'],
-                       style='TCheckbutton').grid(row=glsw_row, column=0, columnspan=2,
+        # Apply to analysis: read by nothing (search hand-off disabled), so it is
+        # off, disabled, and labelled as such.
+        self.glsw_apply_to_analysis_checkbox = ttk.Checkbutton(
+            self.glsw_settings_frame,
+            text=("Apply GLSW weighting to model training "
+                  "(not available: not applied during analysis)"),
+            variable=self.advanced_interference_settings['glsw']['apply_to_analysis'],
+            style='TCheckbutton', state='disabled')
+        self.glsw_apply_to_analysis_checkbox.grid(row=glsw_row, column=0, columnspan=2,
                                                   sticky=tk.W, pady=5)
         glsw_row += 1
 
@@ -56015,8 +55703,8 @@ External Validation Performance (n={n_val}):
         row += 1
 
         ttk.Label(content_frame,
-                 text="Advanced methods configured here will be applied during analysis if enabled.\n"
-                      "They work together with simple methods from Tab 4A (Wavelength Exclusion, MSC, OSC).",
+                 text="Methods configured here are NOT applied during analysis (see the note at "
+                      "the top of this page).",
                  style='TLabel', justify=tk.LEFT).grid(row=row, column=0, columnspan=2,
                                                        sticky=tk.W, pady=(0, 10))
         row += 1
@@ -56965,7 +56653,7 @@ External Validation Performance (n={n_val}):
             # Show in popup window
             preview_win = tk.Toplevel(self.root)
             preview_win.title(f"Preview: {sample_id}")
-            preview_win.geometry("800x400")
+            preview_win.geometry(_px_geometry("800x400", self.root))
 
             canvas = FigureCanvasTkAgg(fig, master=preview_win)
             canvas.draw()
@@ -57182,7 +56870,7 @@ External Validation Performance (n={n_val}):
             # Show in popup window
             compare_win = tk.Toplevel(self.root)
             compare_win.title(f"Comparison: {sample_id} vs {result_id}")
-            compare_win.geometry("1000x500")
+            compare_win.geometry(_px_geometry("1000x500", self.root))
 
             canvas = FigureCanvasTkAgg(fig, master=compare_win)
             canvas.draw()
@@ -58355,10 +58043,13 @@ External Validation Performance (n={n_val}):
         method_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
 
         self.contam_correction_method = tk.StringVar(value='Exclude Regions')
+        # No 'OPLS-DA Filter' here: its target is group membership, so it KEEPS
+        # the contaminant and removes the within-group (analyte) variation, and it
+        # outputs autoscaled values rather than spectra. OPLS-DA stays available
+        # as a detection diagnostic on the Automated Detection page.
         correction_methods = [
             'Exclude Regions',
             'EPO Projection',
-            'OPLS-DA Filter',
             'GLSW Weighting'
         ]
 
@@ -58368,6 +58059,36 @@ External Validation Performance (n={n_val}):
                 variable=self.contam_correction_method, value=method,
                 style='TRadiobutton'
             ).pack(anchor=tk.W, pady=2)
+
+        # EPO: number of contaminant directions ('auto' = statistical test) and
+        # the scientific caution for unpaired groups (review round 1, items 5/6).
+        epo_opts = ttk.Frame(method_frame, style='TFrame')
+        epo_opts.pack(anchor=tk.W, pady=(6, 2), padx=(20, 0))
+        ttk.Label(epo_opts, text="EPO directions to remove:",
+                  style='TLabel').pack(side=tk.LEFT, padx=(0, 6))
+        self.contam_epo_components = tk.StringVar(value='auto')
+        ttk.Combobox(epo_opts, textvariable=self.contam_epo_components,
+                     values=['auto', '1', '2', '3', '4', '5'], width=6,
+                     state='readonly').pack(side=tk.LEFT)
+        ttk.Label(epo_opts,
+                  text="(auto: only directions the groups differ in beyond sampling variation)",
+                  style='Small.TLabel', foreground='gray').pack(side=tk.LEFT, padx=(6, 0))
+        self.contam_epo_caution_label = ttk.Label(
+            method_frame,
+            text=("EPO caution: the removed direction is the difference between the group "
+                  "means, so the clean and contaminated groups must differ ONLY by the "
+                  "contaminant. Any real chemical difference between the groups (e.g. more "
+                  "collagen in the treated bones) is removed with it. Paired spectra (the "
+                  "same specimen scanned clean and contaminated) avoid this, but this page "
+                  "cannot pair spectra yet.\n"
+                  "'auto' only suggests a count, and it can be wrong both ways: it can miss "
+                  "a contaminant confined to one of several groups (with groups of 10, one "
+                  "contaminated group out of four at a moderate dose was found only ~7% of "
+                  "the time), and groups with skewed variation and very different spreads "
+                  "can produce a spurious direction. Groups of 2-3 spectra need a manual "
+                  "count."),
+            style='Small.TLabel', foreground='#b45309', wraplength=640, justify=tk.LEFT)
+        self.contam_epo_caution_label.pack(anchor=tk.W, pady=(4, 0), padx=(20, 0))
         row += 1
 
         # Section 2: Apply Correction
@@ -58388,10 +58109,16 @@ External Validation Performance (n={n_val}):
         ttk.Radiobutton(source_frame, text="Main Dataset (Tab 1)", variable=self.contam_apply_source,
                        value='Main Dataset', style='TRadiobutton').pack(side=tk.LEFT, padx=5)
 
-        # Apply button
-        ttk.Button(apply_frame, text="▶️ Apply Correction",
+        # Apply / Restore buttons
+        contam_apply_btns = ttk.Frame(apply_frame, style='TFrame')
+        contam_apply_btns.pack(anchor=tk.W, pady=(0, 10))
+        ttk.Button(contam_apply_btns, text="▶️ Apply Correction",
                   command=self._contam_apply_correction,
-                  style='Modern.TButton').pack(anchor=tk.W, pady=(0, 10))
+                  style='Modern.TButton').pack(side=tk.LEFT, padx=(0, 10))
+        self.contam_restore_btn = ttk.Button(
+            contam_apply_btns, text="↶ Restore Main Dataset",
+            command=self._contam_restore_main_dataset, state='disabled')
+        self.contam_restore_btn.pack(side=tk.LEFT)
 
         self.contam_apply_status_label = ttk.Label(
             apply_frame, text="No correction applied yet",
@@ -58458,6 +58185,7 @@ External Validation Performance (n={n_val}):
         self.contam_wavelengths = None
         self.contam_groups.clear()
         self.contam_group_paths.clear()
+        self.contam_group_types = {}
         self.contam_results = None
         self._contam_combined_df = None
         self._contam_combined_wl_cols = None
@@ -58497,6 +58225,7 @@ External Validation Performance (n={n_val}):
         self.contam_peak_threshold.set(10.0)
         self.contam_correction_method.set('Exclude Regions')
         self.contam_apply_source.set('Contaminant Groups')
+        self.contam_epo_components.set('auto')
 
         # 6. Clear UI widgets on 13A
         self.contam_groups_listbox.delete(0, tk.END)
@@ -58598,6 +58327,8 @@ External Validation Performance (n={n_val}):
         """
         from pathlib import Path
         path = Path(path)
+        # Reader metadata of this load (folder readers only), for the data type
+        self._contam_last_metadata = None
 
         if path.is_file():
             # Load from file - extract wavelength columns only (no y column required)
@@ -58646,6 +58377,7 @@ External Validation Performance (n={n_val}):
             if asd_files:
                 from spectral_predict.io import read_asd_dir
                 df, metadata = read_asd_dir(str(path))
+                self._contam_last_metadata = metadata
                 return df.values, df.columns.astype(float).values, df.index.tolist()
 
             # Check for SPC files
@@ -58653,6 +58385,7 @@ External Validation Performance (n={n_val}):
             if spc_files:
                 from spectral_predict.io import read_spc_dir
                 df, metadata = read_spc_dir(str(path))
+                self._contam_last_metadata = metadata
                 return df.values, df.columns.astype(float).values, df.index.tolist()
 
             # Check for JCAMP files
@@ -58660,6 +58393,7 @@ External Validation Performance (n={n_val}):
             if jcamp_files:
                 from spectral_predict.io import read_jcamp_dir
                 df, metadata = read_jcamp_dir(str(path))
+                self._contam_last_metadata = metadata
                 return df.values, df.columns.astype(float).values, df.index.tolist()
 
             # Check for OPUS files
@@ -58667,6 +58401,8 @@ External Validation Performance (n={n_val}):
             if opus_files:
                 from spectral_predict.io import read_opus_dir
                 df, metadata = read_opus_dir(str(path))
+                self._contam_last_metadata = metadata
+                self._show_import_warnings(metadata, "OPUS")
                 return df.values, df.columns.astype(float).values, df.index.tolist()
 
             # Check for SP files (PerkinElmer)
@@ -58674,6 +58410,8 @@ External Validation Performance (n={n_val}):
             if sp_files:
                 from spectral_predict.io import read_sp_dir
                 df, metadata = read_sp_dir(str(path))
+                self._contam_last_metadata = metadata
+                self._show_import_warnings(metadata, "PerkinElmer")
                 return df.values, df.columns.astype(float).values, df.index.tolist()
 
             # Check for Thermo Omnic files (.spa, .spg)
@@ -58681,6 +58419,7 @@ External Validation Performance (n={n_val}):
             if omnic_files:
                 from spectral_predict.io import read_omnic_dir
                 df, metadata = read_omnic_dir(str(path))
+                self._contam_last_metadata = metadata
                 return df.values, df.columns.astype(float).values, df.index.tolist()
 
             raise ValueError(f"No supported spectral files found in {path}")
@@ -58722,6 +58461,7 @@ External Validation Performance (n={n_val}):
         try:
             # Load data using helper method
             data, wavelengths, sample_names = self._contam_load_spectra_from_path(filepath)
+            self.contam_clean_metadata = getattr(self, '_contam_last_metadata', None)
             self.contam_clean_data = data
             self.contam_wavelengths = wavelengths
             self.contam_clean_sample_names = sample_names
@@ -58742,12 +58482,131 @@ External Validation Performance (n={n_val}):
 
             # Detect data type (Feature 5)
             self._contam_detect_data_type()
+            # Groups added before this clean data were not checked against it
+            self._contam_revalidate_groups()
 
             # Auto-populate spectra plot if groups already loaded (Feature 1)
             self._contam_auto_populate_spectra_plot()
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load clean data:\n{str(e)}")
+
+    def _contam_clean_type_record(self):
+        """Data type record of the loaded clean data (None if none is loaded)."""
+        if getattr(self, 'contam_clean_data', None) is None:
+            return None
+        return {
+            'data_type': self.contam_current_data_type.get(),
+            'source_data_type': (
+                None if getattr(self, 'contam_data_converted', False)
+                else getattr(self, 'contam_source_data_type', None)
+            ),
+            'stated': bool((getattr(self, 'contam_clean_metadata', None) or {}).get('data_type')),
+        }
+
+    @staticmethod
+    def _contam_type_problem(group_record, clean_record):
+        """Why a contaminant group cannot be analysed with the clean data, or None.
+
+        The non-convertible policy comes first: if either side is 'other'
+        (Kubelka-Munk, Raman, single-channel ...), both must be 'other' with the same
+        canonical source; Kubelka-Munk and Raman are both 'other' but not comparable.
+        Then convertible types must agree when the group's reader stated its type;
+        a group typed only by the value heuristic follows the clean data.
+        """
+        g_type, c_type = group_record.get('data_type'), clean_record.get('data_type')
+        g_label = _data_type_label(g_type, group_record.get('source_data_type'))
+        c_label = _data_type_label(c_type, clean_record.get('source_data_type'))
+        if not (_is_convertible_data_type(g_type) and _is_convertible_data_type(c_type)):
+            same_source = canonical_source_data_type(
+                group_record.get('source_data_type')
+            ) == canonical_source_data_type(clean_record.get('source_data_type'))
+            if g_type != c_type or not same_source:
+                return f"{g_label} data, but the clean data is {c_label}"
+            return None
+        if g_type != c_type and group_record.get('stated'):
+            return f"{g_label} data, but the clean data is {c_label}"
+        return None
+
+    def _contam_group_type(self, label, metadata, group_data):
+        """Data type record for a contaminant group, or None if it is refused.
+
+        The record keeps the group's own type, source and value scale. When clean
+        data is loaded the group must be compatible with it (``_contam_type_problem``);
+        a group added before the clean data is checked when the clean data loads,
+        and again before every analysis.
+        """
+        group_type, _confidence, group_source = _resolve_loaded_data_type(metadata, group_data)
+        record = {
+            'data_type': group_type,
+            'source_data_type': group_source,
+            'value_scale': _loaded_value_scale(metadata, group_data, group_type),
+            'stated': bool((metadata or {}).get('data_type')),
+        }
+        clean_record = self._contam_clean_type_record()
+        if clean_record is not None:
+            problem = self._contam_type_problem(record, clean_record)
+            if problem:
+                messagebox.showerror(
+                    "Data Type Mismatch",
+                    f"Contaminant group '{label}' is {problem}.\n\nAll groups must have "
+                    "the clean data's data type. Convert the data or load matching files.")
+                return None
+        return record
+
+    def _contam_incompatible_groups(self):
+        """``{label: problem}`` for stored groups that do not match the clean data."""
+        clean_record = self._contam_clean_type_record()
+        if clean_record is None:
+            return {}
+        records = getattr(self, 'contam_group_types', {})
+        problems = {}
+        for label in self.contam_groups:
+            record = records.get(label)
+            if record is None:
+                continue  # no record (legacy): follows the clean data
+            problem = self._contam_type_problem(record, clean_record)
+            if problem:
+                problems[label] = problem
+        return problems
+
+    def _contam_remove_groups(self, labels):
+        """Remove groups by label from the data, records and listbox."""
+        for label in labels:
+            self.contam_groups.pop(label, None)
+            self.contam_group_paths.pop(label, None)
+            getattr(self, 'contam_group_types', {}).pop(label, None)
+        listbox = getattr(self, 'contam_groups_listbox', None)
+        if listbox is not None and hasattr(listbox, 'size'):
+            for idx in reversed(range(listbox.size())):
+                if str(listbox.get(idx)).split(':')[0] in labels:
+                    listbox.delete(idx)
+
+    def _contam_revalidate_groups(self):
+        """After the clean data changes, offer to remove groups that no longer match."""
+        problems = self._contam_incompatible_groups()
+        if not problems:
+            return
+        detail = "\n".join(f"  - {label}: {problem}" for label, problem in problems.items())
+        if messagebox.askyesno(
+            "Data Type Mismatch",
+            "These contaminant groups do not match the clean data:\n"
+            f"{detail}\n\nRemove them? (Analyses refuse to run while they remain.)",
+        ):
+            self._contam_remove_groups(list(problems))
+            self._contam_update_summary()
+
+    def _contam_groups_block_analysis(self):
+        """Show an error and return True if any group's type mismatches the clean data."""
+        problems = self._contam_incompatible_groups()
+        if not problems:
+            return False
+        detail = "\n".join(f"  - {label}: {problem}" for label, problem in problems.items())
+        messagebox.showerror(
+            "Data Type Mismatch",
+            "These contaminant groups do not match the clean data:\n"
+            f"{detail}\n\nRemove or replace them before running the analysis.")
+        return True
 
     def _contam_add_single_group(self, label: str, filepath: str) -> bool:
         """Load, validate, and store a single contaminant group.
@@ -58756,6 +58615,15 @@ External Validation Performance (n={n_val}):
         """
         try:
             group_data, group_wavelengths, sample_names = self._contam_load_spectra_from_path(filepath)
+            group_data = np.asarray(group_data)
+            if group_data.ndim != 2 or group_data.shape[0] == 0 or group_data.shape[1] == 0:
+                messagebox.showerror(
+                    "Error", f"Group '{label}' contains no spectra; it was not added.")
+                return False
+            group_metadata = getattr(self, '_contam_last_metadata', None)
+            group_type = self._contam_group_type(label, group_metadata, group_data)
+            if group_type is None:
+                return False
 
             # Validate wavelengths match if we have wavelengths loaded
             if self.contam_wavelengths is not None and group_wavelengths is not None:
@@ -58768,6 +58636,9 @@ External Validation Performance (n={n_val}):
             # Store group data
             self.contam_groups[label] = group_data
             self.contam_group_paths[label] = filepath
+            if not hasattr(self, 'contam_group_types'):
+                self.contam_group_types = {}
+            self.contam_group_types[label] = group_type
 
             # Add to listbox
             n_samples, n_wavelengths = group_data.shape
@@ -58863,6 +58734,7 @@ External Validation Performance (n={n_val}):
         # Remove from data structures
         del self.contam_groups[label]
         del self.contam_group_paths[label]
+        getattr(self, 'contam_group_types', {}).pop(label, None)
 
         # Remove from listbox
         self.contam_groups_listbox.delete(idx)
@@ -58948,6 +58820,9 @@ External Validation Performance (n={n_val}):
 
         if len(self.contam_groups) == 0:
             messagebox.showerror("Error", "Please add at least one contaminant group")
+            return
+
+        if self._contam_groups_block_analysis():
             return
 
         try:
@@ -59256,6 +59131,9 @@ External Validation Performance (n={n_val}):
             messagebox.showerror("Error", "Please add at least one contaminant group")
             return
 
+        if self._contam_groups_block_analysis():
+            return
+
         method = self.contam_method.get()
         n_components = self.contam_n_components.get()
         threshold = self.contam_threshold.get()
@@ -59340,11 +59218,13 @@ External Validation Performance (n={n_val}):
             self._contam_plot_spectra_with_exclusions(results)
 
             preproc_line = f"\nPreprocessing: {preproc}" if preproc != 'None (Raw)' else ""
+            notes = results.get('notes') or []
+            notes_text = ("\n\nNote: " + "\n".join(notes)) if notes else ""
             messagebox.showinfo("Success",
                 f"Automated detection complete!\n"
                 f"Method: {method}{preproc_line}\n"
                 f"Found {len(results.get('exclusion_regions', []))} regions to exclude.\n\n"
-                f"See influence plot below for details.")
+                f"See influence plot below for details.{notes_text}")
 
         except Exception as e:
             self.contam_detection_status_label.config(
@@ -59461,10 +59341,15 @@ External Validation Performance (n={n_val}):
         if self.contam_clean_data is None or self.contam_wavelengths is None:
             return
         try:
-            from spectral_predict.io import detect_spectral_data_type, infer_reflectance_scale
             df = pd.DataFrame(self.contam_clean_data, columns=self.contam_wavelengths)
-            data_type, confidence, method = detect_spectral_data_type(df)
-            scale = infer_reflectance_scale(df)
+            metadata = getattr(self, 'contam_clean_metadata', None)
+            # Reader metadata first: an OPUS log-reflectance block looks like
+            # reflectance by value but must not be logged again
+            data_type, confidence, self.contam_source_data_type = _resolve_loaded_data_type(
+                metadata, df
+            )
+            method = (metadata or {}).get('detection_method', 'value heuristic')
+            scale = _loaded_value_scale(metadata, df, data_type)
 
             self.contam_original_data_type.set(data_type)
             self.contam_current_data_type.set(data_type)
@@ -59475,12 +59360,16 @@ External Validation Performance (n={n_val}):
 
             # Update UI
             conf_color = 'green' if confidence >= 70 else 'orange'
+            type_label = _data_type_label(data_type, self.contam_source_data_type)
             self.contam_dtype_status_label.config(
-                text=f"Detected: {data_type} ({confidence:.0f}% confidence, {method})",
+                text=f"Detected: {type_label} ({confidence:.0f}% confidence, {method})",
                 foreground=conf_color
             )
-            target = "Absorbance" if data_type == "reflectance" else "Reflectance"
-            self.contam_convert_btn.config(text=f"Convert to {target}")
+            if _is_convertible_data_type(data_type):
+                target = "Absorbance" if data_type == "reflectance" else "Reflectance"
+                self.contam_convert_btn.config(text=f"Convert to {target}", state='normal')
+            else:
+                self.contam_convert_btn.config(text="No conversion", state='disabled')
         except Exception as e:
             self.contam_dtype_status_label.config(
                 text=f"Detection failed: {e}", foreground='red'
@@ -59493,6 +59382,12 @@ External Validation Performance (n={n_val}):
             return
 
         current = self.contam_current_data_type.get()
+        if not _is_convertible_data_type(current):
+            messagebox.showwarning(
+                "No Conversion",
+                f"{_data_type_label(current, getattr(self, 'contam_source_data_type', None))} "
+                "data has no reflectance/absorbance conversion.")
+            return
         target = "absorbance" if current == "reflectance" else "reflectance"
 
         # Warn if overriding high-confidence detection
@@ -59505,26 +59400,44 @@ External Validation Performance (n={n_val}):
                 return
 
         try:
-            # Temporarily set scale for conversion methods
-            saved_scale = getattr(self, 'data_value_scale', 1.0)
-            saved_source = getattr(self, 'source_data_type', 'reflectance')
-            self.data_value_scale = self.contam_data_value_scale
+            group_types = getattr(self, 'contam_group_types', {})
+            problems = self._contam_incompatible_groups()
+            if problems:
+                messagebox.showerror(
+                    "Data Type Mismatch",
+                    f"Contaminant groups {sorted(problems)} do not have the clean data's data "
+                    f"type ({current}); nothing was converted. Remove or replace them first.")
+                return
+            # Compute every converted array first, then commit, so a failure part-way
+            # leaves data and type state unchanged. Each dataset converts with its own
+            # source type and scale (_convert_with_source swaps out main-tab state).
+            clean_source = (
+                None if self.contam_data_converted
+                else getattr(self, 'contam_source_data_type', None))
+            new_clean, new_clean_scale = self._convert_with_source(
+                self.contam_clean_data, current, target, clean_source,
+                self.contam_data_value_scale)
+            new_groups = {}
+            for label, data in self.contam_groups.items():
+                record = group_types.get(label)
+                if record is not None:
+                    source, scale = record.get('source_data_type'), record['value_scale']
+                else:
+                    source, scale = clean_source, self.contam_data_value_scale
+                if np.asarray(data).size == 0:
+                    raise ValueError(f"group '{label}' contains no spectra")
+                new_groups[label] = self._convert_with_source(data, current, target, source, scale)
 
-            if target == "absorbance":
-                self.source_data_type = 'reflectance'
-                self.contam_clean_data = self._convert_reflectance_to_absorbance(self.contam_clean_data)
-                for label in list(self.contam_groups.keys()):
-                    self.contam_groups[label] = self._convert_reflectance_to_absorbance(self.contam_groups[label])
-            else:
-                self.source_data_type = 'reflectance'
-                self.contam_clean_data = self._convert_absorbance_to_reflectance(self.contam_clean_data)
-                for label in list(self.contam_groups.keys()):
-                    self.contam_groups[label] = self._convert_absorbance_to_reflectance(self.contam_groups[label])
-
-            # Restore main data state
-            self.data_value_scale = saved_scale
-            self.source_data_type = saved_source
-
+            # Commit
+            self.contam_clean_data = new_clean
+            self.contam_data_value_scale = new_clean_scale
+            for label, (converted, scale) in new_groups.items():
+                self.contam_groups[label] = converted
+                record = group_types.get(label)
+                if record is not None:
+                    record['data_type'] = target
+                    record['value_scale'] = scale
+                    record['source_data_type'] = None  # no longer the file's own type
             self.contam_current_data_type.set(target)
             self.contam_data_converted = not self.contam_data_converted
 
@@ -59552,7 +59465,9 @@ External Validation Performance (n={n_val}):
                 foreground='orange'
             )
         new_target = "Absorbance" if current == "reflectance" else "Reflectance"
-        self.contam_convert_btn.config(text=f"Convert to {new_target}")
+        self.contam_convert_btn.config(
+            text=f"Convert to {new_target}",
+            state='normal' if _is_convertible_data_type(current) else 'disabled')
         # Re-plot to update y-axis label
         if hasattr(self, '_contam_group_spectra_canvas'):
             self._contam_plot_group_spectra(preprocess=False)
@@ -59900,9 +59815,10 @@ External Validation Performance (n={n_val}):
             self.contam_wavelengths = wavelengths
             self.contam_clean_sample_names = list(df.loc[clean_mask].index.astype(str))
 
-            # Clear existing groups
+            # Clear existing groups (they come from the clean file: same type)
             self.contam_groups.clear()
             self.contam_group_paths.clear()
+            self.contam_group_types = {}
             self.contam_groups_listbox.delete(0, tk.END)
 
             # Create contaminant groups
@@ -59924,8 +59840,24 @@ External Validation Performance (n={n_val}):
             self.contam_clean_info_label.config(text=info_text, foreground=self.colors['text'])
             self.contam_clean_path.set(f"Combined: {self.contam_combined_file_path.get()}")
 
-            # Detect data type (Feature 5)
+            # Detect data type (Feature 5); a combined file carries no reader type
+            self.contam_clean_metadata = None
             self._contam_detect_data_type()
+            # The groups come from the same file, so they share its ordinate type. Each
+            # gets its own record so conversion tracks it; the value scale is decided
+            # from the whole file's spectra (not from the clean rows alone) and applied
+            # to every dataset, since one export uses one scale
+            clean_record = self._contam_clean_type_record() or {}
+            file_scale = _loaded_value_scale(
+                None, df[wl_cols].values.astype(float), clean_record.get('data_type'))
+            self.contam_data_value_scale = file_scale
+            for val in self.contam_groups:
+                self.contam_group_types[val] = {
+                    'data_type': clean_record.get('data_type'),
+                    'source_data_type': clean_record.get('source_data_type'),
+                    'value_scale': file_scale,
+                    'stated': False,
+                }
 
             # Update summary and alignment
             self._contam_update_summary()
@@ -60165,45 +60097,86 @@ External Validation Performance (n={n_val}):
                 X_corrected = self._apply_epo_projection(X_to_correct)
             elif method == 'GLSW Weighting':
                 X_corrected = self._apply_glsw_weighting(X_to_correct)
-            elif method == 'OPLS-DA Filter':
-                X_corrected = self._apply_opls_filter(X_to_correct)
             else:
                 raise ValueError(f"Unknown method: {method}")
 
+            import pandas as pd
+            if method == 'Exclude Regions':
+                corrected_columns = self._get_remaining_wavelengths()
+            elif target == 'Main Dataset':
+                corrected_columns = self.X.columns
+            else:
+                corrected_columns = self.contam_wavelengths
+
             # Store corrected data
             if target == 'Main Dataset':
-                # Backup original
-                if not hasattr(self, 'X_before_contam_correction'):
+                # Back up the dataset before the first correction. Take a fresh
+                # backup whenever self.X is not the frame this tab last wrote (a
+                # new dataset was loaded or it was changed elsewhere), so Restore
+                # can never bring back a different dataset.
+                if (self.X_before_contam_correction is None
+                        or not self._contam_X_unchanged_since_write()):
                     self.X_before_contam_correction = self.X.copy()
 
-                # Update with corrected data
-                import pandas as pd
-                if method == 'Exclude Regions':
-                    # Fewer columns after exclusion
-                    remaining_wavelengths = self._get_remaining_wavelengths()
-                    self.X = pd.DataFrame(X_corrected, index=self.X.index, columns=remaining_wavelengths)
-                else:
-                    # Same columns, corrected values
-                    self.X = pd.DataFrame(X_corrected, index=self.X.index, columns=self.X.columns)
-
+                self.X = pd.DataFrame(X_corrected, index=self.X.index, columns=corrected_columns)
+                self._contam_X_written = self.X
+                self._contam_X_fingerprint = self._contam_fingerprint(self.X)
                 self.contam_corrected_X = self.X.copy()
+                validation_note = self._contam_resync_validation()
+                if hasattr(self, 'contam_restore_btn'):
+                    self.contam_restore_btn.config(state='normal')
+            else:
+                row_labels = [
+                    f"{label}_{i + 1}"
+                    for label, X_group in self.contam_groups.items()
+                    for i in range(len(X_group))
+                ]
+                self.contam_corrected_X = pd.DataFrame(
+                    X_corrected, index=row_labels, columns=corrected_columns
+                )
 
             # Show success
+            detail = ""
+            if method == 'EPO Projection':
+                n_removed = getattr(self.contam_epo_transformer, 'n_components_', 0)
+                detail = f" ({n_removed} contaminant direction(s) removed)"
             self.contam_apply_status_label.config(
-                text=f"✓ {method} applied to {target}",
+                text=f"✓ {method} applied to {target}{detail}",
                 foreground='green'
             )
 
             # Show before/after plot
             self._show_correction_comparison(X_to_correct, X_corrected, method)
 
+            restore_note = (
+                "\n\nThe main dataset now holds the corrected spectra. Use 'Restore Main "
+                "Dataset' to undo. Changing the wavelength range on the Import tab "
+                "rebuilds the data from the original file and drops this correction."
+                + validation_note
+                if target == 'Main Dataset' else ""
+            )
+            if method == 'EPO Projection':
+                restore_note += (
+                    "\n\nCaution: the removed direction is the difference between the "
+                    "group means. It contains any real chemical difference between the "
+                    "clean and contaminated groups, which is removed together with the "
+                    "contaminant. Use groups that differ only by the contaminant."
+                )
             messagebox.showinfo("Success",
                 f"Correction applied!\n\n"
-                f"Method: {method}\n"
+                f"Method: {method}{detail}\n"
                 f"Target: {target}\n"
                 f"Original shape: {X_to_correct.shape}\n"
-                f"Corrected shape: {X_corrected.shape}")
+                f"Corrected shape: {X_corrected.shape}{restore_note}")
 
+        except _ContamCancelled:
+            self.contam_apply_status_label.config(
+                text="Cancelled: nothing was changed", foreground='gray')
+        except _ContamNothingToRemove as e:
+            self.contam_apply_status_label.config(
+                text="No contaminant direction found: nothing removed (see message)",
+                foreground='#b45309')
+            messagebox.showinfo("Nothing Removed", str(e))
         except Exception as e:
             self.contam_apply_status_label.config(text="✗ Correction failed", foreground='red')
             messagebox.showerror("Error", f"Correction failed:\n{str(e)}")
@@ -60241,17 +60214,72 @@ External Validation Performance (n={n_val}):
         return self.contam_wavelengths
 
     def _apply_epo_projection(self, X: np.ndarray) -> np.ndarray:
-        """Apply EPO projection to remove contaminant signal."""
-        from spectral_predict.contaminant_analysis import EstimatedEPO
+        """Project the contaminant directions out of X (EPO, Roger et al. 2003).
 
-        n_components = self.contam_n_components.get()
+        Each contaminant group contributes its mean difference from the clean
+        group; directions that clear the sampling-noise floor are removed. The
+        result is ``X @ (I - V V^T)``: spectra on the original scale.
+        """
+        import warnings
 
-        # Combine all contaminant groups
-        X_contam = np.vstack(list(self.contam_groups.values()))
+        from spectral_predict.contaminant_analysis import MultiGroupEPO
 
-        # Fit EPO on clean vs contaminated
-        epo = EstimatedEPO(n_components=n_components)
-        epo.fit_groups(X_contam, self.contam_clean_data)
+        choice = str(self.contam_epo_components.get()).strip().lower()
+        n_total = None if choice in ('', 'auto') else int(choice)
+        n_groups = len(self.contam_groups)
+        sizes = [len(self.contam_clean_data)] + [len(g) for g in self.contam_groups.values()]
+        if n_total is None and min(sizes) < 2:
+            raise _ContamNothingToRemove(
+                "The automatic count needs at least 2 spectra in the clean group and in "
+                "every contaminant group (sampling variation cannot be judged from one "
+                "spectrum), so nothing was removed.\n\nSet 'EPO directions to remove' to a "
+                "number and apply again."
+            )
+        epo = MultiGroupEPO(n_total_components=n_total)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            epo.fit(self.contam_clean_data, self.contam_groups)
+        if epo.n_components_ == 0:
+            p_txt = f" (p = {epo.p_values_[0]:.3g})" if epo.p_values_ else ""
+            raise _ContamNothingToRemove(
+                "The automatic test found no direction in which the contaminant groups "
+                f"differ from the clean group by more than sampling variation{p_txt}, so "
+                "nothing was removed.\n\nIf you know the contaminant is there (small "
+                "groups make weak contaminants hard to detect), set 'EPO directions to "
+                "remove' to 1 and apply again."
+            )
+
+        if n_total is None and self._CONTAM_AUTO_COUNT_ADVISORY:
+            # The automatic count is advisory: nothing is removed until the user
+            # confirms or picks a number (review round 2, item 2).
+            k = epo.n_components_
+            p_txt = ", ".join(f"{p:.3g}" for p in epo.p_values_[:k])
+            skew_note = self._contam_skew_warning(epo)
+            answer = messagebox.askyesnocancel(
+                "Confirm EPO Directions",
+                f"The automatic test suggests removing {k} contaminant direction(s) "
+                f"(p = {p_txt}).\n\n"
+                "These p-values are approximate, not calibrated: they assume roughly "
+                "symmetric variation within each group. Skewed or heavy-tailed groups with "
+                "very different spreads can produce a spurious direction, and a contaminant "
+                "confined to one of several groups can be missed. Prefer a manual count "
+                f"when in doubt.{skew_note}\n\n"
+                f"Yes: remove {k}.\nNo: choose a number.\nCancel: remove nothing.")
+            if answer is None:
+                raise _ContamCancelled()
+            if answer is False:
+                from tkinter import simpledialog
+
+                chosen = simpledialog.askinteger(
+                    "EPO Directions",
+                    f"Number of contaminant directions to remove (1-{n_groups}):",
+                    minvalue=1, maxvalue=n_groups, parent=self.root)
+                if chosen is None:
+                    raise _ContamCancelled()
+                epo = MultiGroupEPO(n_total_components=int(chosen))
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    epo.fit(self.contam_clean_data, self.contam_groups)
 
         # Store for potential reuse
         self.contam_epo_transformer = epo
@@ -60271,22 +60299,6 @@ External Validation Performance (n={n_val}):
         self.contam_glsw_transformer = glsw
 
         return glsw.transform(X)
-
-    def _apply_opls_filter(self, X: np.ndarray) -> np.ndarray:
-        """Apply OPLS orthogonal signal correction."""
-        from spectral_predict.contaminant_analysis import ContaminantOPLSDA
-
-        n_components = self.contam_n_components.get()
-        X_contam = np.vstack(list(self.contam_groups.values()))
-
-        opls = ContaminantOPLSDA(n_components=min(n_components, 1))
-        opls.fit(X_contam, self.contam_clean_data)
-
-        self.contam_opls_transformer = opls
-
-        # OPLS transform returns scores, need to reconstruct
-        # For now, use the orthogonal-corrected approach
-        return opls.transform(X)
 
     def _show_correction_comparison(self, X_before: np.ndarray, X_after: np.ndarray, method: str):
         """Show before/after comparison plot."""
@@ -60324,7 +60336,7 @@ External Validation Performance (n={n_val}):
         # Show in popup window
         popup = tk.Toplevel(self.root)
         popup.title("Correction Comparison")
-        popup.geometry("900x500")
+        popup.geometry(_px_geometry("900x500", self.root))
 
         canvas = FigureCanvasTkAgg(fig, master=popup)
         canvas.draw()
@@ -60332,8 +60344,120 @@ External Validation Performance (n={n_val}):
 
         ttk.Button(popup, text="Close", command=popup.destroy).pack(pady=10)
 
+    def _contam_restore_main_dataset(self):
+        """Undo contaminant corrections on the main dataset (R113)."""
+        backup = self.X_before_contam_correction
+        if backup is None:
+            messagebox.showinfo("Nothing to Restore",
+                                "No contaminant correction has been applied to the main dataset.")
+            return
+        if not self._contam_X_unchanged_since_write():
+            messagebox.showwarning(
+                "Cannot Restore",
+                "The main dataset has changed since the correction was applied (new data "
+                "loaded or edited elsewhere), so the saved copy may belong to a different "
+                "dataset or would undo those later edits. Reload the data instead.")
+            return
+        self.X = backup.copy()
+        self.X_before_contam_correction = None
+        self._contam_X_written = None
+        self._contam_X_fingerprint = None
+        validation_note = self._contam_resync_validation()
+        if hasattr(self, 'contam_restore_btn'):
+            self.contam_restore_btn.config(state='disabled')
+        self.contam_apply_status_label.config(
+            text="↶ Main dataset restored to its state before contaminant correction"
+                 + validation_note.replace("\n", " "),
+            foreground='green')
+
+    def _contam_skew_warning(self, epo):
+        """Dialog note when a group's spread along a suggested direction is strongly skewed.
+
+        The automatic count's bootstrap symmetrises residuals; with skewed groups
+        of very different spread it can suggest a spurious direction (review round
+        3: 9% false removals for lognormal groups). Sample skewness |g1| > 1 in a
+        group of at least 8 spectra is flagged; it is a hint, not a test.
+        """
+        from scipy import stats
+
+        if epo.n_components_ == 0:
+            return ""
+        v = epo.interferent_components_[:, 0]
+        groups = [("clean", self.contam_clean_data)] + list(self.contam_groups.items())
+        flagged = []
+        for label, X_g in groups:
+            X_g = np.asarray(X_g, dtype=float)
+            if X_g.shape[0] < 8:
+                continue
+            scores = (X_g - X_g.mean(axis=0)) @ v
+            if np.std(scores) > 0 and abs(stats.skew(scores)) > 1.0:
+                flagged.append(str(label))
+        if not flagged:
+            return ""
+        return ("\n\nWarning: the variation along the suggested direction is strongly "
+                f"skewed in: {', '.join(flagged)}. The suggestion is less reliable here; "
+                "consider a manual count.")
+
+    @staticmethod
+    def _contam_fingerprint(frame):
+        """Cheap content fingerprint: shape, labels and a hash of the values."""
+        import hashlib
+
+        digest = hashlib.blake2b(digest_size=16)
+        digest.update(np.ascontiguousarray(frame.to_numpy(dtype=float)).tobytes())
+        digest.update(repr(list(frame.index)).encode('utf-8'))
+        digest.update(repr(list(frame.columns)).encode('utf-8'))
+        return frame.shape, digest.hexdigest()
+
+    def _contam_X_unchanged_since_write(self):
+        """True while self.X is still the frame (and content) a correction wrote.
+
+        Identity alone is not enough: an in-place edit of self.X keeps the same
+        object, and restoring over it would silently discard that edit.
+        """
+        if self.X is None or self.X is not self._contam_X_written:
+            return False
+        return self._contam_fingerprint(self.X) == getattr(self, '_contam_X_fingerprint', None)
+
+    def _contam_resync_validation(self):
+        """Rebuild validation_X from self.X after a correction or Restore.
+
+        The holdout spectra are cached separately (validation_X); without this a
+        search would score corrected calibration spectra against uncorrected
+        holdout spectra (or the reverse after Restore). Rows are taken from self.X
+        by the existing validation IDs, in the cached order. Returns a note for the
+        user ('' when there is no holdout).
+        """
+        if not self.validation_indices:
+            return ""
+        if self.validation_X is not None and len(self.validation_X) > 0:
+            validation_idx = list(self.validation_X.index)
+        elif self.validation_y is not None and len(self.validation_y) > 0:
+            validation_idx = list(self.validation_y.index)
+        else:
+            validation_idx = list(self.validation_indices)
+        missing = [i for i in validation_idx if i not in self.X.index]
+        if missing:
+            # A stale holdout must not stay usable: clear it (cache, indices and
+            # the Validation checkbox) so no analysis scores against it.
+            self._reset_validation_set()
+            if hasattr(self, 'validation_status_label'):
+                self.validation_status_label.config(
+                    text="Holdout cleared: it no longer matched the main dataset")
+            return (f"\n\nThe holdout set was CLEARED: {len(missing)} holdout sample(s) "
+                    "are not in the main dataset, so its spectra could not be updated. "
+                    "Recreate the holdout before running an analysis.")
+        self.validation_X = self.X.loc[validation_idx]
+        return f"\n\nThe {len(validation_idx)} holdout spectra were updated to match."
+
     def _contam_export_corrected_spectra(self):
-        """Export corrected spectral data."""
+        """Export the last corrected spectra to CSV, Excel or NumPy (R114)."""
+        corrected = getattr(self, 'contam_corrected_X', None)
+        if corrected is None:
+            messagebox.showwarning("No Corrected Data",
+                                   "Apply a correction first (section 2 on this page).")
+            return
+
         filepath = filedialog.asksaveasfilename(
             title="Export Corrected Spectra",
             defaultextension=".csv",
@@ -60344,8 +60468,15 @@ External Validation Performance (n={n_val}):
             return
 
         try:
-            # Placeholder - would export actual corrected data
-            messagebox.showinfo("Info", "Export functionality would save corrected spectra here")
+            suffix = Path(filepath).suffix.lower()
+            if suffix == '.npy':
+                np.save(filepath, corrected.to_numpy(dtype=float))
+            elif suffix in ('.xlsx', '.xls'):
+                corrected.to_excel(filepath, index_label='Sample')
+            else:
+                corrected.to_csv(filepath, index_label='Sample')
+            if not Path(filepath).exists():
+                raise OSError(f"{filepath} was not created")
 
             self.contam_export_status_label.config(
                 text=f"✓ Corrected spectra exported to {Path(filepath).name}",
@@ -60430,9 +60561,9 @@ External Validation Performance (n={n_val}):
 
     def _on_epo_toggled(self):
         """Handle EPO enable/disable."""
+        # Always disabled: not applied during analysis (QW6).
         enabled = self.advanced_interference_settings['epo']['enabled'].get()
-        state = 'normal' if enabled else 'disabled'
-        self._toggle_epo_settings_state(state)
+        self._toggle_epo_settings_state('disabled')
         self._update_method_summary()
 
         if enabled:
@@ -60489,9 +60620,8 @@ External Validation Performance (n={n_val}):
 
     def _on_dosc_toggled(self):
         """Handle DOSC enable/disable."""
-        enabled = self.advanced_interference_settings['dosc']['enabled'].get()
-        state = 'normal' if enabled else 'disabled'
-        self._toggle_dosc_settings_state(state)
+        # Always disabled: not applied during analysis (QW6).
+        self._toggle_dosc_settings_state('disabled')
         self._update_method_summary()
 
     def _toggle_dosc_settings_state(self, state):
@@ -60512,9 +60642,8 @@ External Validation Performance (n={n_val}):
 
     def _on_glsw_toggled(self):
         """Handle GLSW enable/disable."""
-        enabled = self.advanced_interference_settings['glsw']['enabled'].get()
-        state = 'normal' if enabled else 'disabled'
-        self._toggle_glsw_settings_state(state)
+        # Always disabled: not applied during analysis (QW6).
+        self._toggle_glsw_settings_state('disabled')
         self._update_method_summary()
 
     def _toggle_glsw_settings_state(self, state):
@@ -60607,6 +60736,7 @@ External Validation Performance (n={n_val}):
             self.app_spectra = {
                 'wavelengths': wavelengths,
                 'X': X,
+                'y': None,  # no reference values: OSC/DOSC unavailable
                 'n_spectra': len(csv_files),
                 'source': 'folder'
             }
@@ -60622,30 +60752,79 @@ External Validation Performance (n={n_val}):
             messagebox.showerror("Error Loading Folder", f"Failed to load spectra:\n{str(e)}")
 
     def _app_load_from_import(self):
-        """Load spectra from Import tab data."""
+        """Load spectra (and numeric reference values, if any) from the Import tab."""
         from tkinter import messagebox
+        import pandas as pd
 
-        if not hasattr(self, 'X_train') or self.X_train is None:
+        if self.X is None or len(self.X) == 0:
             messagebox.showwarning(
                 "No Data",
                 "No data loaded in Import tab. Please load data first."
             )
             return
 
-        # Use training data from Import tab
+        X_df = self.X
+        try:
+            wavelengths = np.asarray(X_df.columns, dtype=float)
+        except (TypeError, ValueError):
+            wavelengths = np.arange(X_df.shape[1], dtype=float)
+
+        # Reference values aligned row-for-row with the spectra. OSC and DOSC need
+        # them; text class labels are not usable as a regression target.
+        y = None
+        if self.y is not None:
+            # Align by sample label only; never by position.
+            try:
+                y_num = pd.to_numeric(pd.Series(self.y).reindex(X_df.index), errors='coerce')
+            except ValueError:  # duplicate labels cannot be aligned unambiguously
+                y_num = None
+            if y_num is not None and y_num.notna().sum() >= 3 and y_num.nunique() > 1:
+                y = y_num.to_numpy(dtype=float)
+
         self.app_spectra = {
-            'wavelengths': self.wavelengths,
-            'X': self.X_train,
-            'n_spectra': self.X_train.shape[0],
+            'wavelengths': wavelengths,
+            'X': X_df.to_numpy(dtype=float),
+            'y': y,
+            'sample_ids': list(X_df.index),
+            'n_spectra': X_df.shape[0],
             'source': 'import_tab'
         }
 
+        y_note = (
+            f"   Reference values: {int(np.isfinite(y).sum())} aligned (OSC/DOSC available)"
+            if y is not None else
+            "   No numeric reference values: OSC and DOSC are unavailable"
+        )
         self.app_data_info_label.config(
-            text=f"> Loaded {self.X_train.shape[0]} spectra from Import tab\n"
-                 f"   Shape: {self.X_train.shape}\n"
-                 f"   Wavelengths: {self.wavelengths[0]:.1f} - {self.wavelengths[-1]:.1f} nm",
+            text=f"> Loaded {X_df.shape[0]} spectra from Import tab\n"
+                 f"   Shape: {X_df.shape}\n"
+                 f"   Wavelengths: {wavelengths[0]:.1f} - {wavelengths[-1]:.1f} nm\n"
+                 f"{y_note}",
             foreground='green'
         )
+
+    def _app_reference_target(self, method):
+        """Numeric y aligned with the Application spectra, or None after telling the user."""
+        from tkinter import messagebox
+
+        y = self.app_spectra.get('y') if self.app_spectra else None
+        if y is None:
+            messagebox.showwarning(
+                "Reference Values Needed",
+                f"{method} removes variation that is unrelated (orthogonal) to a reference "
+                f"value, so it needs numeric reference values (y) aligned with the spectra.\n\n"
+                f"Load spectra and reference data on the Import tab, then use 'Load from "
+                f"Import Tab' here. Spectra loaded from a folder have no reference values."
+            )
+            return None
+        y = np.asarray(y, dtype=float)
+        if y.shape[0] != self.app_spectra['X'].shape[0] or np.isfinite(y).sum() < 3:
+            messagebox.showwarning(
+                "Reference Values Needed",
+                f"{method} needs at least 3 numeric reference values aligned with the spectra."
+            )
+            return None
+        return y
 
     def _on_app_method_changed(self, event=None):
         """Update method settings when method selection changes."""
@@ -60681,6 +60860,7 @@ External Validation Performance (n={n_val}):
                 textvariable=self.app_osc_n_components,
                 width=10
             ).pack(anchor=tk.W)
+            self._app_add_reference_note()
 
         elif method == 'EPO':
             ttk.Label(self.app_method_settings_frame, text="Interferent Library:").pack(anchor=tk.W, pady=2)
@@ -60694,6 +60874,19 @@ External Validation Performance (n={n_val}):
             self.app_epo_library_combo.pack(anchor=tk.W, pady=2)
             if library_names:
                 self.app_epo_library_combo.current(0)
+
+            ttk.Label(self.app_method_settings_frame, text="Library contains:").pack(anchor=tk.W, pady=2)
+            self.app_epo_library_type = tk.StringVar(value='samples')
+            ttk.Radiobutton(
+                self.app_method_settings_frame,
+                text="Whole spectra at different interferent levels (differenced from their mean)",
+                variable=self.app_epo_library_type, value='samples'
+            ).pack(anchor=tk.W)
+            ttk.Radiobutton(
+                self.app_method_settings_frame,
+                text="Pure interferent or difference spectra (used as they are)",
+                variable=self.app_epo_library_type, value='differences'
+            ).pack(anchor=tk.W)
 
             ttk.Label(self.app_method_settings_frame, text="Number of Components:").pack(anchor=tk.W, pady=2)
             self.app_epo_n_components = tk.IntVar(value=2)
@@ -60713,6 +60906,7 @@ External Validation Performance (n={n_val}):
                 textvariable=self.app_dosc_n_components,
                 width=10
             ).pack(anchor=tk.W)
+            self._app_add_reference_note()
 
         elif method == 'GLSW':
             ttk.Label(self.app_method_settings_frame, text="Method:").pack(anchor=tk.W, pady=2)
@@ -60729,6 +60923,19 @@ External Validation Performance (n={n_val}):
                 variable=self.app_glsw_method,
                 value='residual'
             ).pack(anchor=tk.W)
+
+    def _app_add_reference_note(self):
+        """Caption under OSC/DOSC settings: they need aligned numeric reference values."""
+        spectra = getattr(self, 'app_spectra', None)
+        has_y = bool(spectra) and spectra.get('y') is not None
+        ttk.Label(
+            self.app_method_settings_frame,
+            text=("Uses the reference values loaded with the spectra (y)." if has_y else
+                  "Needs numeric reference values (y): use 'Load from Import Tab' "
+                  "with reference data loaded."),
+            font=('Arial', 8),
+            foreground='gray' if has_y else 'orange',
+        ).pack(anchor=tk.W, pady=(4, 0))
 
     def _app_apply_correction(self):
         """Apply selected interference removal method to loaded spectra."""
@@ -60762,7 +60969,7 @@ External Validation Performance (n={n_val}):
                 if ranges:
                     excluder = WavelengthExcluder(wavelengths, exclude_ranges=ranges)
                     X_corrected = excluder.fit_transform(X)
-                    wavelengths_corrected = excluder.wavelengths_kept_
+                    wavelengths_corrected = excluder.wavelengths_out_
                 else:
                     messagebox.showwarning("Invalid Ranges", "No valid wavelength ranges specified")
                     return
@@ -60773,11 +60980,21 @@ External Validation Performance (n={n_val}):
                 X_corrected = msc.fit_transform(X)
                 wavelengths_corrected = wavelengths
 
-            elif method == 'OSC':
-                from spectral_predict.interference import OSC
-                n_components = self.app_osc_n_components.get()
-                osc = OSC(n_components=n_components)
-                X_corrected = osc.fit_transform(X)
+            elif method in ('OSC', 'DOSC'):
+                # Both remove variation whose scores are orthogonal to a reference
+                # value, so they need numeric y aligned row-for-row with X.
+                y = self._app_reference_target(method)
+                if y is None:
+                    return
+                has_y = np.isfinite(y)
+                if method == 'OSC':
+                    from spectral_predict.interference import OSC
+                    corrector = OSC(n_components=self.app_osc_n_components.get())
+                else:
+                    from spectral_predict.interference import DOSC
+                    corrector = DOSC(n_components=self.app_dosc_n_components.get(), center=True)
+                corrector.fit(X[has_y], y[has_y])
+                X_corrected = corrector.transform(X)
                 wavelengths_corrected = wavelengths
 
             elif method == 'EPO':
@@ -60789,15 +61006,10 @@ External Validation Performance (n={n_val}):
 
                 lib = self.interferent_libraries[library_name]
                 n_components = self.app_epo_n_components.get()
-                epo = EPO(n_components=n_components, center=True, svd_tol=1e-8)
+                # center=False: return X @ P, corrected spectra on the original scale.
+                epo = EPO(n_components=n_components, center=False, svd_tol=1e-8,
+                          library_type=self.app_epo_library_type.get())
                 X_corrected = epo.fit_transform(X, X_interferents=lib['X'])
-                wavelengths_corrected = wavelengths
-
-            elif method == 'DOSC':
-                from spectral_predict.interference import DOSC
-                n_components = self.app_dosc_n_components.get()
-                dosc = DOSC(n_components=n_components, center=True)
-                X_corrected = dosc.fit_transform(X)
                 wavelengths_corrected = wavelengths
 
             elif method == 'GLSW':
@@ -61798,6 +62010,14 @@ def main():
         _logging.getLogger("spectral_predict").debug(
             "T-50: cleanup failed (non-fatal)", exc_info=True
         )
+
+    # High-DPI: must run before tk.Tk(), or Windows bitmap-stretches the whole UI on
+    # scaled displays. Runs after the app logger so a failure lands in dasp.log. The
+    # frozen exe also declares this in its manifest (spectral_predict_py312.spec).
+    try:
+        _enable_windows_dpi_awareness()
+    except Exception:  # never block startup over a cosmetic setting
+        logger.warning("DPI-awareness setup failed (non-fatal)", exc_info=True)
 
     root = tk.Tk()
 

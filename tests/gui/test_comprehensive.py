@@ -512,9 +512,10 @@ class TestCalibrationTransfer:
     Methods tested:
     - DS: Direct Standardization
     - PDS: Piecewise Direct Standardization
-    - TSR: Transfer by Spectral Regression
-    - CTAI: Calibration Transfer with Analyte Information
-    - NS-PFCE: Non-linear Spectral Processing for Calibration Enhancement
+    - Slope/bias per wavelength (stored key 'tsr'; not trimmed scores regression)
+    - PC-DS, paired regression in satellite PCA space (stored key 'ctai'; not the
+      published standard-free CTAI)
+    - Iterative ridge DS (stored key 'nspfce'; a dasp heuristic, not PFCE)
     - JYPLS-inv: Joint Y PLS Inverse
 
     Uses matched spectral data from two instruments:
@@ -547,7 +548,7 @@ class TestCalibrationTransfer:
         X_master = X_master.sort_index()
         X_slave = X_slave.sort_index()
 
-        # Create synthetic y values for methods that need them (CTAI, JYPLS-inv)
+        # Synthetic y values for JYPLS-inv, which needs reference values
         # Use first principal component score as proxy for analyte concentration
         from sklearn.decomposition import PCA
         pca = PCA(n_components=1)
@@ -619,13 +620,13 @@ class TestCalibrationTransfer:
         print(f"  [+] PDS TRANSFER: {improvement:.1f}% improvement")
 
     def test_tsr_transfer(self, transfer_data):
-        """Test Transfer by Spectral Regression (TSR / Shenk-Westerhaus method)."""
+        """Test per-wavelength slope/bias transfer (stored key 'tsr')."""
         from spectral_predict.calibration_transfer import estimate_tsr, apply_tsr
 
         X_master = transfer_data['X_master']
         X_slave = transfer_data['X_slave']
 
-        print("\n--- TSR (Transfer by Spectral Regression) ---")
+        print("\n--- Slope/bias per wavelength (key tsr) ---")
 
         # Use all samples as transfer samples
         n_samples = X_master.shape[0]
@@ -645,15 +646,15 @@ class TestCalibrationTransfer:
         print(f"  [+] TSR TRANSFER: {improvement:.1f}% improvement")
 
     def test_ctai_transfer(self, transfer_data):
-        """Test Calibration Transfer based on Affine Invariance (CTAI)."""
+        """Test PC-DS, paired regression in satellite PCA space (stored key 'ctai')."""
         from spectral_predict.calibration_transfer import estimate_ctai, apply_ctai
 
         X_master = transfer_data['X_master']
         X_slave = transfer_data['X_slave']
 
-        print("\n--- CTAI (Calibration Transfer - Affine Invariance) ---")
+        print("\n--- PC-DS (key ctai) ---")
 
-        # Fit CTAI (transfer-standard free method)
+        # Fit PC-DS on the paired standards
         params = estimate_ctai(X_master, X_slave, n_components=5)
         X_transferred = apply_ctai(X_slave, params)
 
@@ -667,16 +668,16 @@ class TestCalibrationTransfer:
         print(f"  [+] CTAI TRANSFER: {improvement:.1f}% improvement")
 
     def test_nspfce_transfer(self, transfer_data):
-        """Test Non-supervised Parameter-Free Calibration Enhancement (NS-PFCE)."""
+        """Test Iterative ridge DS (stored key 'nspfce'; a dasp heuristic)."""
         from spectral_predict.calibration_transfer import estimate_nspfce, apply_nspfce
 
         X_master = transfer_data['X_master']
         X_slave = transfer_data['X_slave']
         wavelengths = transfer_data['wavelengths']
 
-        print("\n--- NS-PFCE (Non-supervised Parameter-Free) ---")
+        print("\n--- Iterative ridge DS (key nspfce) ---")
 
-        # Fit NS-PFCE (automatic, parameter-free)
+        # Fit Iterative ridge DS on the paired standards
         params = estimate_nspfce(X_master, X_slave, wavelengths, use_wavelength_selection=False)
         X_transferred = apply_nspfce(X_slave, params)
 

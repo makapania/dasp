@@ -538,6 +538,14 @@ $$A = \log_{10}\left(\frac{1}{R}\right)$$
 
 where $A$ is absorbance and $R$ is reflectance.
 
+#### The "Other" Data Type
+
+When a file states that its values are neither reflectance nor absorbance, the data loads as **Other** and the status shows what it is: Kubelka-Munk, photoacoustic signal, Raman or emission intensity, or raw single-channel intensity (e.g. the matching Bruker OPUS blocks). These values are linear but have no reflectance/absorbance conversion, so the **Convert** buttons are disabled, plots are labelled with the measured quantity, and absorbance-only analyses (e.g. Auto Bone FTIR) refuse the data. If the data really is reflectance or absorbance, select that type with the radio buttons first.
+
+The file's own type is kept as the *source type* (e.g. log-reflectance, transmittance, Raman) and saved with models and ensembles. At prediction time a warning is shown when the prediction data's type, or for the same type its source type (e.g. a Raman model with Kubelka-Munk data), differs from the model's. Models saved before source types were recorded are compared on the data type alone.
+
+The data type reported by the file reader is used on every import path (Import, Prediction, Multi-Model Comparison, Calibration Transfer, Contamination); the value-based detection above only runs when the file carries no type.
+
 ### 3.8 Wavelength Range Configuration
 
 #### Automatic Range Detection
@@ -4315,43 +4323,45 @@ X_msc = msc_external.fit_transform(X)
 
 ### 9.2 Theory
 
-OSC operates on a key principle: spectral variance can be decomposed into:
-1. **Y-relevant variance**: Information correlated with the target property
-2. **Y-orthogonal variance**: Systematic effects not correlated with target
-
-By building a PLS model between X and y, we can identify the Y-relevant subspace. The orthogonal complement contains systematic interference that can be safely removed without losing predictive information.
+OSC removes the largest systematic variation in X whose scores are **orthogonal to y**
+(Wold et al. 1998; dasp implements the formulation of Fearn 2000, Chemom. Intell. Lab.
+Syst. 50:47-52). Every removed score vector satisfies $\mathbf{t}^T\mathbf{y} = 0$, so the
+removed variation cannot carry information that is linearly related to y in the
+calibration data.
 
 ### 9.3 Mathematical Formula
 
-**Step 1: Center the data**
-$$\mathbf{X}_c = \mathbf{X} - \bar{\mathbf{X}}$$
-$$\mathbf{y}_c = \mathbf{y} - \bar{y}$$
+**Step 1: Center the data** (training means are stored)
+$$\mathbf{X}_c = \mathbf{X} - \bar{\mathbf{X}}, \qquad \mathbf{y}_c = \mathbf{y} - \bar{y}$$
 
-**Step 2: Build PLS model to find Y-relevant directions**
+**Step 2: Restrict the weights to be orthogonal to the y-covariance**
 
-PLS finds weights $\mathbf{w}$ that maximize covariance between $\mathbf{X}_c \mathbf{w}$ and $\mathbf{y}_c$.
+With $\mathbf{Q}$ an orthonormal basis of $\mathbf{X}_c^T\mathbf{y}_c$:
+$$\mathbf{Z} = \mathbf{X}_c(\mathbf{I} - \mathbf{Q}\mathbf{Q}^T)$$
 
-**Step 3: Extract orthogonal component**
+**Step 3: Weight, score and loading**
 
-From the PLS model, extract score vector $\mathbf{t}$ and loading vector $\mathbf{p}$:
-$$\mathbf{t}_{osc} = \mathbf{X}_c \mathbf{w}_{osc}$$
+$\mathbf{w}$ = first right singular vector of $\mathbf{Z}$;
+$\mathbf{t} = \mathbf{X}_c\mathbf{w}$ (so $\mathbf{t}^T\mathbf{y}_c = 0$);
+$\mathbf{p} = \mathbf{X}_c^T\mathbf{t} / (\mathbf{t}^T\mathbf{t})$.
 
-Where $\mathbf{w}_{osc}$ is orthogonalized to the Y-relevant direction.
+**Step 4: Deflate and repeat for further components**
+$$\mathbf{X}_c \leftarrow \mathbf{X}_c - \mathbf{t}\mathbf{p}^T$$
 
-**Step 4: Remove orthogonal component**
-$$\mathbf{X}_{corrected} = \mathbf{X}_c - \mathbf{t}_{osc} \mathbf{p}_{osc}^T$$
-
-**Step 5: Iterate for multiple components**
-
-Repeat Steps 2-4 for each orthogonal component to remove.
+**Step 5: Apply to new spectra** (no y needed): scores are replayed with the stored
+weights and loadings on spectra centred with the *training* mean, and the output is
+returned on the original scale, $\mathbf{X} - \mathbf{T}\mathbf{P}^T$.
 
 ### 9.4 Parameters and Their Effects
 
 | Parameter | Range | Default | Effect |
 |-----------|-------|---------|--------|
-| `n_components` | 1-5 | 1 | Number of orthogonal components to remove |
-| `tol` | $10^{-8}$ to $10^{-4}$ | $10^{-6}$ | Convergence tolerance |
-| `max_iter` | 50-200 | 100 | Maximum iterations |
+| `n_components` | 1-5 | 1 | Number of y-orthogonal components to remove |
+| `tol` | $10^{-12}$ to $10^{-6}$ | $10^{-10}$ | Stop when no systematic y-orthogonal variation is left |
+
+Models saved by dasp before October 2026 contain the previous OSC, which removed the
+first PLS loading (the y-*predictive* direction). Loading such a model replays its
+original output with a warning; refit to use the corrected OSC.
 
 #### 9.4.1 n_components Selection
 
@@ -4363,12 +4373,12 @@ Number of OSC Components:
   orthogonal effect                 interference effects
 
   SAFE - Minimal risk              CAUTION - Risk of
-  of removing Y-info               removing useful signal
+  of removing Y-info               overfitting the
+                                   calibration set
 
 Diagnostic:
-- Check explained variance by each component
-- Component with low variance removal may be unnecessary
-- Stop if model performance decreases
+- Check variance removed by each component (variance_removed_)
+- Judge on held-out or cross-validated predictions, never on calibration fit
 ```
 
 ### 9.5 Visual Representation
@@ -4410,7 +4420,7 @@ Original X-space:                  After OSC:
 **Important considerations:**
 - OSC requires target variable (y) during fitting
 - Only training data should be used for fitting (avoid data leakage)
-- Transformed data is mean-centered (training mean subtracted)
+- Output stays on the original spectral scale (scores use the training mean)
 - More aggressive than SNV/MSC - use carefully
 
 ### 9.7 Implementation Notes
@@ -4445,23 +4455,33 @@ print(f"Variance removed: {osc.variance_removed_}")
 
 ### 10.2 Theory
 
-EPO requires a library of interferent spectra that characterize the unwanted variation. For example, to remove moisture interference, you provide spectra of samples with varying moisture content. EPO then:
+EPO (Roger, Chauchard & Bellon-Maurel 2003, Chemom. Intell. Lab. Syst. 66(2):191-204)
+removes the subspace spanned by a nuisance-difference matrix $\mathbf{D}$: spectra of
+the same material under different external conditions, minus the reference condition.
+EPO then:
 
-1. Builds a subspace from the interferent library using PCA/SVD
-2. Projects new data orthogonal to this subspace
-3. The projected data is free from the interferent effect
+1. Builds the interferent subspace from $\mathbf{D}$ by SVD
+2. Projects data orthogonal to this subspace
+3. The projected data is free from the interferent effect (and from any analyte signal
+   that shares its direction)
 
 This is more targeted than OSC because you explicitly specify what to remove, rather than removing anything orthogonal to Y.
 
 ### 10.3 Mathematical Formula
 
-**Step 1: Center interferent library**
-$$\mathbf{X}_{int,c} = \mathbf{X}_{int} - \bar{\mathbf{X}}_{int}$$
+**Step 1: Build the nuisance-difference matrix** (`library_type`)
+
+- `'samples'` (default): the library rows are whole spectra of the same material(s) at
+  different interferent levels, so they also contain the analyte. The reference is the
+  library mean: $\mathbf{D} = \mathbf{X}_{int} - \bar{\mathbf{X}}_{int}$.
+- `'differences'`: the rows are pure interferent spectra or difference spectra. They
+  contain no analyte and are used uncentred: $\mathbf{D} = \mathbf{X}_{int}$. Centring
+  them would cancel an interferent that every row shares.
 
 **Step 2: Compute interferent subspace via SVD**
-$$\mathbf{X}_{int,c} = \mathbf{U} \mathbf{S} \mathbf{V}^T$$
+$$\mathbf{D} = \mathbf{U} \mathbf{S} \mathbf{V}^T$$
 
-Take first $k$ columns of $\mathbf{V}$ as interferent basis:
+Take the first $k$ columns of $\mathbf{V}$ (never more than the rank of $\mathbf{D}$):
 $$\mathbf{V}_k = [\mathbf{v}_1, \mathbf{v}_2, \ldots, \mathbf{v}_k]$$
 
 **Step 3: Build orthogonal projection matrix**
@@ -4469,13 +4489,17 @@ $$\mathbf{P}_{orth} = \mathbf{I} - \mathbf{V}_k \mathbf{V}_k^T$$
 
 **Step 4: Apply to new data**
 $$\mathbf{X}_{corrected} = (\mathbf{X} - \bar{\mathbf{X}}_{train}) \mathbf{P}_{orth}$$
+with `center=True` (centred features for a modelling pipeline), or
+$\mathbf{X}\mathbf{P}_{orth}$ with `center=False` (a spectrum on the original scale; the
+Interference Application page uses this).
 
 ### 10.4 Parameters and Their Effects
 
 | Parameter | Range | Default | Effect |
 |-----------|-------|---------|--------|
-| `n_components` | 1-10 | 2 | Number of interferent components |
-| `center` | True/False | True | Center data before EPO |
+| `n_components` | 1-10 | 2 | Number of interferent components (capped at the rank of D) |
+| `center` | True/False | True | Subtract the training mean from X before projecting |
+| `library_type` | 'samples' / 'differences' | 'samples' | How D is built from the library |
 | `svd_tol` | $10^{-10}$ to $10^{-6}$ | $10^{-8}$ | SVD truncation tolerance |
 
 #### 10.4.1 n_components Selection
@@ -4571,65 +4595,52 @@ print(f"Interferent variance by component: {epo.explained_variance_}")
 
 ### 11.2 Theory
 
-DOSC works by:
-1. Building a PLS model between X and y
-2. Computing residuals: the part of X not explained by PLS
-3. Performing PCA on these residuals to find Y-orthogonal directions
-4. Projecting data orthogonal to these directions
-
-The key difference from standard OSC is the "direct" computation via PLS residuals, avoiding iterative deflation.
+DOSC (Westerhuis, de Jong & Smilde 2001, Chemom. Intell. Lab. Syst. 56(1):13-25) is a
+non-iterative OSC. y is replaced by its least-squares projection $\hat{\mathbf{Y}}$ onto
+the column space of X, X is deflated by $\hat{\mathbf{Y}}$ in sample space, and the
+leading principal-component scores of what is left are removed. Those scores lie in
+the column space of X and are orthogonal to $\hat{\mathbf{Y}}$, hence to y.
 
 ### 11.3 Mathematical Formula
 
-**Step 1: Fit PLS model**
-$$\mathbf{X}_c = \mathbf{T}_{pls} \mathbf{P}_{pls}^T + \mathbf{E}_{pls}$$
+**Step 1:** $\hat{\mathbf{Y}} = \mathbf{X}_c\mathbf{X}_c^{+}\mathbf{y}_c$
 
-Where $\mathbf{T}_{pls}$ are PLS scores and $\mathbf{P}_{pls}$ are PLS loadings.
+**Step 2:** $\mathbf{A}_y = \mathbf{X}_c - \hat{\mathbf{Y}}\hat{\mathbf{Y}}^{+}\mathbf{X}_c$
 
-**Step 2: Extract PLS residuals (Y-orthogonal part)**
-$$\mathbf{E}_{orth} = \mathbf{X}_c - \mathbf{T}_{pls} \mathbf{P}_{pls}^T$$
+**Step 3:** $\mathbf{T}$ = first $k$ principal-component scores of $\mathbf{A}_y$
+($\mathbf{T}^T\mathbf{y}_c = 0$)
 
-**Step 3: PCA on residuals**
-$$\mathbf{E}_{orth} = \mathbf{U} \mathbf{S} \mathbf{V}^T$$
+**Step 4:** weights $\mathbf{W} = \mathbf{X}_c^{+}\mathbf{T}$, loadings
+$\mathbf{P} = \mathbf{X}_c^T\mathbf{T}(\mathbf{T}^T\mathbf{T})^{-1}$
 
-Take first $k$ columns of $\mathbf{V}$ as DOSC components:
-$$\mathbf{V}_{dosc} = [\mathbf{v}_1, \ldots, \mathbf{v}_k]$$
+**Step 5: Apply to data** (original scale)
+$$\mathbf{X}_{corrected} = \mathbf{X} - (\mathbf{X} - \bar{\mathbf{X}}_{train})\mathbf{W}\mathbf{P}^T$$
 
-**Step 4: Build projection matrix**
-$$\mathbf{P}_{orth} = \mathbf{I} - \mathbf{V}_{dosc} \mathbf{V}_{dosc}^T$$
-
-**Step 5: Apply to data**
-$$\mathbf{X}_{corrected} = (\mathbf{X} - \bar{\mathbf{X}}) \mathbf{P}_{orth}$$
+With more wavelengths than spectra, $\mathbf{X}^{+}$ is a minimum-norm pseudo-inverse and
+$\mathbf{W}$ can amplify noise on new spectra; check held-out predictions.
 
 ### 11.4 Parameters and Their Effects
 
 | Parameter | Range | Default | Effect |
 |-----------|-------|---------|--------|
 | `n_components` | 1-5 | 1 | Y-orthogonal components to remove |
-| `center` | True/False | True | Center data |
-| `n_pls_components` | 'auto' or int | 'auto' | PLS components for Y-subspace |
+| `center` | True/False | True | Center X and y before fitting |
+| `n_pls_components` | 'auto' or int | 'auto' | Ignored (kept so old settings still load) |
 
-#### 11.4.1 n_pls_components Selection
-
-- **'auto'**: Uses min(10, n_samples-1, n_features)
-- **Integer**: Specific number of PLS components
-- More PLS components = better approximation of Y-space
-- Fewer PLS components = faster, more robust
+Models saved by dasp before October 2026 contain the previous DOSC (whose removed
+scores were not orthogonal to y); loading one replays its original output with a
+warning. Refit to use the corrected DOSC.
 
 ### 11.5 DOSC vs. OSC Comparison
 
 ```
-                        OSC                     DOSC
+                        OSC (Fearn)             DOSC (Westerhuis)
 
-Algorithm:              Iterative deflation     Direct PLS residuals
-
-Computation:            Slower, iterative       Faster, single pass
-
-Stability:              May not converge        Always converges
-
-Results:                Similar                 Similar
-
-When to use:            Classic approach        Modern, recommended
+Removed scores:         t'y = 0 exactly         t'y = 0 exactly
+Weights:                maximise X variance     W = X+ T (pseudo-inverse)
+                        among y-orthogonal
+New-spectrum noise:     moderate                can be amplified when
+                                                wavelengths >> spectra
 ```
 
 ### 11.6 When to Use
@@ -4663,9 +4674,6 @@ X_test_corrected = dosc.transform(X_test)
 # Check variance explained
 print(f"Variance removed: {dosc.explained_variance_}")
 
-# Custom PLS components
-dosc_custom = DOSC(n_components=2, n_pls_components=5)
-dosc_custom.fit(X_train, y_train)
 ```
 
 ---
@@ -8273,12 +8281,19 @@ Calibration transfer enables applying models developed on one instrument (primar
 
 **Method Selection Guide:**
 
-| Scenario | Recommended Method |
-|----------|-------------------|
-| Same wavelength range + 10+ standards | PDS |
-| Same wavelength range + <10 standards | DS |
-| Different wavelength ranges | CTAI |
-| No transfer standards available | Feature-based |
+Every method in this tab needs **paired standards**: the same samples measured on both
+instruments, row for row, resampled to one common wavelength grid. None of them works
+without standards.
+
+| Situation | Method |
+|-----------|--------|
+| Default | Slope/bias per wavelength (2 coefficients per wavelength) |
+| Wavelength shift or bandwidth difference between instruments | PDS |
+| Full-matrix alternatives | DS, PC-DS, Iterative ridge DS |
+
+The full-matrix methods have many more coefficients than there are standards. With few
+standards they can reproduce the standards almost exactly and still do worse than no
+correction on new samples. Check any transfer on standards that were not used to fit it.
 
 ### 4.2 Direct Standardization (DS)
 
@@ -8345,56 +8360,62 @@ def estimate_pds(X_primary, X_satellite, window=11):
 - Wavelength-dependent response differences
 - Better performance with sufficient transfer samples
 
-### 4.4 Transfer Sample Regression (TSR / Shenk-Westerhaus)
+### 4.4 Slope/Bias per Wavelength (default; stored key `tsr`)
 
-TSR estimates per-wavelength slope and bias corrections using a small set of transfer samples.
+For each wavelength separately, the primary value is regressed on the satellite value over
+the paired standards. Wavelengths are fitted independently.
 
 **Mathematical Formulation:**
 
 For each wavelength $\lambda$:
 $$x_{primary,\lambda} = slope_\lambda \cdot x_{satellite,\lambda} + bias_\lambda$$
 
-**Algorithm:**
+**Standards used:** "Slope/bias standards" = **All** (default) fits on every loaded pair.
+A number $n$ smaller than the number of loaded pairs picks $n$ standards by Kennard-Stone
+on the primary spectra; the others are not used in the fit.
 
-1. Select transfer samples (12-13 recommended)
-2. For each wavelength, fit linear regression
-3. Store slope and bias arrays
-4. Apply transformation: `X_new = X_old * slope + bias`
+**Notes:**
+- Two coefficients per wavelength, so it can be fitted from few standards.
+- It cannot correct wavelength shifts or bandwidth differences, which mix neighbouring
+  channels; use PDS for those.
+- This is slope/bias standardization in the spirit of Shenk & Westerhaus (1991), *Crop
+  Science* 31(6):1694-1696, doi:10.2135/cropsci1991.0011183X003100060064x. The code has not
+  been checked against their exact procedure.
+- Saved models store the key `tsr` for historical reasons. It is **not** trimmed scores
+  regression (Folch-Fortuny et al. 2017), which is also abbreviated TSR.
+- The per-wavelength R² is computed on the fitting standards; it is not a validation.
 
-**Quality Metrics:**
-- Per-wavelength R^2
-- Mean R^2 across wavelengths
+### 4.5 PC-DS: Paired Regression in Satellite PCA Space (stored key `ctai`)
 
-**Advantages:**
-- Simple and fast
-- Works well with Kennard-Stone sample selection
-- Can achieve near-recalibration accuracy with optimal samples
+Both instruments' spectra of the paired standards are mean-centred and projected onto the
+satellite's leading principal components. The primary scores are regressed on the
+satellite scores and the map is projected back:
 
-### 4.5 CTAI (Calibration Transfer based on Affine Invariance)
-
-CTAI is a transfer-standard-free method that leverages affine invariance properties.
-
-**Key Innovation:** No transfer samples required!
-
-**Mathematical Formulation:**
-
-Estimate affine transformation:
-$$\mathbf{X}_{primary} \approx \mathbf{X}_{satellite} \cdot \mathbf{M} + \mathbf{T}$$
-
-Where:
-- $\mathbf{M}$: Transformation matrix
-- $\mathbf{T}$: Translation vector
-
-**Algorithm:**
-
-1. Mean-center both datasets
-2. Compute SVD of satellite data
-3. Find optimal transformation in reduced-rank space
-4. Project back to full wavelength space
+$$\mathbf{X}_{primary} \approx \mathbf{X}_{satellite} \cdot \mathbf{M} + \mathbf{T},\qquad
+\mathbf{M} = \mathbf{V} \mathbf{M}_{red} \mathbf{V}^T$$
 
 **Requirements:**
-- Paired samples (same samples on both instruments)
-- Sufficient spectral diversity in both datasets
+- Paired standards (same samples on both instruments, same row order).
+- The same wavelength grid for both instruments (equal column counts).
+
+Saved models store the key `ctai` for historical reasons. This is **not** the published
+CTAI (calibration transfer based on affine invariance; Zhao et al. 2019, *Molecules*
+24(9):1802), which needs no standards. Because the output is also projected onto the
+satellite PCA basis, it is not plain truncated-SVD DS either.
+
+### 4.5a Iterative Ridge DS (stored key `nspfce`)
+
+A dasp heuristic, not the published PFCE/NS-PFCE. It starts from a per-wavelength scaling
+and repeatedly re-solves a lightly regularised (ridge $10^{-6}$) full-matrix DS on the
+paired standards, with damped updates and a re-fitted offset. Like DS it can fit the
+standards closely and do worse than no correction on new samples when there are few
+standards.
+
+### 4.5b JYPLS-inv (experimental, disabled in the GUI)
+
+Fits one PLS model to both instruments' spectra of the paired standards with their shared
+measured reference values, maps satellite PLS scores to primary scores, and reconstructs
+primary spectra from the loadings. Every standard needs a measured reference value.
 
 ### 4.6 Validation of Transfer Quality
 
@@ -8413,6 +8434,10 @@ Where:
    - Improvement ratio: RMSEP_before / RMSEP_after
    - Spectral reconstruction RMSE
    - Per-wavelength correlation
+
+**The agreement plot in the tab is not a validation.** Its R² ("Spectral agreement on
+loaded standards") is computed on the standards the transfer was fitted on. For
+slope/bias it uses only the standards actually used in the fit.
 
 **Visualization:**
 - Overlay transferred vs primary spectra
@@ -8723,20 +8748,35 @@ PCA can separate contaminated from uncontaminated samples:
 
 When pure contaminant spectra are unavailable, EstimatedEPO builds a "pseudo-interferent library" from group differences.
 
-**Algorithm:**
-1. Compute difference vectors between groups
-2. Use PCA or bootstrap to build interferent library
-3. Apply standard EPO with estimated library
+**Algorithm (Roger et al. 2003 EPO on an estimated nuisance matrix):**
+1. Build the nuisance-difference matrix D from the groups (uncentred)
+2. Take its leading right singular vectors V
+3. Return `X @ (I - V V^T)`: spectra on the original scale
 
 **Estimation Methods:**
-- `mean_diff`: Single difference between group means
-- `pca_diff`: PCA on concatenated groups
-- `bootstrap`: Multiple bootstrap difference vectors
+- `mean_diff` (default): one row, contaminated mean minus clean mean
+- `pca_diff`: paired differences, row i = the same specimen contaminated minus clean;
+  needs `fit_groups(..., paired=True)` (falls back to `mean_diff` when unpaired)
+- (`bootstrap` was removed: it projected out sampling jitter, i.e. the analyte)
+
+With unpaired groups the removed direction also contains any real chemical difference
+between the groups; use groups that differ only by the contaminant, or paired spectra.
+`MultiGroupEPO` handles several contaminant groups and suggests how many directions to
+remove with a bootstrap test against sampling variation. Treat the count as a
+suggestion: its p-values assume roughly symmetric within-group variation (skewed groups
+with very different spreads can produce a spurious direction; 9.4% false removals at
+alpha 0.01 in a lognormal test), and it can miss a contaminant confined to one of several
+groups (groups of 10, one contaminated group out of four at a moderate dose: detected
+~6.5% of the time). Groups of 2-3 spectra need a manual count.
 
 ```python
-epo = EstimatedEPO(n_components=2, estimation_method='pca_diff')
+epo = EstimatedEPO()  # mean_diff
 epo.fit_groups(X_contaminated, X_uncontaminated)
 X_corrected = epo.transform(X_all)
+
+# Paired spectra: the same specimens without (X_clean) and with (X_treated) the contaminant
+epo_paired = EstimatedEPO(n_components=2, estimation_method='pca_diff')
+epo_paired.fit_groups(X_treated, X_clean, paired=True)
 ```
 
 **ContaminantGLSW:**
@@ -8798,11 +8838,15 @@ $$x_{pri,i} = \sum_{j \in W_i} b_{i,j} \cdot x_{sat,j}$$
 
 Where $W_i$ is the window around wavelength $i$.
 
-### B.3 Transfer Sample Regression (TSR)
+### B.3 Slope/Bias per Wavelength
+Saved models store this as `tsr` (historical key; not trimmed scores regression).
+
 $$x_{pri,\lambda} = slope_\lambda \cdot x_{sat,\lambda} + bias_\lambda$$
 
-### B.4 CTAI
-$$\mathbf{X}_{transferred} = \mathbf{X}_{sat} \cdot \mathbf{M} + \mathbf{T}$$
+### B.4 PC-DS: Paired Regression in Satellite PCA Space
+Saved models store this as `ctai` (historical key; not the published standard-free CTAI).
+
+$$\mathbf{X}_{transferred} = \mathbf{X}_{sat} \cdot \mathbf{M} + \mathbf{T},\qquad \mathbf{M} = \mathbf{V} \mathbf{M}_{red} \mathbf{V}^T$$
 
 ---
 
@@ -9741,15 +9785,21 @@ pip install jcamp
 
 **Description:** Proprietary binary format used by Bruker FT-IR instruments. One of the most common formats in infrared spectroscopy.
 
-**Data Types Available:**
-| Code | Data Type |
-|------|-----------|
-| `a` | Absorbance spectrum |
-| `t` | Transmittance spectrum |
-| `sm` | Sample spectrum (single beam) |
-| `rf` | Reference spectrum |
+**Data Types Available:** an OPUS file usually holds several blocks; exactly one is read.
 
-**Priority Order:** Spectral Predict reads absorbance > transmittance > sample > reference
+| Block | Data Type | Loaded as |
+|-------|-----------|-----------|
+| `a` (AB) | Absorbance spectrum | Absorbance |
+| `t` (TR) | Transmittance spectrum | Reflectance-like (transmittance formula on conversion) |
+| `aria` / `arit` | Arithmetic result, absorbance-/transmittance-like | Absorbance / Reflectance-like |
+| `r` | Reflectance | Reflectance |
+| `logr` | Log reflectance (-log R) | Absorbance (absorbance-equivalent; never logged again) |
+| `atr` | ATR-corrected absorbance | Absorbance |
+| `km`, `pas`, `ra`, `e` | Kubelka-Munk, photoacoustic, Raman, emission | Other (no conversion) |
+| `sm` (ScSm) | Single-channel sample spectrum | Other (no conversion), with a warning |
+| `rf` (ScRf) | Single-channel background reference | Other (no conversion), last resort, with a warning |
+
+**Priority Order:** absorbance > transmittance > arithmetic results > reflectance and other processed spectra > single-channel sample > single-channel reference. A block with an invalid axis or values is skipped for the next one. A folder that mixes data types, or holds single-channel files, is reported in a warning dialog on import.
 
 **Typical Wavenumber Range:** 400-4000 cm-1 (mid-IR) or 4000-12000 cm-1 (NIR)
 
@@ -9783,6 +9833,8 @@ $$\lambda (nm) = \frac{10^7}{\tilde{\nu} (cm^{-1})}$$
 - Single spectrum per file
 
 **Typical Range:** 400-4000 cm-1 (mid-IR)
+
+**X unit:** .sp files do not record the x unit, so it is inferred from the range: a maximum above 3300 is read as cm-1 (FT-IR/FT-NIR); lower ranges fit both a UV/Vis/NIR spectrum in nm and a truncated IR spectrum in cm-1, so nm is assumed at low confidence with a warning. Check the unit and switch it if needed.
 
 **Metadata Available:**
 - Sample information
@@ -9838,9 +9890,14 @@ pip install agilent-ir-formats
 - Semicolon (`;`)
 
 **Format Detection:**
-- Automatically detects delimiter
-- Skips comment lines (starting with `#` or `%`)
-- Identifies X,Y pair columns
+- Column 1 is x and column 2 is y; further columns (including text such as quality flags) are ignored, with a warning
+- Every delimiter and decimal separator (point or comma) is tried; the reading under which most rows give numeric x and y wins, and decimal-comma files are reported with a warning
+- Comma-delimited files are read with decimal points (decimal commas inside a comma-delimited file are not valid CSV). If rows also fit a decimal-comma or thousands-separator reading (e.g. `4000,5,0,123`), the file loads with a warning in the import dialog; re-export such a file with `;` as the delimiter. A comma file is refused only when that other reading explains an inconsistency: rows with different field counts, repeated x values, or fields with leading zeros such as `1,000,0.123`. Files whose rows read differently under two delimiters are also refused. From Python, pass `delimiter=` and `decimal=` to choose explicitly
+- Lines before the first data row are the header. A headerless file keeps its first row as data
+- Quoted fields (`"1000","0.1"`) are accepted
+- Skips comment lines (starting with `#` or `%`) and inline `#` comments (`1000,0.1 # note`). Inline `;` comments are **not** supported, because `;` is also a delimiter: a row such as `1000,0.1 ; note` is skipped with a warning
+- The x unit is taken only from an explicit statement: an `XUNITS=` line or the x column's own heading (e.g. `Wavenumber (cm-1)`). Otherwise nm is assumed at low confidence; check it and switch units if needed
+- A folder import reads the `.dpt`, `.dat` and `.asc` files in the folder (not `.txt`, to avoid README/notes files). Files that state different x units are refused; files with fewer than 2 points are listed as failures
 
 **Example (.dpt - Bruker data point table):**
 ```
