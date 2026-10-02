@@ -115,8 +115,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   raw numeric labels: integer classes crashed the save (`keys must be str`), float
   classes saved and then decoded every prediction to the wrong class. The save now
   keeps only the encoder the refined model was trained with, `save_model` refuses an
-  encoder that cannot match the model's classes, `label_mapping` keys are strings, and
-  older `.dasp` files with such an encoder predict their raw labels with a warning.
+  encoder that cannot match the model's classes and records ownership of the one it
+  keeps (`label_encoder_owned`), and `label_mapping` keys are strings. Older `.dasp`
+  files are decoded only when their encoder provably belongs to the model (its classes
+  are exactly the encoder's codes); otherwise they predict their raw labels with a
+  warning. Model Development no longer turns a results row without its wavelength list
+  into a full-spectrum refit: it shows an error unless the row is tagged full-spectrum
+  with a matching variable count, or its `top_vars` is the complete trained subset.
 - **Top-N subsets of sparse selectors no longer pad with unselected long wavelengths.**
   Asking CARS (and the CARS/UVE/FiPLS hybrids, SPA, VCPA-IRIV and GA) for more variables
   than it selected used to fill the gap with zero-score variables from the long end of the

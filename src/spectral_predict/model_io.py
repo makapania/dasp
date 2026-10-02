@@ -55,32 +55,73 @@ logger = logging.getLogger(__name__)
 WAVELENGTH_MATCHING_VERSION = 1
 
 
-def _label_encoder_matches_model(model: Any, label_encoder: Any) -> bool:
-    """Whether ``label_encoder`` can be the encoder ``model`` was trained with.
-
-    A model fitted on encoded labels predicts integer codes in ``0..n-1``. If the
-    model's own ``classes_`` hold anything else (``1, 2, 3`` or ``1.0, 2.0``), it was
-    trained on the raw labels and decoding its predictions would shift them (R016).
-    Only this provable staleness is rejected: a model may have seen fewer classes than
-    the encoder knows, so the class counts need not agree. Ownership itself is
-    enforced where the encoder is chosen (Tab 7 saves only its own encoder).
-    Returns True when the model exposes no numeric ``classes_`` (nothing to check).
-    """
+def _model_classes(model: Any) -> Optional[np.ndarray]:
     classes = getattr(model, 'classes_', None)
     if classes is None:
-        return True
+        return None
     try:
-        model_classes = np.asarray(classes)
+        return np.asarray(classes)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_text_classes(classes: np.ndarray) -> bool:
+    if classes.dtype.kind in 'US':
+        return True
+    return classes.dtype.kind == 'O' and all(isinstance(c, str) for c in classes.tolist())
+
+
+def _integer_codes(classes: np.ndarray) -> Optional[np.ndarray]:
+    """``classes`` as integer codes, or None if they are not whole numbers (bool is not)."""
+    if classes.dtype.kind not in 'iuf':
+        return None
+    if classes.dtype.kind == 'f' and not np.all(np.mod(classes, 1) == 0):
+        return None
+    return classes.astype(np.int64)
+
+
+def _encoder_codes_valid(model: Any, label_encoder: Any) -> bool:
+    """False when the model's classes prove it was not trained on this encoder's codes.
+
+    A model fitted on encoded labels predicts integer codes in ``0..n-1``. Classes such
+    as ``1.5``, booleans or codes >= n prove the model was trained on raw labels and
+    decoding would mislabel every prediction (R016). A model may have seen fewer
+    classes than the encoder knows, so this alone cannot prove ownership; that is what
+    the ``label_encoder_owned`` stamp records. True when there is nothing to check
+    (no ``classes_``, or text classes: the model decodes itself).
+    """
+    classes = _model_classes(model)
+    if classes is None or _is_text_classes(classes):
+        return True
+    codes = _integer_codes(classes)
+    if codes is None:
+        return False
+    try:
         n_codes = len(label_encoder.classes_)
     except (TypeError, AttributeError):
-        return True
-    if model_classes.dtype.kind not in 'iuf':
-        # Text classes: the model decodes itself and predict_with_model passes text
-        # predictions through untouched, so the encoder can do no harm.
-        return True
-    if model_classes.dtype.kind == 'f' and not np.all(np.mod(model_classes, 1) == 0):
         return False
-    return bool(np.all((model_classes >= 0) & (model_classes < n_codes)))
+    return bool(np.all((codes >= 0) & (codes < n_codes)))
+
+
+def _encoder_provably_fits(model: Any, label_encoder: Any) -> bool:
+    """For files without the ownership stamp: does the encoder demonstrably belong?
+
+    Only when the model's classes are exactly the encoder's codes ``0..n-1`` (same class
+    count). A stale search encoder with as many or more classes than a raw-label model
+    (``{0, 1}`` vs ``x, y, z``) cannot be told apart from a subset-trained model
+    otherwise, so such files are not decoded.
+    """
+    classes = _model_classes(model)
+    if classes is None:
+        return False
+    codes = _integer_codes(classes)
+    if codes is None:
+        return False
+    try:
+        n_codes = len(label_encoder.classes_)
+    except (TypeError, AttributeError):
+        return False
+    return codes.size == n_codes and bool(np.array_equal(np.sort(codes), np.arange(n_codes)))
 
 
 _RETRAIN = "Retrain the model in Model Development and save it again."
@@ -302,7 +343,7 @@ def save_model(
     # The saved encoder must be the one the model was trained with (R016). An
     # encoder left over from an earlier search would decode a raw-label model's
     # predictions to the wrong classes, so it is refused rather than saved.
-    if label_encoder is not None and not _label_encoder_matches_model(model, label_encoder):
+    if label_encoder is not None and not _encoder_codes_valid(model, label_encoder):
         msg = (
             "save_model: the label encoder does not match the model (the model was "
             f"trained on raw labels {np.asarray(model.classes_).tolist()[:10]}); "
@@ -315,6 +356,10 @@ def save_model(
     # Add label encoder information if present
     if label_encoder is not None:
         metadata_complete['has_label_encoder'] = True
+        # Passing an encoder claims it is the one the model was trained with (Tab 7
+        # passes only its own). Prediction decodes only stamped encoders, or legacy
+        # ones that provably fit.
+        metadata_complete['label_encoder_owned'] = True
         metadata_complete['label_classes'] = label_encoder.classes_.tolist()
         # JSON object keys must be str; np.int64 keys crash json.dump (R016).
         metadata_complete['label_mapping'] = {
@@ -938,27 +983,36 @@ def predict_with_model(
     # Make predictions
     predictions = model.predict(X_processed)
 
-    # If label_encoder exists, convert predictions back to original text labels
-    if 'label_encoder' in model_dict and model_dict['label_encoder'] is not None:
-        label_encoder = model_dict['label_encoder']
-        # Check if predictions are already text labels (some models decode internally)
+    # If label_encoder exists, convert predictions back to original text labels.
+    # Only a classifier's predictions are codes, and only an encoder that belongs to
+    # this model may decode them (R016).
+    label_encoder = model_dict.get('label_encoder')
+    if label_encoder is not None and task_type == 'classification':
         if pd.api.types.is_string_dtype(predictions.dtype):
-            # Already decoded text labels, return as-is
-            pass
-        elif not _label_encoder_matches_model(model, label_encoder):
-            # A .dasp saved before the R016 fix can carry a stale search encoder
-            # next to a model trained on raw numeric labels. Its predictions are
-            # already the real labels; decoding them would shift every class.
+            pass  # already decoded text labels (some models decode internally)
+        elif metadata.get('label_encoder_owned'):
+            if _encoder_codes_valid(model, label_encoder):
+                predictions = label_encoder.inverse_transform(predictions.astype(int))
+            else:
+                warnings.warn(
+                    "predict_with_model: the model's classes are not codes of its saved "
+                    "label encoder; returning the model's own labels without decoding.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        elif _encoder_provably_fits(model, label_encoder):
+            predictions = label_encoder.inverse_transform(predictions.astype(int))
+        else:
+            # A .dasp saved before the R016 fix can carry a stale search encoder next
+            # to a model trained on raw labels; decoding would relabel every class.
             warnings.warn(
-                "predict_with_model: the saved label encoder does not match the "
-                "model's classes (saved before the R016 fix); returning the model's "
-                "own labels without decoding.",
+                "predict_with_model: this file was saved before label-encoder ownership "
+                "was recorded (R016) and its stored encoder cannot be shown to belong to "
+                "the model; returning the model's own labels without decoding. Retrain "
+                "and save the model again if text labels are expected.",
                 UserWarning,
                 stacklevel=2,
             )
-        else:
-            # Numeric predictions that need decoding
-            predictions = label_encoder.inverse_transform(predictions.astype(int))
 
     # NOTE: Bias correction is applied after model.predict(), which returns
     # original-scale values even when TransformedTargetRegressor is used.

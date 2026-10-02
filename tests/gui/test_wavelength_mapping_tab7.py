@@ -174,6 +174,57 @@ def test_load_resolves_legacy_g_all_vars_to_exact_axis_values(gui_app):
     assert gui_app._original_wavelength_order == [float(w) for w in axis[sel]]
 
 
+def _load_box(gui_app, config: dict) -> str:
+    axis = np.array([1500.0, 1501.0, 1502.0, 1503.0] + list(1504.0 + np.arange(16)))
+    X_df = pd.DataFrame(_spectra(12, axis), columns=[float(w) for w in axis])
+    X_df.index = [f"s{i}" for i in range(len(X_df))]
+    gui_app.X_original = X_df
+    gui_app.X = X_df
+    gui_app.y = pd.Series(np.arange(12.0), index=X_df.index)
+    base = {
+        "Model": "PLS",
+        "Task": "regression",
+        "Params": "{}",
+        "LVs": 2,
+        "Preprocess": "raw",
+        "Deriv": 0,
+        "Window": 17,
+        "full_vars": axis.size,
+    }
+    with contextlib.redirect_stdout(io.StringIO()):
+        gui_app._load_model_for_refinement({**base, **config})
+    return gui_app.refine_wl_spec.get("1.0", "end")
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"SubsetTag": "top2", "n_vars": 2, "all_vars": None, "top_vars": "N/A"},
+        {"SubsetTag": "full", "n_vars": 2, "all_vars": "N/A", "top_vars": "N/A"},
+        # top_vars holds only part of the trained subset (it keeps the top 30).
+        {"SubsetTag": "top3", "n_vars": 3, "all_vars": None, "top_vars": "1500,1501"},
+    ],
+    ids=["subset_no_lists", "full_tag_but_n_vars_short", "incomplete_top_vars"],
+)
+def test_load_refuses_to_expand_a_row_without_its_wavelengths(gui_app, config):
+    """Codex round 3: Model Development loading turned these into full-spectrum refits."""
+    box = _load_box(gui_app, config)
+    assert box.lstrip().startswith("# ERROR"), box
+    assert gui_app._original_wavelength_order is None
+
+
+def test_load_accepts_complete_top_vars_and_true_full_rows(gui_app):
+    _load_box(
+        gui_app, {"SubsetTag": "top2", "n_vars": 2, "all_vars": None, "top_vars": "1502,1500"}
+    )
+    assert gui_app._original_wavelength_order == [1502.0, 1500.0]
+    box = _load_box(
+        gui_app, {"SubsetTag": "full", "n_vars": 20, "all_vars": "N/A", "top_vars": "N/A"}
+    )
+    assert not box.lstrip().startswith("# ERROR"), box
+    assert gui_app._original_wavelength_order is None
+
+
 def _classification_data(labels):
     rng = np.random.default_rng(4)
     axis = np.arange(1000.0, 1040.0)

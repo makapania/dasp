@@ -195,6 +195,13 @@ class TestStoredWavelengthLists:
         with pytest.raises(WavelengthMatchError):
             resolve_wavelength_list("1e-05", axis)  # legacy %g text: two columns print it
 
+    @pytest.mark.parametrize(
+        "token,axis", [("1e+00", [1.0]), ("1e+03", [1000.0]), ("1e+006", [1000000.0])]
+    )
+    def test_non_g_exponent_spellings_match_exactly(self, token, axis):
+        """Codex round 3: these used to be routed to %g matching and rejected."""
+        assert resolve_wavelength_list(token, axis).tolist() == [0]
+
     def test_legacy_token_is_classified_by_its_text_not_by_reformatting(self):
         """Codex round 2: float('1e-318') prints as '9.99999e-319', yet '1e-318' is
         %g text for the subnormal that does print that way."""
@@ -217,6 +224,17 @@ class TestStoredWavelengthLists:
             ("1000000", False),  # %g writes 1e+06
             ("0.0000123", False),  # %g writes 1.23e-05
             ("10000.10", False),
+            # Exponent spellings: only what %g itself writes (review round 3).
+            ("1e+06", True),
+            ("1.5e-05", True),
+            ("1e-318", True),
+            ("1e+100", True),
+            ("1e+00", False),  # %g writes '1'
+            ("1e+03", False),  # %g writes '1000'
+            ("1e+006", False),  # %g pads to two digits
+            ("1.5e+05", False),  # %g writes '150000'
+            ("1E+06", False),
+            ("+1500", False),
         ],
     )
     def test_g_token_syntax(self, token, is_g):
@@ -541,6 +559,37 @@ def test_full_row_without_all_vars_validates_only_if_n_vars_covers_the_axis(wave
     assert out.attrs["validation_succeeded"] == [0]
 
 
+def test_failed_multiclass_holdout_row_keeps_no_stale_metrics():
+    """GLM round 3: a failing multi-class row must not keep an earlier run's val_*.
+    (The helper re-initialises these columns for every row on entry.)"""
+    rng = np.random.default_rng(2)
+    X_tr, X_va = rng.normal(size=(40, 30)), rng.normal(size=(12, 30))
+    y_tr = np.array(["a", "b"] * 20, dtype=object)
+    y_va = np.array(["a", "b"] * 6, dtype=object)
+    row = {
+        "CompositeScore": 0.0,
+        "engine_family": "no-such-engine",
+        "val_MeanSensitivity": 0.99,
+        "val_ExactSetRate": 0.99,
+    }
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = compute_validation_metrics_for_top_models(
+            pd.DataFrame([row]),
+            X_tr,
+            y_tr,
+            X_va,
+            y_va,
+            "multiclass_simca",
+            np.arange(1000.0, 1030.0),
+            top_n=1,
+        )
+    assert np.isnan(out.loc[0, "val_MeanSensitivity"])
+    assert np.isnan(out.loc[0, "val_ExactSetRate"])
+    assert 0 in out.attrs["validation_failures"]
+    assert out.attrs["validation_succeeded"] == []
+
+
 @pytest.mark.parametrize(
     "tags",
     [
@@ -644,6 +693,79 @@ def test_stale_encoder_is_not_saved_with_a_raw_label_model(tmp_path, labels):
     np.testing.assert_array_equal(
         predict_with_model(loaded, X, validate_wavelengths=False), model.predict(X)
     )
+
+
+def _legacy_with_encoder(tmp_path, model, encoder, n_vars):
+    """A pre-ownership-stamp .dasp: encoder pickle present, no label_encoder_owned."""
+    path = tmp_path / "legacy_enc.dasp"
+    save_model(model, None, _clf_metadata(n_vars), path)
+    enc_file = tmp_path / "label_encoder.pkl"
+    joblib.dump(encoder, enc_file)
+    with zipfile.ZipFile(path, "a") as zf:
+        zf.write(enc_file, "label_encoder.pkl")
+    loaded = load_model(path)
+    assert loaded["label_encoder"] is not None
+    assert "label_encoder_owned" not in loaded["metadata"]
+    return loaded
+
+
+@pytest.mark.parametrize(
+    "labels,stale",
+    [([1, 2, 3], ["a", "b", "c", "d"]), ([0, 1], ["x", "y", "z"])],
+    ids=["codex_123_vs_abcd", "glm_01_vs_xyz"],
+)
+def test_legacy_stale_encoder_with_valid_looking_codes_is_not_used(tmp_path, labels, stale):
+    """Review round 3: raw labels that happen to be valid codes for a bigger stale
+    encoder used to decode silently (1,2,3 -> b,c,d)."""
+    X, y = _clf_data(labels)
+    model = RandomForestClassifier(n_estimators=20, random_state=0).fit(X, y)
+    loaded = _legacy_with_encoder(tmp_path, model, LabelEncoder().fit(stale), X.shape[1])
+    with pytest.warns(UserWarning, match="cannot be shown to belong"):
+        got = predict_with_model(loaded, X, validate_wavelengths=False)
+    np.testing.assert_array_equal(got, model.predict(X))
+
+
+def test_legacy_superset_encoder_cannot_be_proven_and_is_not_used(tmp_path):
+    X, y = _clf_data(["a", "b"])
+    encoder = LabelEncoder().fit(["a", "b", "c"])
+    model = RandomForestClassifier(n_estimators=20, random_state=0).fit(X, encoder.transform(y))
+    loaded = _legacy_with_encoder(tmp_path, model, encoder, X.shape[1])
+    with pytest.warns(UserWarning, match="cannot be shown to belong"):
+        got = predict_with_model(loaded, X, validate_wavelengths=False)
+    np.testing.assert_array_equal(got, model.predict(X))
+
+
+def test_legacy_encoder_that_provably_fits_still_decodes(tmp_path):
+    X, y = _clf_data(["a", "b", "c"])
+    encoder = LabelEncoder().fit(y)
+    model = RandomForestClassifier(n_estimators=20, random_state=0).fit(X, encoder.transform(y))
+    loaded = _legacy_with_encoder(tmp_path, model, encoder, X.shape[1])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        got = predict_with_model(loaded, X, validate_wavelengths=False)
+    np.testing.assert_array_equal(got, encoder.inverse_transform(model.predict(X)))
+
+
+def test_bool_label_model_is_never_decoded_through_a_text_encoder(tmp_path):
+    X, y = _clf_data([False, True])
+    y = y.astype(bool)
+    model = RandomForestClassifier(n_estimators=20, random_state=0).fit(X, y)
+    stale = LabelEncoder().fit(["neg", "pos"])
+    with pytest.warns(UserWarning, match="does not match the model"):
+        saved = _save_load(tmp_path, model, stale, X.shape[1])
+    assert saved["label_encoder"] is None
+    legacy = _legacy_with_encoder(tmp_path, model, stale, X.shape[1])
+    with pytest.warns(UserWarning):
+        got = predict_with_model(legacy, X, validate_wavelengths=False)
+    np.testing.assert_array_equal(got, model.predict(X))
+
+
+def test_new_files_record_encoder_ownership(tmp_path):
+    X, y = _clf_data(["a", "b", "c"])
+    encoder = LabelEncoder().fit(y)
+    model = RandomForestClassifier(n_estimators=20, random_state=0).fit(X, encoder.transform(y))
+    loaded = _save_load(tmp_path, model, encoder, X.shape[1])
+    assert loaded["metadata"]["label_encoder_owned"] is True
 
 
 def test_legacy_artifact_with_stale_float_encoder_predicts_raw_labels(tmp_path):

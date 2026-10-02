@@ -805,6 +805,22 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
     first collision) moves to `model_wrappers.py` on fix/ensemble-cv and is to be ported there at merge. Test fixtures that rebuilt full rows without `all_vars` now carry
     `SubsetTag="full"` + `n_vars`, as real search rows do.
   - `compute_composite_score` re-keys validation attrs after `reset_index` (`scoring._remap_validation_attrs`).
+- **Review round 3 (Codex BLOCK on dae6654):**
+  - Encoder ownership is now RECORDED, not inferred: `save_model` writes `metadata['label_encoder_owned']=True`
+    whenever it keeps an encoder (dropping only provably stale ones: bool or non-code classes). Prediction decodes
+    only classification models, and only (a) stamped encoders whose codes are valid, or (b) for unstamped legacy
+    files, encoders that provably fit (model classes == codes 0..n-1, same count). Everything else returns raw
+    predictions with a warning. No class-count rule on new files (subset-class models stay valid); the count rule
+    survives only as the legacy proof. Raw {0,1} next to a stale x,y,z is indistinguishable from a subset-trained
+    model without the stamp, hence no decoding.
+  - Model Development loading (`_load_model_for_refinement`) applies `_full_spectrum_fallback_refusal`; with no
+    `all_vars`, `top_vars` is used only if it maps and its count equals `n_vars` (it keeps at most the top 30).
+    Otherwise "# ERROR" in the wavelength box.
+  - `_looks_like_g_token` now checks the exponent grammar exactly as %g writes it: two-digit padded exponent, more
+    digits only when needed, and exponent form only for exp < -4 or >= 6. `1e+00`, `1e+03`, `1e+006`, `1.5e+05`
+    are matched exactly.
+  - Multi-class holdout val_* need no pre-clear: the supervised helper re-initialises every val column to NaN for
+    ALL rows on entry (whole-column assignment). Pinned by a test instead of new code.
 - **Follow-ups not done (review round 2, deliberately out of scope):** `scoring.py` ~112 substitutes the CV gap
   when validation is missing; `predict_with_uncertainty` (~1219) labels probability columns with every encoder
   class even when the model saw fewer; `save_model` stamps `wavelength_matching` on any save, so an old fitted model

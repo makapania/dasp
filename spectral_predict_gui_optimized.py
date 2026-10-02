@@ -36863,42 +36863,44 @@ Performance (Classification):
                         print(f"WARNING: Could not parse all_vars: {e}")
                         model_wavelengths = None
 
-                # Fallback to top_vars for backward compatibility with old results
-                if model_wavelengths is None and 'top_vars' in config and config['top_vars'] != 'N/A' and config['top_vars']:
-                    model_name = config.get('Model', 'Unknown')
-                    print(f"[!]  CRITICAL WARNING: Model '{model_name}' missing complete wavelength list ('all_vars')")
-                    print(f"[!]  Falling back to 'top_vars' - this may cause R² mismatch if model used >30 wavelengths!")
-                    print(f"[!]  Expected n_vars: {config.get('n_vars', 'unknown')}")
-                    try:
-                        # Parse wavelengths from top_vars string (e.g., "1520.0, 1540.0, 1560.0")
-                        top_vars_str = str(config['top_vars']).strip()
-                        wavelength_strings = [w.strip() for w in top_vars_str.split(',')]
-                        model_wavelengths = [float(w) for w in wavelength_strings if w]
-                        # Don't sort - preserve importance order from search results
-                        # Sorting destroys feature order which affects PLS R² reproducibility
-                        # Store original order for later use (as Python floats for consistent comparison)
-                        self._original_wavelength_order = [float(wl) for wl in model_wavelengths]
-                        expected_n_vars = config.get('n_vars', len(model_wavelengths))
-                        if len(model_wavelengths) < expected_n_vars:
-                            print(f"[!]  MISMATCH: Loaded {len(model_wavelengths)} wavelengths but model expects {expected_n_vars}!")
-                            print(f"[!]  This WILL cause different R² when running refined model!")
-                        print(f"DEBUG: Parsed {len(model_wavelengths)} wavelengths from top_vars")
-                        print(f"DEBUG: Stored original wavelength order (type={type(self._original_wavelength_order[0]).__name__}): {self._original_wavelength_order[:5]}...")
-                    except Exception as e:
-                        print(f"WARNING: Could not parse top_vars: {e}")
-                        model_wavelengths = None
-
-                # For full models or if parsing failed: Use all wavelengths
+                # No usable all_vars. Use every column only when the row says it is a
+                # full-spectrum model of this axis. Otherwise top_vars (at most the top
+                # 30) is accepted only when it is the complete trained subset: its count
+                # equals n_vars and every value maps to one channel. Anything else is
+                # shown as an error in the wavelength box, never expanded to the full
+                # spectrum (R009/R031 review round 3).
                 if model_wavelengths is None:
-                    if subset_tag == 'full' or subset_tag == 'N/A':
+                    from spectral_predict.wavelength_matching import (
+                        _full_spectrum_fallback_refusal,
+                    )
+
+                    self._original_wavelength_order = None
+                    refusal = _full_spectrum_fallback_refusal(config, len(all_wavelengths))
+                    if refusal is None:
                         print(f"DEBUG: Full model - using all {len(all_wavelengths)} wavelengths")
                         model_wavelengths = list(all_wavelengths)
-                        self._original_wavelength_order = None  # Clear for full spectrum
                     else:
-                        # Fallback: use all wavelengths
-                        print(f"WARNING: Subset model but no top_vars, using all wavelengths")
-                        model_wavelengths = list(all_wavelengths)
-                        self._original_wavelength_order = None  # Clear for fallback
+                        top_vars_str = config.get('top_vars')
+                        if not isinstance(top_vars_str, str) or top_vars_str.strip() in ('', 'N/A'):
+                            raise WavelengthMatchError(
+                                f"Cannot load this model's wavelengths: {refusal}, and "
+                                f"top_vars is empty."
+                            )
+                        _cols = resolve_wavelength_list(top_vars_str, all_wavelengths)
+                        try:
+                            expected_n_vars = int(config.get('n_vars'))
+                        except (TypeError, ValueError):
+                            expected_n_vars = None
+                        if expected_n_vars is None or len(_cols) != expected_n_vars:
+                            raise WavelengthMatchError(
+                                f"Cannot load this model's wavelengths: {refusal}. top_vars "
+                                f"lists {len(_cols)} wavelengths but the model used "
+                                f"{config.get('n_vars', 'an unknown number of')}, so the "
+                                f"trained subset is unknown."
+                            )
+                        model_wavelengths = [float(all_wavelengths[c]) for c in _cols]
+                        self._original_wavelength_order = list(model_wavelengths)
+                        print(f"DEBUG: Using complete top_vars ({len(model_wavelengths)} wavelengths)")
 
                 # Detect if this is a subset (variable selection) vs full spectrum
                 is_subset = (subset_tag not in ['full', 'N/A', ''])

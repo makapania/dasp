@@ -312,15 +312,25 @@ def _looks_like_g_token(token: str) -> bool:
 
     Decided from the text alone, so it holds where re-formatting the parsed value
     would not reproduce the token (e.g. subnormals): no trailing zeros after the
-    decimal point, at most 6 significant digits, and an exponent only with a single
-    leading digit.
+    decimal point, at most 6 significant digits, and exponent form only where ``%g``
+    would choose it, spelled as it spells it (``1e+06``, ``1.5e-05``, ``1e-318``).
+    Anything else (``1e+00``, ``1e+006``, ``1E+06``, ``+1500``) is matched exactly.
     """
     match = _G_TOKEN.fullmatch(token)
     if match is None:
         return False
     integer, fraction, exponent = match.group(1), match.group(2) or "", match.group(3)
     if exponent is not None:
-        return len(integer) == 1 and integer != "0" and 1 + len(fraction) <= 6
+        if len(integer) != 1 or integer == "0" or 1 + len(fraction) > 6:
+            return False
+        value, digits = int(exponent), exponent[1:]
+        # %g pads the exponent to exactly two digits, and uses more only when needed.
+        if abs(value) < 100 and len(digits) != 2:
+            return False
+        if abs(value) >= 100 and digits.startswith("0"):
+            return False
+        # With 6 significant digits %g chooses exponent form only for exp < -4 or >= 6.
+        return value < -4 or value >= 6
     if len(integer) > 1 and integer.startswith("0"):
         return False
     # %g writes fixed notation only for 1e-4 <= |v| < 1e6.
