@@ -742,3 +742,31 @@ not change mid-analysis); a holdout fixed before modelling. Real leakage = a tes
 producing that fold's score (booster early stopping on the test fold R028/R003/R022; ensemble base models trained on
 the scored fold R002/R021). Rule now in CLAUDE.md. Also: the 2026-09-28 reviews were Claude-only; Codex gpt-6-astra
 and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before any fix starts.
+
+## 2026-10-02 - Ensemble CV fix (branch fix/ensemble-cv; R002, R018, R021, R105)
+- **R018 masked R002.** With string specimen IDs every GUI ensemble died on `y_filtered[train_idx]` (pandas 3 label
+  lookup), so the inflated R2CV was only visible on RangeIndex data. Fixing the indexing alone would have published
+  the leaky numbers. Example data (49 bone spectra, 5 base models incl. GA + CARS wrappers): before, string IDs ->
+  all 5 methods `[X] failed`; RangeIndex -> R2CV 0.936-0.970 with best honest base 0.869. After: 0.847-0.881 for
+  both index types.
+- **The "~0.03 R2 loss from StandardScaler divergence" (commit 9c4d02c) was honest CV, not a bug.** Refitting a
+  wrapper on 4/5 of the rows gives lower OOF R2 than predicting with the full-data fit; that drop is the point. The
+  wrappers already cloned correctly (clone().fit(all rows) reproduces the original predictions). `_is_wrapped_model`
+  and the GUI's `refit_base_models=not any_wrapped` are gone; `refit_base_models=False` still exists in the ensemble
+  classes for API compatibility but warns that it learns in-sample.
+- **WavelengthSubsetWrapper passed full-width numpy arrays straight through** ("assume columns are already matched"),
+  so any numpy caller (validation arrays, numpy-X ensemble fits) fed 2151 columns to a 40-column model. It now takes
+  `all_columns` and subsets arrays by position, or raises when the width matches neither.
+- **Outer CV design:** `ensemble.cross_validate_ensembles` clones and refits every base model on each outer training
+  fold (shared across ensemble types), then `create_ensemble` learns weights from inner OOF within that fold. The
+  deployed ensemble is still fitted on all calibration rows. Cost is about that of the old loop with unwrapped
+  members (plus one base fit per member per outer fold).
+- **Failed OOF members are now removed from the ensemble** (`models`, `model_names`, preprocessor lists; recorded in
+  `excluded_models_`), so saved metadata, weights and routing all agree. This mutates `models` in `fit` (sklearn
+  convention says don't), chosen because `model_io.save_ensemble`, the GUI metadata and viz all read `.models` /
+  `.model_names`; the caller's list is never mutated in place. All members failing raises ValueError.
+- **Stacking R2cal can be far below R2cv** on weak data (meta-model trained on OOF features, applied to in-sample
+  features): -0.75 vs -0.35 on noise. Not a bug in this fix; don't assert cal >= cv in tests.
+- `create_auto_ensembles` (no production caller) had the same Series indexing and two full-data fallbacks; folds that
+  cannot rebuild 2 models now give NaN metrics instead of calibration predictions, and `unique_model_count` counts only
+  successful rebuilds (R106 in passing).
