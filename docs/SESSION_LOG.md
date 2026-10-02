@@ -835,3 +835,15 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   half-fitted state; bootstrap chunks sized to ~64 MB.
 - 0205c32 (round 1) never left this branch, so pickles fitted by it (corrected method, no fit_version_)
   would wrongly take the legacy path; no action: only f6a2287-and-earlier pickles exist in the wild.
+
+## 2026-10-02 - fix/contaminant-maths round 4 (final review)
+- Known limit, documented rather than fixed: the per-group bootstrap randomly sign-flips residuals, which
+  symmetrises them, so SKEWED groups with very different spreads are anti-conservative (Codex: lognormal
+  null, n 50/10, SD 1/4 -> 9.4% false removals at alpha 0.01, each erasing the analyte; exponential 3.8%;
+  `test_auto_rank_skewed_heteroscedastic_null_rate` reproduces 18/200 and bounds it at <= 30/200).
+  Dialog, docstrings, UserGuide and the Apply caution now say the p-values are approximate, can be wrong
+  both ways (one contaminated group of four at n=10, dose 0.5: ~6.5% detection), and that groups of 2-3
+  need a manual count. The advisory dialog adds a warning when a group's residual scores along the
+  suggested direction have |skewness| > 1 (n >= 8) - a hint, not a test.
+- tests/gui/conftest.py `_suppress_dialogs` now also patches tkinter.simpledialog.askinteger/askstring/
+  askfloat (return None); no existing test used the real dialogs.

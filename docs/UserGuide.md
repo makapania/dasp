@@ -8736,8 +8736,13 @@ When pure contaminant spectra are unavailable, EstimatedEPO builds a "pseudo-int
 
 With unpaired groups the removed direction also contains any real chemical difference
 between the groups; use groups that differ only by the contaminant, or paired spectra.
-`MultiGroupEPO` handles several contaminant groups and decides how many directions to
-remove with a bootstrap test against sampling variation.
+`MultiGroupEPO` handles several contaminant groups and suggests how many directions to
+remove with a bootstrap test against sampling variation. Treat the count as a
+suggestion: its p-values assume roughly symmetric within-group variation (skewed groups
+with very different spreads can produce a spurious direction; 9.4% false removals at
+alpha 0.01 in a lognormal test), and it can miss a contaminant confined to one of several
+groups (groups of 10, one contaminated group out of four at a moderate dose: detected
+~6.5% of the time). Groups of 2-3 spectra need a manual count.
 
 ```python
 epo = EstimatedEPO()  # mean_diff

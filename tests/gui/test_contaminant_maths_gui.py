@@ -264,13 +264,94 @@ class TestRoundTwoGuards:
         assert not err.called, err.call_args
         assert "EPO directions to remove" in info.call_args[0][1]
 
+    def test_auto_count_yes_applies_the_suggestion(self, contam_app):
+        app = contam_app.app
+        app.contam_apply_source.set("Main Dataset")
+        X_before = app.X.copy()
+        with patch("tkinter.messagebox.askyesnocancel", return_value=True) as ask:
+            app._contam_apply_correction()
+        assert ask.called
+        P = app.contam_epo_transformer.P_orth_
+        np.testing.assert_allclose(app.X.to_numpy(), X_before.to_numpy() @ P)
+
+    def test_auto_count_no_then_number_uses_the_refit_transformer(self, contam_app):
+        app = contam_app.app
+        app.contam_apply_source.set("Main Dataset")
+        X_before = app.X.copy()
+        with patch("tkinter.messagebox.askyesnocancel", return_value=False), \
+             patch("tkinter.simpledialog.askinteger", return_value=1):
+            app._contam_apply_correction()
+        epo = app.contam_epo_transformer
+        assert epo.n_total_components == 1 and epo.n_components_ == 1
+        np.testing.assert_allclose(app.X.to_numpy(), X_before.to_numpy() @ epo.P_orth_)
+
+    def test_auto_count_no_then_cancel_preserves_existing_correction(self, contam_app):
+        app = contam_app.app
+        app.contam_apply_source.set("Main Dataset")
+        contam_app.invoke_method("_contam_apply_correction")  # Yes (fixture default)
+        X_after_first = app.X.copy()
+        transformer = app.contam_epo_transformer
+        backup = app.X_before_contam_correction.copy()
+        export_cache = app.contam_corrected_X.copy()
+        with patch("tkinter.messagebox.askyesnocancel", return_value=False), \
+             patch("tkinter.simpledialog.askinteger", return_value=None):
+            app._contam_apply_correction()
+        pd.testing.assert_frame_equal(app.X, X_after_first)
+        assert app.contam_epo_transformer is transformer
+        pd.testing.assert_frame_equal(app.X_before_contam_correction, backup)
+        pd.testing.assert_frame_equal(app.contam_corrected_X, export_cache)
+        assert "Cancelled" in app.contam_apply_status_label.cget("text")
+
+    def test_non_advisory_mode_applies_without_asking(self, contam_app, monkeypatch):
+        app = contam_app.app
+        monkeypatch.setattr(type(app), "_CONTAM_AUTO_COUNT_ADVISORY", False)
+        app.contam_apply_source.set("Main Dataset")
+        X_before = app.X.copy()
+        with patch("tkinter.messagebox.askyesnocancel") as ask:
+            app._contam_apply_correction()
+        assert not ask.called
+        np.testing.assert_allclose(
+            app.X.to_numpy(), X_before.to_numpy() @ app.contam_epo_transformer.P_orth_)
+
+    def test_skewed_group_adds_a_dialog_warning(self, contam_app):
+        app = contam_app.app
+        rng = np.random.default_rng(8)
+        z = rng.lognormal(size=40)
+        skewed = BASELINE + np.outer(0.5 + z, ANALYTE) + rng.normal(0, 0.002, (40, N_WL))
+        app.contam_clean_data = skewed
+        app.contam_apply_source.set("Contaminant Groups")
+        app.contam_epo_components.set("1")
+        app._contam_apply_correction()
+        # The skew lives along the analyte direction: point the suggestion there.
+        epo = app.contam_epo_transformer
+        epo.interferent_components_ = (ANALYTE / np.linalg.norm(ANALYTE))[:, None]
+        assert "skewed in: clean" in app._contam_skew_warning(epo)
+
+    def test_restore_missing_holdout_id_clears_validation(self, contam_app):
+        app = contam_app.app
+        app.contam_apply_source.set("Main Dataset")
+        contam_app.invoke_method("_contam_apply_correction")
+        ids = list(app.X.index[:3]) + ["NOT_IN_X"]
+        app.validation_indices = set(ids)
+        app.validation_X = pd.concat([app.X.loc[ids[:3]], app.X.loc[ids[:1]].rename(
+            index={ids[0]: "NOT_IN_X"})])
+        app.validation_y = pd.Series(np.arange(4.0), index=ids)
+        app.validation_enabled.set(True)
+        contam_app.invoke_method("_contam_restore_main_dataset")
+        assert app.validation_X is None and app.validation_y is None
+        assert not app.validation_indices
+        assert app.validation_enabled.get() is False
+
     def test_epo_success_message_carries_the_caution(self, contam_app):
         app = contam_app.app
         app.contam_apply_source.set("Contaminant Groups")
         with patch("tkinter.messagebox.showinfo") as info:
             app._contam_apply_correction()
         assert "Caution" in info.call_args[0][1]
-        assert "differ ONLY by the contaminant" in app.contam_epo_caution_label.cget("text")
+        caution = app.contam_epo_caution_label.cget("text")
+        assert "differ ONLY by the contaminant" in caution
+        assert "Groups of 2-3 spectra need a manual count" in caution
+        assert "one of several groups" in caution
 
 
 @pytest.mark.gui

@@ -58374,7 +58374,13 @@ External Validation Performance (n={n_val}):
                   "contaminant. Any real chemical difference between the groups (e.g. more "
                   "collagen in the treated bones) is removed with it. Paired spectra (the "
                   "same specimen scanned clean and contaminated) avoid this, but this page "
-                  "cannot pair spectra yet."),
+                  "cannot pair spectra yet.\n"
+                  "'auto' only suggests a count, and it can be wrong both ways: it can miss "
+                  "a contaminant confined to one of several groups (with groups of 10, one "
+                  "contaminated group out of four at a moderate dose was found only ~7% of "
+                  "the time), and groups with skewed variation and very different spreads "
+                  "can produce a spurious direction. Groups of 2-3 spectra need a manual "
+                  "count."),
             style='Small.TLabel', foreground='#b45309', wraplength=640, justify=tk.LEFT)
         self.contam_epo_caution_label.pack(anchor=tk.W, pady=(4, 0), padx=(20, 0))
         row += 1
@@ -60340,10 +60346,16 @@ External Validation Performance (n={n_val}):
             # confirms or picks a number (review round 2, item 2).
             k = epo.n_components_
             p_txt = ", ".join(f"{p:.3g}" for p in epo.p_values_[:k])
+            skew_note = self._contam_skew_warning(epo)
             answer = messagebox.askyesnocancel(
                 "Confirm EPO Directions",
                 f"The automatic test suggests removing {k} contaminant direction(s) "
-                f"(p = {p_txt}; the test is approximate).\n\n"
+                f"(p = {p_txt}).\n\n"
+                "These p-values are approximate, not calibrated: they assume roughly "
+                "symmetric variation within each group. Skewed or heavy-tailed groups with "
+                "very different spreads can produce a spurious direction, and a contaminant "
+                "confined to one of several groups can be missed. Prefer a manual count "
+                f"when in doubt.{skew_note}\n\n"
                 f"Yes: remove {k}.\nNo: choose a number.\nCancel: remove nothing.")
             if answer is None:
                 raise _ContamCancelled()
@@ -60449,6 +60461,34 @@ External Validation Performance (n={n_val}):
             text="↶ Main dataset restored to its state before contaminant correction"
                  + validation_note.replace("\n", " "),
             foreground='green')
+
+    def _contam_skew_warning(self, epo):
+        """Dialog note when a group's spread along a suggested direction is strongly skewed.
+
+        The automatic count's bootstrap symmetrises residuals; with skewed groups
+        of very different spread it can suggest a spurious direction (review round
+        3: 9% false removals for lognormal groups). Sample skewness |g1| > 1 in a
+        group of at least 8 spectra is flagged; it is a hint, not a test.
+        """
+        from scipy import stats
+
+        if epo.n_components_ == 0:
+            return ""
+        v = epo.interferent_components_[:, 0]
+        groups = [("clean", self.contam_clean_data)] + list(self.contam_groups.items())
+        flagged = []
+        for label, X_g in groups:
+            X_g = np.asarray(X_g, dtype=float)
+            if X_g.shape[0] < 8:
+                continue
+            scores = (X_g - X_g.mean(axis=0)) @ v
+            if np.std(scores) > 0 and abs(stats.skew(scores)) > 1.0:
+                flagged.append(str(label))
+        if not flagged:
+            return ""
+        return ("\n\nWarning: the variation along the suggested direction is strongly "
+                f"skewed in: {', '.join(flagged)}. The suggestion is less reliable here; "
+                "consider a manual count.")
 
     @staticmethod
     def _contam_fingerprint(frame):

@@ -1048,6 +1048,36 @@ class TestMultiGroupEPOAutomaticCount:
             lambda r: (g(r, 5, 1.0), {"a": g(r, 50, 0.25), "b": g(r, 50, 0.25)}))
         assert hits <= 5
 
+    def test_auto_rank_skewed_heteroscedastic_null_rate(self):
+        """KNOWN LIMIT, not a calibration claim. Sign flips symmetrise the residuals,
+        so skewed groups with very different spreads are anti-conservative: Codex
+        (round 3) measured 9.4% false removals at alpha = 0.01 for a lognormal null
+        with groups of 50 and 10 and SD 1 vs 4. This only bounds it loosely (<= 15%
+        of 200 runs) so a further regression is caught."""
+        def skewed(rng, n, sd):
+            z = (rng.lognormal(size=n) - np.exp(0.5)) / np.sqrt((np.e - 1) * np.e)
+            return BASELINE + np.outer(1 + 0.25 * sd * z, ANALYTE) + rng.normal(
+                0, 0.002, (n, N_WL))
+
+        hits = self._null_rate(lambda r: (skewed(r, 50, 1.0), {"grp": skewed(r, 10, 4.0)}))
+        assert hits <= 30
+
+    def test_auto_rank_overestimation_with_one_true_direction(self):
+        """One contaminant shared by all groups: the count should be exactly 1 (Codex
+        measured 0-1.4% extra removals). Allow at most 1 over-count in 40 runs."""
+        over = under = 0
+        for seed in range(40):
+            rng = np.random.default_rng(2000 + seed)
+            clean = _spectra(rng, 15)
+            groups = {f"g{i}": _spectra(rng, 15, [(CONTAM, 0.8, 1.2)]) for i in range(3)}
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                k = MultiGroupEPO().fit(clean, groups).n_components_
+            over += k > 1
+            under += k < 1
+        assert under == 0
+        assert over <= 1
+
     def test_auto_rank_zero_capacity_has_defined_behavior(self):
         """Codex F4: one wavelength left no removable direction and indexed p_values_[0]."""
         X_clean = np.random.default_rng(1).normal(size=(6, 1))

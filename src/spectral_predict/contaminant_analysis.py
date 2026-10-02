@@ -2222,8 +2222,10 @@ def _sampling_rank(
     draw), the parametric analogue of studentising with the group's own variance
     estimate. The level is approximate (no exact theory covers this statistic);
     measured false-positive rates at alpha = 0.01 were 0-1.5% over equal and
-    unequal group sizes and four-fold unequal spreads (SESSION_LOG 2026-10-02,
-    round 3). With very small groups (2-3 spectra) the test is conservative and
+    unequal group sizes and four-fold unequal spreads with Gaussian variation
+    (SESSION_LOG 2026-10-02, round 3). Sign flips symmetrise the residuals, so
+    skewed groups with very different spreads are NOT covered: a lognormal null
+    (n 50/10, SD 1/4) gave 9.4% false removals at alpha = 0.01. With very small groups (2-3 spectra) the test is conservative and
     rarely removes anything; choose the count manually there.
 
     Returns:
@@ -2330,6 +2332,16 @@ class MultiGroupEPO(BaseEstimator, TransformerMixin):
         analyte, when groups are small) is not detectable this way; set an
         integer to override. The automatic count needs at least 2 spectra in the
         reference and in every group.
+
+        The p-values are approximate, not calibrated. They assume roughly
+        symmetric within-group variation (the bootstrap randomly sign-flips the
+        residuals). Skewed or heavy-tailed groups with very different spreads can
+        produce spurious directions: a lognormal null with groups of 50 and 10
+        and four-fold different spreads gave 9.4% false removals at alpha = 0.01
+        (Codex review, round 3), each removing essentially all of the analyte.
+        The count can also miss a contaminant confined to one of several groups:
+        with groups of 10, one contaminated group out of four at dose 0.5 was
+        detected only ~6.5% of the time. Prefer a manual count in those cases.
 
     alpha : float, default=0.01
         Approximate significance level of each step.
