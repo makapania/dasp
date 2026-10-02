@@ -1668,6 +1668,16 @@ def _px(value: float) -> int:
     return int(round(value * _UI_SCALE))
 
 
+def _px_geometry(size: str) -> str:
+    """Scale a ``"WIDTHxHEIGHT"`` Toplevel size given at 96 dpi, e.g. ``"350x180"``.
+
+    Fixed-size dialogs do not grow to fit their content, while their point-sized
+    fonts do grow with the display scale, so an unscaled size clips the bottom rows.
+    """
+    width, height = (int(v) for v in size.lower().split('x'))
+    return f"{_px(width)}x{_px(height)}"
+
+
 # ===== NAMED FONTS =====
 # Tk has no font fallback list: font=(('Segoe UI', 'Arial'), 10) is parsed as the
 # single family "Segoe UI Arial", which does not exist, so Windows substitutes Arial.
@@ -9448,7 +9458,7 @@ class SpectralPredictApp:
 
         dialog = tk.Toplevel(self.root)
         dialog.title("Peak Calculator")
-        dialog.geometry("520x720")
+        dialog.geometry(_px_geometry("520x720"))
         dialog.configure(bg='#f0f0f0')
         dialog.transient(self.root)
         dialog.resizable(True, True)
@@ -19691,7 +19701,7 @@ class SpectralPredictApp:
             # Create a custom dialog with scrollable text
             dialog = tk.Toplevel(self.root)
             dialog.title("Data Alignment Report")
-            dialog.geometry("600x500")
+            dialog.geometry(_px_geometry("600x500"))
 
             # Add text widget with scrollbar
             frame = ttk.Frame(dialog, padding=10)
@@ -31941,7 +31951,7 @@ For detailed documentation, see the User Guide.
 
             win = tk.Toplevel(self.root)
             win.title("Multi-Class Decision Matrix")
-            win.geometry("980x720")
+            win.geometry(_px_geometry("980x720"))
 
             header = ttk.Frame(win)
             header.pack(fill='x', padx=10, pady=(10, 4))
@@ -35698,7 +35708,7 @@ For detailed documentation, see the User Guide.
 
         dialog = tk.Toplevel(self.root)
         dialog.title("Set Analysis Subset")
-        dialog.geometry("520x500")
+        dialog.geometry(_px_geometry("520x500"))
         dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.grab_set()
@@ -42768,7 +42778,7 @@ External Validation Performance (n={n_val}):
         # Simple dialog - just ask for format and export directly
         dialog = tk.Toplevel(self.root)
         dialog.title("Export Code")
-        dialog.geometry("550x520")
+        dialog.geometry(_px_geometry("550x520"))
         dialog.configure(bg='#f0f0f0')
         dialog.transient(self.root)
         dialog.resizable(True, True)
@@ -43550,7 +43560,7 @@ External Validation Performance (n={n_val}):
         # Create preview window
         preview_window = tk.Toplevel(self.root)
         preview_window.title("Wavelength Selection Preview")
-        preview_window.geometry("800x500")
+        preview_window.geometry(_px_geometry("800x500"))
 
         # Info text
         info_text = f"Selected {len(selected_wl)} wavelengths out of {len(available_wl)} available"
@@ -43665,7 +43675,7 @@ External Validation Performance (n={n_val}):
         """Show dialog for custom wavelength range."""
         dialog = tk.Toplevel(self.root)
         dialog.title("Custom Wavelength Range")
-        dialog.geometry("350x180")
+        dialog.geometry(_px_geometry("350x200"))
         dialog.transient(self.root)
         dialog.grab_set()
 
@@ -53804,7 +53814,7 @@ External Validation Performance (n={n_val}):
         # Create rule dialog
         dialog = tk.Toplevel(self.root)
         dialog.title("Add Conditional Flagging Rule")
-        dialog.geometry("550x450")
+        dialog.geometry(_px_geometry("550x450"))
         dialog.configure(bg=self.colors['bg'])
 
         # Make modal
@@ -56996,7 +57006,7 @@ External Validation Performance (n={n_val}):
             # Show in popup window
             preview_win = tk.Toplevel(self.root)
             preview_win.title(f"Preview: {sample_id}")
-            preview_win.geometry("800x400")
+            preview_win.geometry(_px_geometry("800x400"))
 
             canvas = FigureCanvasTkAgg(fig, master=preview_win)
             canvas.draw()
@@ -57213,7 +57223,7 @@ External Validation Performance (n={n_val}):
             # Show in popup window
             compare_win = tk.Toplevel(self.root)
             compare_win.title(f"Comparison: {sample_id} vs {result_id}")
-            compare_win.geometry("1000x500")
+            compare_win.geometry(_px_geometry("1000x500"))
 
             canvas = FigureCanvasTkAgg(fig, master=compare_win)
             canvas.draw()
@@ -60355,7 +60365,7 @@ External Validation Performance (n={n_val}):
         # Show in popup window
         popup = tk.Toplevel(self.root)
         popup.title("Correction Comparison")
-        popup.geometry("900x500")
+        popup.geometry(_px_geometry("900x500"))
 
         canvas = FigureCanvasTkAgg(fig, master=popup)
         canvas.draw()

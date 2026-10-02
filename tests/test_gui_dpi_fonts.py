@@ -54,6 +54,14 @@ def test_scale_is_idempotent_and_rescales_constants(restore_scale):
     assert gui._px(70) == 70
 
 
+@pytest.mark.skipif(sys.platform == "darwin", reason="scale is pinned to 1.0 on macOS")
+def test_px_geometry_scales_dialog_sizes(restore_scale):
+    gui._apply_ui_scale(_FakeRoot(96.0))
+    assert gui._px_geometry("350x200") == "350x200"
+    gui._apply_ui_scale(_FakeRoot(144.0))
+    assert gui._px_geometry("350x200") == "525x300"
+
+
 def test_scale_never_shrinks_below_one(restore_scale):
     assert gui._apply_ui_scale(_FakeRoot(72.0)) == 1.0
     assert gui.SIDEBAR_CONFIG == gui._BASE_SIDEBAR_CONFIG
