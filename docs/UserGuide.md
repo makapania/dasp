@@ -9856,7 +9856,7 @@ pip install agilent-ir-formats
 **Format Detection:**
 - Column 1 is x and column 2 is y; further columns (including text such as quality flags) are ignored, with a warning
 - Every delimiter and decimal separator (point or comma) is tried; the reading under which most rows give numeric x and y wins, and decimal-comma files are reported with a warning
-- Files that can be read two ways are refused rather than guessed: comma-separated rows such as `4000,5,0,123` (decimal-comma numbers or four columns?), thousands separators such as `1,234,0.123`, and rows that read differently under two delimiters. Re-export with `;` or tab as the delimiter (from Python: pass `delimiter=` and `decimal=`)
+- Comma-delimited files are read with decimal points (decimal commas inside a comma-delimited file are not valid CSV). If rows also fit a decimal-comma or thousands-separator reading (e.g. `4000,5,0,123`), the file loads with a warning in the import dialog; re-export such a file with `;` as the delimiter. A comma file is refused only when that other reading explains an inconsistency: rows with different field counts, repeated x values, or fields with leading zeros such as `1,000,0.123`. Files whose rows read differently under two delimiters are also refused. From Python, pass `delimiter=` and `decimal=` to choose explicitly
 - Lines before the first data row are the header. A headerless file keeps its first row as data
 - Quoted fields (`"1000","0.1"`) are accepted
 - Skips comment lines (starting with `#` or `%`) and inline `#` comments (`1000,0.1 # note`). Inline `;` comments are **not** supported, because `;` is also a delimiter: a row such as `1000,0.1 ; note` is skipped with a warning

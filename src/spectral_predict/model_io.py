@@ -856,15 +856,18 @@ def check_data_type_compatibility(
             f"Model trained on {model_type.upper()} data, "
             f"but prediction data is {prediction_data_type.upper()}."
         )
-    model_source = model_metadata.get('source_data_type')
+    from spectral_predict.io import canonical_source_data_type
+
+    # Readers name the same ordinate differently (OPUS 'log_reflectance', Omnic
+    # 'Log(1/R)'), so compare canonical names
+    model_source = canonical_source_data_type(model_metadata.get('source_data_type'))
     if model_metadata.get('data_type_converted_from'):
         model_source = None
-    if model_source and prediction_source_data_type and (
-        model_source.lower() != prediction_source_data_type.lower()
-    ):
+    prediction_source = canonical_source_data_type(prediction_source_data_type)
+    if model_source and prediction_source and model_source != prediction_source:
         return (
             f"Model trained on {model_source.replace('_', ' ').upper()} data, but "
-            f"prediction data is {prediction_source_data_type.replace('_', ' ').upper()} "
+            f"prediction data is {prediction_source.replace('_', ' ').upper()} "
             f"(both {model_type.lower()})."
         )
     return None

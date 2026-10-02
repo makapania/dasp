@@ -763,3 +763,219 @@ def test_ensemble_save_carries_ordinate_metadata(tmp_path):
 )
 def test_data_type_suffix(data_type, source, suffix):
     assert gui._data_type_suffix(data_type, source) == suffix
+
+
+# ---------------------------------------------------------------------------
+# Review round 4: contaminant groups, carried scale, canonical source labels
+# ---------------------------------------------------------------------------
+
+
+def test_contaminant_group_with_other_type_is_refused(tmp_path, monkeypatch, dialogs):
+    clean_dir = tmp_path / "clean"
+    km_dir = tmp_path / "km"
+    clean_dir.mkdir()
+    km_dir.mkdir()
+    R = np.linspace(0.40, 0.50, 60)
+    files = {clean_dir / f"c{i}.0": {"r": R} for i in range(2)}
+    files.update({km_dir / f"k{i}.0": {"km": np.full(60, 0.45)} for i in range(2)})
+    _install_opus(monkeypatch, files)
+    app = _contam_app(monkeypatch, clean_dir)
+    app.contam_group_paths = {}
+    app.contam_groups_listbox = _AnyWidget()
+    app.contam_wavelengths = None
+    app._contam_load_clean_data()
+    assert app.contam_current_data_type.get() == "reflectance"
+
+    added = app._contam_add_single_group("KM", str(km_dir))
+
+    assert added is False
+    assert "KM" not in app.contam_groups
+    refusal = [c for c in dialogs if c[1] == "Data Type Mismatch"]
+    assert refusal and "Kubelka-Munk" in refusal[0][2]
+
+
+def test_contaminant_group_with_log_reflectance_is_refused(tmp_path, monkeypatch, dialogs):
+    clean_dir = tmp_path / "clean"
+    logr_dir = tmp_path / "logr"
+    clean_dir.mkdir()
+    logr_dir.mkdir()
+    files = {clean_dir / f"c{i}.0": {"r": np.linspace(0.4, 0.5, 60)} for i in range(2)}
+    files.update({logr_dir / f"g{i}.0": {"logr": LOGR} for i in range(2)})
+    _install_opus(monkeypatch, files)
+    app = _contam_app(monkeypatch, clean_dir)
+    app.contam_group_paths = {}
+    app.contam_groups_listbox = _AnyWidget()
+    app.contam_wavelengths = None
+    app._contam_load_clean_data()
+
+    assert app._contam_add_single_group("logR", str(logr_dir)) is False
+    assert "logR" not in app.contam_groups
+
+
+def test_matching_contaminant_groups_convert_with_clean_data(tmp_path, monkeypatch, dialogs):
+    clean_dir = tmp_path / "clean"
+    grp_dir = tmp_path / "grp"
+    clean_dir.mkdir()
+    grp_dir.mkdir()
+    files = {clean_dir / f"c{i}.0": {"r": np.full(60, 0.5)} for i in range(2)}
+    files.update({grp_dir / f"g{i}.0": {"r": np.full(60, 0.25)} for i in range(2)})
+    _install_opus(monkeypatch, files)
+    app = _contam_app(monkeypatch, clean_dir)
+    app.contam_group_paths = {}
+    app.contam_groups_listbox = _AnyWidget()
+    app.contam_wavelengths = None
+    app._contam_load_clean_data()
+    assert app._contam_add_single_group("G", str(grp_dir)) is True
+
+    app._contam_convert_data_type()
+
+    np.testing.assert_allclose(app.contam_clean_data, np.log10(1 / 0.5))
+    np.testing.assert_allclose(app.contam_groups["G"], np.log10(1 / 0.25))
+    assert app.contam_group_types["G"]["data_type"] == "absorbance"
+
+
+def test_contaminant_conversion_refuses_mismatched_groups(tmp_path, monkeypatch, dialogs):
+    """A group whose type differs (e.g. loaded before the clean data) blocks conversion."""
+    app = _contam_app(monkeypatch, tmp_path)
+    app.contam_clean_data = np.full((2, 5), 0.5)
+    app.contam_current_data_type.set("reflectance")
+    app.contam_original_data_type.set("reflectance")
+    app.contam_data_value_scale = 1.0
+    app.contam_groups = {"KM": np.full((2, 5), 0.45)}
+    app.contam_group_types = {
+        "KM": {"data_type": "other", "source_data_type": "kubelka_munk", "value_scale": 1.0}
+    }
+
+    app._contam_convert_data_type()
+
+    np.testing.assert_array_equal(app.contam_groups["KM"], np.full((2, 5), 0.45))
+    np.testing.assert_array_equal(app.contam_clean_data, np.full((2, 5), 0.5))
+    assert any(c[1] == "Data Type Mismatch" for c in dialogs)
+
+
+def test_comparison_keeps_carried_percent_scale_for_absorbance(dialogs):
+    """50 % reflectance converted to absorbance on the main tab converts back to 50."""
+    app = _comparison_app("validation")
+    A = np.full((1, 5), np.log10(1 / 0.5))
+    app.validation_X = pd.DataFrame(A, columns=[1000.0, 1001.0, 1002.0, 1003.0, 1004.0])
+    app.validation_y = pd.Series([1.0])
+    app.current_data_type.set("absorbance")
+    app.original_data_type.set("reflectance")
+    app.data_has_been_converted = True
+    app.data_value_scale = 100.0
+    app.type_confidence = 95.0
+
+    app._load_comparison_data()
+    assert app.comparison_value_scale == 100.0
+    app._comparison_convert_data_type()
+
+    np.testing.assert_allclose(app.comparison_data.to_numpy(), 50.0)
+
+
+def test_ct_handoff_keeps_type_and_percent_scale(monkeypatch, dialogs):
+    X = np.full((2, 5), 50.0)  # percent reflectance in Mode B
+    app = _export_app(X)
+    app._ct_convert_to_absorbance()
+    wl, X_abs = app.new_satellite_data_export
+    app.transformed_spectra = (wl, X_abs)
+    app._record_transformed_spectra_type()
+    app.export_metadata_context = {
+        "source_format": "smart_csv",
+        "specimen_ids": ["a", "b"],
+        "metadata_df": None,
+    }
+    app.validation_indices = None
+    app.tab1_status = _AnyWidget()
+    app.notebook = types.SimpleNamespace(select=lambda i: None)
+    for name in (
+        "_refresh_active_group_indices",
+        "_generate_plots",
+        "_generate_explore_plots",
+        "_update_data_type_status_ui",
+        "_update_x_unit_status_ui",
+        "_update_x_unit_labels",
+        "_update_dm_data_type_label",
+        "_populate_data_viewer",
+        "_update_task_type_label",
+    ):
+        setattr(app, name, lambda *a, **k: None)
+
+    app._ct_use_as_working_data()
+
+    assert not [c for c in dialogs if c[0] == "showerror"], dialogs
+    # Absorbance values 0.30103 would read as reflectance by value; the carried type wins
+    assert app.current_data_type.get() == "absorbance"
+    assert app.data_value_scale == 100.0
+    back = app._convert_data_type(app.X.to_numpy(), "absorbance", "reflectance")
+    np.testing.assert_allclose(back, 50.0)
+
+
+def test_ct_with_y_load_uses_reader_metadata(monkeypatch, dialogs):
+    X = pd.DataFrame([LOGR, LOGR], index=["s1", "s2"], columns=np.linspace(3410, 4000, 60))
+    meta = {
+        "data_type": "absorbance",
+        "type_confidence": 95.0,
+        "source_data_type": "Log(1/R)",
+        "value_scale": 1.0,
+    }
+    monkeypatch.setattr(sp_io, "read_omnic_dir", lambda p: (X, meta), raising=False)
+    monkeypatch.setattr(sp_io, "read_reference_csv", lambda p, c: pd.DataFrame({"y": [1, 2]}))
+    monkeypatch.setattr(
+        sp_io,
+        "align_xy",
+        lambda X_, ref, c, t, return_alignment_info=True: (
+            X_,
+            pd.Series([1.0, 2.0], index=X_.index),
+            {
+                "unmatched_spectra": [],
+                "n_nan_dropped": 0,
+                "matched_ids": list(X_.index),
+                "unmatched_reference": [],
+                "used_fuzzy_matching": False,
+            },
+        ),
+    )
+    app = _bare_app()
+    app.ct_primary_spectra_path_var = _Var("folder")
+    app.ct_primary_reference_path_var = _Var("ref.csv")
+    app.ct_primary_spectral_file_col_var = _Var("file")
+    app.ct_primary_target_col_var = _Var("y")
+    app.ct_primary_detected_type = "omnic"
+    app.ct_primary_data_type = _Var()
+    app._update_data_info = lambda: None
+    app.play_sound = lambda *a, **k: None
+
+    app._load_primary_data_with_y()
+
+    assert not [c for c in dialogs if c[0] == "showerror"], dialogs
+    assert app.ct_primary_data_type.get() == "absorbance"
+    assert app.ct_primary_source_data_type == "Log(1/R)"
+    assert gui._data_type_suffix("other", "Kubelka-Munk") == "_km"
+
+
+def test_canonical_source_labels():
+    from spectral_predict.io import canonical_source_data_type as canon
+    from spectral_predict.model_io import check_data_type_compatibility as check
+
+    assert canon("Log(1/R)") == canon("log_reflectance") == "log_reflectance"
+    assert canon("Kubelka-Munk") == canon("kubelka_munk") == "kubelka_munk"
+    assert canon("unknown") is None and canon(None) is None and canon("") is None
+    assert canon("Some Thing") == "some_thing"
+    model = {"data_type": "absorbance", "source_data_type": "log_reflectance"}
+    assert check(model, "absorbance", "Log(1/R)") is None
+    assert check(model, "absorbance", "absorbance") is not None
+    assert gui._data_type_label("other", "Kubelka-Munk") == "Kubelka-Munk"
+
+
+def test_metadata_captures_and_prediction_source_stay_wired():
+    """Tripwires for plumbing the behavioural tests cannot reach cheaply."""
+    source = Path(gui.__file__).read_text(encoding="utf-8")
+    # Directory loaders leave reader metadata for their callers
+    assert source.count("self._last_dir_load_metadata = metadata") >= 3
+    assert source.count("df, self._last_dir_load_metadata = ") >= 4
+    assert source.count("self._contam_last_metadata = metadata") == 6
+    # Main-tab prediction passes the prediction data's source type
+    assert (
+        "prediction_source_data_type=(\n                            None if self.pred_data_has_been_converted"
+        in source
+    )

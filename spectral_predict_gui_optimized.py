@@ -168,7 +168,7 @@ except ImportError:
 
 # Shared ASD extension set + folder helper (single source of truth for .asd/.sig/.sco
 # detection so directory-scan sites across the GUI can't drift out of sync).
-from spectral_predict.io import ASD_EXTENSIONS, list_asd_files
+from spectral_predict.io import ASD_EXTENSIONS, canonical_source_data_type, list_asd_files
 
 # Import search controller for pause/resume/stop
 from spectral_predict.search_controller import SearchController
@@ -326,7 +326,7 @@ def _data_type_label(data_type, source_data_type=None) -> str:
     """Display name of a data type, e.g. for plot y labels and status text."""
     if _is_convertible_data_type(data_type):
         return str(data_type).capitalize()
-    return _SOURCE_DATA_TYPE_LABELS.get(source_data_type, "Intensity")
+    return _SOURCE_DATA_TYPE_LABELS.get(canonical_source_data_type(source_data_type), "Intensity")
 
 
 _SOURCE_DATA_TYPE_SUFFIXES = {
@@ -345,16 +345,21 @@ def _data_type_suffix(data_type, source_data_type=None) -> str:
         return "_abs"
     if data_type == "reflectance":
         return "_ref"
-    return _SOURCE_DATA_TYPE_SUFFIXES.get(source_data_type, "_other")
+    return _SOURCE_DATA_TYPE_SUFFIXES.get(canonical_source_data_type(source_data_type), "_other")
 
 
 def _loaded_value_scale(metadata, X, data_type) -> float:
-    """Reflectance scale (1 or 100) of freshly loaded data; 1.0 for other types."""
-    if data_type != "reflectance":
-        return 1.0
+    """Reflectance scale (1 or 100) to use when converting this data.
+
+    A scale carried in metadata wins whatever the current type: percent reflectance
+    already converted to absorbance must convert back to percent. Otherwise the
+    scale is inferred for reflectance and is 1.0 for other types.
+    """
     scale = (metadata or {}).get("value_scale")
     if scale in (1.0, 100.0):
         return float(scale)
+    if data_type != "reflectance":
+        return 1.0
     try:
         from spectral_predict.io import infer_reflectance_scale
 
@@ -51790,16 +51795,7 @@ External Validation Performance (n={n_val}):
             # Store transformed spectra, with the data type they carry (after any
             # conversion), for "use as working data"
             self.transformed_spectra = (model_wavelengths, X_transferred)
-            export_type = self.ct_export_data_type.get()
-            self.transformed_spectra_type = {
-                'data_type': export_type,
-                'type_confidence': getattr(self, 'ct_export_type_confidence', 50.0),
-                'source_data_type': (
-                    None if self.ct_export_data_converted
-                    else getattr(self, 'ct_export_source_data_type', None)
-                ),
-                'value_scale': getattr(self, 'ct_export_value_scale', 1.0),
-            } if export_type else None
+            self._record_transformed_spectra_type()
 
             # Calculate statistics
             rmse = np.sqrt(np.mean((X_transferred - X_satellite_resampled) ** 2))
@@ -51840,6 +51836,24 @@ External Validation Performance (n={n_val}):
             self.ct_use_as_working_btn.config(state='normal')
         else:
             self.ct_use_as_working_btn.config(state='disabled')
+
+    def _record_transformed_spectra_type(self):
+        """Record the Mode B data type (after any conversion) with the transformed spectra.
+
+        "Use as working data" applies it instead of re-detecting from values; the
+        value scale travels with it so percent reflectance converted to absorbance
+        converts back to percent.
+        """
+        export_type = self.ct_export_data_type.get()
+        self.transformed_spectra_type = {
+            'data_type': export_type,
+            'type_confidence': getattr(self, 'ct_export_type_confidence', 50.0),
+            'source_data_type': (
+                None if self.ct_export_data_converted
+                else getattr(self, 'ct_export_source_data_type', None)
+            ),
+            'value_scale': getattr(self, 'ct_export_value_scale', 1.0),
+        } if export_type else None
 
     def _ct_use_as_working_data(self):
         """Push transformed spectra from Mode B into the main working data pipeline.
@@ -58745,6 +58759,7 @@ External Validation Performance (n={n_val}):
         self.contam_wavelengths = None
         self.contam_groups.clear()
         self.contam_group_paths.clear()
+        self.contam_group_types = {}
         self.contam_results = None
         self._contam_combined_df = None
         self._contam_combined_wl_cols = None
@@ -59047,6 +59062,38 @@ External Validation Performance (n={n_val}):
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load clean data:\n{str(e)}")
 
+    def _contam_group_type(self, label, metadata, group_data):
+        """Data type record for a contaminant group, or None if it is refused.
+
+        A group must have the clean data's current type. When the group's reader
+        states a different type, or either side is a non-convertible ('other') type,
+        the group is refused with a message. A group typed only by the value
+        heuristic is taken to match the clean data, as before.
+        """
+        group_type, _confidence, group_source = _resolve_loaded_data_type(metadata, group_data)
+        clean_loaded = getattr(self, 'contam_clean_data', None) is not None
+        clean_type = self.contam_current_data_type.get() if clean_loaded else None
+        stated = bool((metadata or {}).get('data_type'))
+        if clean_type and group_type != clean_type:
+            if stated or not (
+                _is_convertible_data_type(group_type) and _is_convertible_data_type(clean_type)
+            ):
+                clean_label = _data_type_label(
+                    clean_type, getattr(self, 'contam_source_data_type', None))
+                messagebox.showerror(
+                    "Data Type Mismatch",
+                    f"Contaminant group '{label}' is {_data_type_label(group_type, group_source)} "
+                    f"data, but the clean data is {clean_label}.\n\nAll groups must have "
+                    "the clean data's data type. Convert the data or load matching files.")
+                return None
+            # Heuristic-only disagreement between convertible types: follow the clean data
+            group_type, group_source = clean_type, getattr(self, 'contam_source_data_type', None)
+        return {
+            'data_type': group_type,
+            'source_data_type': group_source,
+            'value_scale': _loaded_value_scale(metadata, group_data, group_type),
+        }
+
     def _contam_add_single_group(self, label: str, filepath: str) -> bool:
         """Load, validate, and store a single contaminant group.
 
@@ -59054,6 +59101,10 @@ External Validation Performance (n={n_val}):
         """
         try:
             group_data, group_wavelengths, sample_names = self._contam_load_spectra_from_path(filepath)
+            group_metadata = getattr(self, '_contam_last_metadata', None)
+            group_type = self._contam_group_type(label, group_metadata, group_data)
+            if group_type is None:
+                return False
 
             # Validate wavelengths match if we have wavelengths loaded
             if self.contam_wavelengths is not None and group_wavelengths is not None:
@@ -59066,6 +59117,9 @@ External Validation Performance (n={n_val}):
             # Store group data
             self.contam_groups[label] = group_data
             self.contam_group_paths[label] = filepath
+            if not hasattr(self, 'contam_group_types'):
+                self.contam_group_types = {}
+            self.contam_group_types[label] = group_type
 
             # Add to listbox
             n_samples, n_wavelengths = group_data.shape
@@ -59161,6 +59215,7 @@ External Validation Performance (n={n_val}):
         # Remove from data structures
         del self.contam_groups[label]
         del self.contam_group_paths[label]
+        getattr(self, 'contam_group_types', {}).pop(label, None)
 
         # Remove from listbox
         self.contam_groups_listbox.delete(idx)
@@ -59818,25 +59873,30 @@ External Validation Performance (n={n_val}):
                 return
 
         try:
-            # Temporarily set scale for conversion methods
-            saved_scale = getattr(self, 'data_value_scale', 1.0)
-            saved_source = getattr(self, 'source_data_type', 'reflectance')
-            self.data_value_scale = self.contam_data_value_scale
-
-            if target == "absorbance":
-                self.source_data_type = 'reflectance'
-                self.contam_clean_data = self._convert_reflectance_to_absorbance(self.contam_clean_data)
-                for label in list(self.contam_groups.keys()):
-                    self.contam_groups[label] = self._convert_reflectance_to_absorbance(self.contam_groups[label])
-            else:
-                self.source_data_type = 'reflectance'
-                self.contam_clean_data = self._convert_absorbance_to_reflectance(self.contam_clean_data)
-                for label in list(self.contam_groups.keys()):
-                    self.contam_groups[label] = self._convert_absorbance_to_reflectance(self.contam_groups[label])
-
-            # Restore main data state
-            self.data_value_scale = saved_scale
-            self.source_data_type = saved_source
+            # Each dataset converts with its own scale (main-tab state is swapped out and
+            # restored by _convert_with_source); groups convert only if they carry the
+            # same ordinate type as the clean data
+            group_types = getattr(self, 'contam_group_types', {})
+            skipped = [
+                label for label in self.contam_groups
+                if group_types.get(label, {}).get('data_type', current) != current
+            ]
+            if skipped:
+                messagebox.showerror(
+                    "Data Type Mismatch",
+                    f"Contaminant groups {skipped} do not have the clean data's data type "
+                    f"({current}); nothing was converted. Remove or replace them first.")
+                return
+            self.contam_clean_data, _ = self._convert_with_source(
+                self.contam_clean_data, current, target, None, self.contam_data_value_scale)
+            for label in list(self.contam_groups.keys()):
+                record = group_types.get(label)
+                scale = record['value_scale'] if record else self.contam_data_value_scale
+                self.contam_groups[label], scale = self._convert_with_source(
+                    self.contam_groups[label], current, target, None, scale)
+                if record:
+                    record['data_type'] = target
+                    record['value_scale'] = scale
 
             self.contam_current_data_type.set(target)
             self.contam_data_converted = not self.contam_data_converted
@@ -60215,9 +60275,10 @@ External Validation Performance (n={n_val}):
             self.contam_wavelengths = wavelengths
             self.contam_clean_sample_names = list(df.loc[clean_mask].index.astype(str))
 
-            # Clear existing groups
+            # Clear existing groups (they come from the clean file: same type)
             self.contam_groups.clear()
             self.contam_group_paths.clear()
+            self.contam_group_types = {}
             self.contam_groups_listbox.delete(0, tk.END)
 
             # Create contaminant groups

@@ -2037,36 +2037,68 @@ def _same_parse(
     return True
 
 
-def _decimal_comma_suspicion(data_tokens: list[list[str]]) -> Optional[str]:
-    """Why comma-delimited, decimal-point rows may be read another way.
+def _decimal_comma_check(
+    data_tokens: list[list[str]], xs: list[float]
+) -> tuple[Optional[str], Optional[str]]:
+    """Check a comma-delimited, decimal-point reading against a decimal-comma one.
 
-    Checked row by row: any single row with a competing reading makes the file
-    ambiguous, whatever the other rows look like. Only the x/y fields and the field
-    right after them are examined, so text in ignored columns (notes, flags)
-    neither triggers nor hides the problem. A row competes when:
-    - an x/y field has a leading zero ("05", "000.5"): a fraction or thousands group;
-    - it starts with two integer fields followed by a number ("4000,5,0,123",
-      "1000,5,0.5"): x and y could be decimal-comma numbers;
-    - it starts with a 1-3 digit field and a 3-digit group followed by a number
-      ("1,234,0.123", "1,234.5,0.1"): x could be thousands-separated.
+    Comma-delimited data with decimal commas is not valid CSV, so the decimal-point
+    reading is the default. It is refused only when it is internally inconsistent
+    in a way a decimal-comma or thousands split explains; otherwise rows that also
+    fit such a split only produce a warning. Only the x/y fields and the field right
+    after them are examined, so text in ignored columns neither triggers nor hides
+    anything.
 
-    Returns a reason, or None when every row reads one way only.
+    A row *fits* a competing split when it starts with three integer fields
+    ("4000,5,0,123": x and y could be decimal-comma numbers), or with a 1-3 digit
+    field and a 3-digit group followed by a number ("1,234,0.123": x could be
+    thousands-separated). "4000,1523,0.5" fits neither: a point-decimal field cannot
+    be half of a decimal-comma number.
+
+    Returns:
+        ``(refusal, warning)``: a refusal reason when an x/y field has a leading zero
+        ("05", "000.5": a fraction or thousands group), or when fitting rows exist
+        and the decimal-point reading has rows with differing field counts or
+        duplicate x values; else a warning when fitting rows exist; else two Nones.
     """
+    fitting = []
     for toks in data_tokens:
         if any(_LEADING_ZERO_TOKEN.match(t) for t in toks[:2]):
-            return f"a field such as {toks[:3]} has a leading zero (thousands or fraction group)"
+            return (
+                f"a field such as {toks[:3]} has a leading zero (thousands or fraction "
+                f"group)",
+                None,
+            )
         if len(toks) < 3 or _try_float(toks[2], '.') is None:
             continue
-        if _INT_TOKEN.match(toks[0]) and _INT_TOKEN.match(toks[1]):
-            return (
-                f"rows such as {toks[:4]} start with two integer fields and a number, so x "
-                f"and y could be decimal-comma numbers"
-            )
-        if _THOUSANDS_HEAD.match(toks[0]) and _THOUSANDS_GROUP.match(toks[1]):
-            return (
-                f"rows such as {toks[:3]} could have a thousands-separated x"
-            )
-    return None
+        # A decimal-comma pair needs the third field to be digits too ("4000,5,0,123"
+        # or "4000,0,123"); a point-decimal third field ("4000,1523,0.5") cannot be part
+        # of one, so that row is no evidence for it.
+        decimal_comma = all(_INT_TOKEN.match(t) for t in toks[:3])
+        thousands = bool(_THOUSANDS_HEAD.match(toks[0]) and _THOUSANDS_GROUP.match(toks[1]))
+        if decimal_comma or thousands:
+            fitting.append(toks)
+    if not fitting:
+        return None, None
+    example = fitting[0][:4]
+    if len({len(t) for t in data_tokens}) > 1:
+        return (
+            f"rows have different field counts and rows such as {example} split into "
+            f"decimal-comma or thousands-separated numbers",
+            None,
+        )
+    if len(set(xs)) < len(xs):
+        return (
+            f"the decimal-point reading repeats x values, and rows such as {example} "
+            f"split into decimal-comma or thousands-separated numbers",
+            None,
+        )
+    return None, (
+        f"rows such as {example} also fit a decimal-comma (or thousands-separator) "
+        f"reading; they were read with decimal points (x={fitting[0][0]}, "
+        f"y={fitting[0][1]}). If the file uses decimal commas, re-export it with ';' as "
+        f"the delimiter and read it with decimal=','"
+    )
 
 
 def _unit_in_text(text: str) -> set[str]:
@@ -2135,9 +2167,12 @@ def _parse_ascii_file(
         decimal: Decimal separator, '.' or ','. None tries both. Every
             delimiter/decimal reading is scored on how many lines give numeric x and
             y, and the best one wins; see ``_choose_ascii_interpretation``. With
-            decimal None, comma-delimited files whose x/y fields could be
-            decimal-comma fragments ("4000,5,0,123", "1,000,0.123") are refused;
-            pass ``decimal='.'`` to accept them as written.
+            decimal None, comma-delimited files are read with decimal points; rows
+            that also fit a decimal-comma or thousands split ("4000,5,0,123") give a
+            warning, and the file is refused only when that split explains an
+            inconsistency (differing field counts, repeated x, leading zeros such as
+            "1,000,0.123"); see ``_decimal_comma_check``. Pass ``decimal='.'`` to skip
+            the check.
 
     Returns:
         ``(df, info)``: ``df`` has float columns ``x`` and ``y``, sorted by ``x``,
@@ -2192,14 +2227,16 @@ def _parse_ascii_file(
         ys.append(xy[1])
 
     if chosen == ',' and used_decimal == '.' and decimal is None:
-        reason = _decimal_comma_suspicion(data_tokens)
-        if reason:
+        refusal, comma_warning = _decimal_comma_check(data_tokens, xs)
+        if refusal:
             raise ValueError(
                 f"{filepath.name}: comma-separated values may be decimal-comma numbers "
-                f"({reason}), so x and y cannot be split unambiguously. Re-export with "
+                f"({refusal}), so x and y cannot be split unambiguously. Re-export with "
                 f"';' or tab as the delimiter, or pass decimal='.' if the values really "
                 f"are as written."
             )
+        if comma_warning:
+            file_warnings.append(f"{filepath.name}: {comma_warning}")
         if all(len(t) == 2 and _INT_TOKEN.match(t[0]) and _INT_TOKEN.match(t[1]) for t in data_tokens):
             file_warnings.append(
                 f"{filepath.name}: every row is two comma-separated integers; read as x, y "
@@ -3779,6 +3816,57 @@ def _map_opus_data_type(
     if source_data_type in _OPUS_OTHER_ORDINATES:
         return OTHER_DATA_TYPE, 95.0, method
     return detect_spectral_data_type(df)
+
+
+# Canonical source-type vocabulary: readers name the same ordinate differently
+# (OPUS 'log_reflectance', Omnic 'Log(1/R)'), so labels are canonicalised before they
+# are compared or displayed.
+_SOURCE_DATA_TYPE_ALIASES = {
+    'log_reflectance': 'log_reflectance',
+    'log(1/r)': 'log_reflectance',
+    'log 1/r': 'log_reflectance',
+    'log1/r': 'log_reflectance',
+    'log_1/r': 'log_reflectance',
+    'log reflectance': 'log_reflectance',
+    'logr': 'log_reflectance',
+    'kubelka_munk': 'kubelka_munk',
+    'kubelka-munk': 'kubelka_munk',
+    'kubelka munk': 'kubelka_munk',
+    'km': 'kubelka_munk',
+    'absorbance': 'absorbance',
+    'abs': 'absorbance',
+    'transmittance': 'transmittance',
+    '%t': 'transmittance',
+    'reflectance': 'reflectance',
+    '%r': 'reflectance',
+    'atr': 'atr',
+    'photoacoustic': 'photoacoustic',
+    'pas': 'photoacoustic',
+    'raman': 'raman',
+    'emission': 'emission',
+    'sample': 'sample',
+    'single-channel sample': 'sample',
+    'reference': 'reference',
+    'single-channel reference': 'reference',
+}
+
+
+def canonical_source_data_type(label: Optional[str]) -> Optional[str]:
+    """Canonical name of a reader's source data type, or None if unknown.
+
+    Known aliases map to one vocabulary ('log_reflectance', 'kubelka_munk',
+    'absorbance', 'transmittance', 'reflectance', 'atr', 'photoacoustic', 'raman',
+    'emission', 'sample', 'reference'). Other labels are lower-cased with spaces and
+    hyphens as underscores; empty labels and 'unknown' give None.
+    """
+    if label is None:
+        return None
+    key = str(label).strip().lower()
+    if not key or key == 'unknown':
+        return None
+    if key in _SOURCE_DATA_TYPE_ALIASES:
+        return _SOURCE_DATA_TYPE_ALIASES[key]
+    return re.sub(r'[\s\-]+', '_', key)
 
 
 # Pipeline data types. 'reflectance' and 'absorbance' convert into each other;

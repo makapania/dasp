@@ -325,13 +325,21 @@ def test_write_read_round_trip_with_header(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_decimal_comma_with_comma_delimiter_is_refused(tmp_path):
-    """'4000,5,0,123' must not silently read as x=4000, y=5."""
+def test_decimal_comma_with_comma_delimiter_reads_points_with_warning(tmp_path):
+    """Decimal commas in a comma-delimited file are not valid CSV: read as points, warn.
+
+    '4000,5,0,123' reads as x=4000, y=5 (as pd.read_csv would), and the import
+    warning names the alternative so the user sees it in the GUI dialog.
+    """
     path = tmp_path / "de.dat"
     path.write_text("4000,5,0,123\n3999,5,0,124\n3998,5,0,125\n")
 
-    with pytest.raises(ValueError, match="decimal-comma"):
-        read_ascii_spectra(path)
+    with pytest.warns(UserWarning, match="decimal-comma"):
+        df, meta = read_ascii_spectra(path)
+
+    assert df.columns.tolist() == [3998.0, 3999.0, 4000.0]
+    assert df.iloc[0].tolist() == [5.0, 5.0, 5.0]
+    assert any("decimal=','" in m and "';'" in m for m in meta["import_warnings"])
 
 
 def test_integer_comma_columns_accepted_with_explicit_decimal_point(tmp_path):
@@ -557,8 +565,11 @@ def test_one_short_row_does_not_defeat_decimal_comma_refusal(tmp_path):
 
 def test_dot_in_ignored_note_does_not_hide_decimal_comma(tmp_path):
     path = _write(tmp_path, "note.dat", "1000,5,0,123,note.v1\n1001,5,0,124,note.v1\n")
-    with pytest.raises(ValueError, match="decimal-comma"):
-        read_ascii_spectra(path)
+
+    with pytest.warns(UserWarning, match="decimal-comma"):
+        _, meta = read_ascii_spectra(path)
+
+    assert any("decimal-comma" in m for m in meta["import_warnings"])
 
 
 def test_integer_rows_with_text_column_are_accepted(tmp_path):
@@ -711,16 +722,49 @@ def test_nan_values_do_not_make_identical_readings_ambiguous(tmp_path):
 @pytest.mark.parametrize(
     "text",
     [
-        "1,234,0.123\n2,345,0.124\n",  # nonzero thousands groups
-        "1,234.5,0.1\n2,345.5,0.2\n",  # thousands group with a decimal point
-        "1000,5,0,123\n1001.5,0.124\n",  # one decimal-comma row among dot rows
-        "1000.5,0.1,7\n1001,5,0.2\n",  # a single competing row is enough
+        # Field counts differ, and a decimal-comma split explains it
+        "1000,5,0,123\n1001.5,0.124\n",
+        "4000,5,0,123\n3999,5\n3998,5,0,125\n",
+        # The decimal-point reading repeats x; a thousands split explains it
+        "1,234,0.1\n1,236,0.2\n1,238,0.3\n",
+        "1,234.5,0.1\n1,236.5,0.2\n",
+        # ...or a decimal-comma split does
+        "4000,5,0,123\n4000,7,0,124\n",
     ],
 )
-def test_any_row_with_a_competing_reading_is_refused(tmp_path, text):
+def test_inconsistent_decimal_point_reading_is_refused(tmp_path, text):
     path = _write(tmp_path, "amb.dat", text)
     with pytest.raises(ValueError, match="comma-separated values may be"):
         read_ascii_spectra(path)
+
+
+@pytest.mark.parametrize(
+    "rows, warns",
+    [
+        # x, integer y, point-decimal third field: no decimal-comma reading exists
+        ([f"{4000 - i},{1523 + i},0.5" for i in range(5)], False),
+        ([f"{1100 + i},{250 + i},1.0e-3" for i in range(5)], False),
+        # Integer Raman shift and counts plus float columns
+        ([f"{200 + i},{3000 + 7 * i},0.{i}1,1.5" for i in range(5)], False),
+        # Integer nm 350-2500 with integer counts and a float column: the 3-digit
+        # rows also fit a thousands split, so these load with a warning
+        ([f"{nm},{100 + nm % 7},0.25" for nm in range(350, 2501, 50)], True),
+        (["400,100,0.25", "401,102,0.26", "402,104,0.27"], True),
+        (["1,234,0.123", "2,345,0.124"], True),
+    ],
+)
+def test_legitimate_comma_files_load(tmp_path, rows, warns):
+    path = _write(tmp_path, "ok.dat", "\n".join(rows) + "\n")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        df, meta = read_ascii_spectra(path)
+
+    expected_x = sorted(float(r.split(",")[0]) for r in rows)
+    assert df.columns.tolist() == expected_x
+    comma_notes = [m for m in meta["import_warnings"] if "decimal-comma" in m]
+    assert bool(comma_notes) == warns
+    assert bool([w for w in caught if "decimal-comma" in str(w.message)]) == warns
 
 
 def test_competing_rows_accepted_with_explicit_decimal(tmp_path):

@@ -793,6 +793,17 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   `_convert_with_source` now takes and returns the per-dataset value scale (resetting it to 1.0 broke % round
   trips). Tie comparison must be NaN-aware. The comma-ambiguity guard is per row (one competing row refuses the
   file) and covers thousands groups. Ensemble saves carry the ordinate keys into every base model.
+- **Review round 4 (final).** Coordinator decision: comma-delimited files default to the decimal-point reading
+  (decimal commas inside comma-delimited data are not valid CSV). Rows that also fit a decimal-comma or
+  thousands split only warn (import_warnings, so the GUI shows it); the file is refused only when that split
+  explains an inconsistency (differing field counts, repeated x, leading zeros). Round 3's per-row refusal
+  rejected real files (integer nm or Raman shift + integer counts + a float column). A point-decimal third
+  field can never be half of a decimal-comma pair. Contaminant groups now keep their own type/source/scale;
+  a group whose stated type differs from the clean data (or is 'other') is refused, and conversion refuses
+  while any group mismatches. `_loaded_value_scale` honours a carried scale before looking at the type, so
+  converted % reflectance converts back to %. Source labels are canonicalised (`io.canonical_source_data_type`;
+  Omnic 'Log(1/R)' == OPUS 'log_reflectance'). PowerShell 5.1 mangles `"` inside native-command arguments:
+  write commit messages to a file and use `git commit -F`.
 - **Tooling gotcha.** The Bash tool's heredocs turned `\b` and `\n` inside Python string literals into real
   control characters (a backspace ended up in a regex). Write code containing backslashes with the Write/Edit
   tools, not via heredoc.
