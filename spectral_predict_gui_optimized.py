@@ -1973,16 +1973,23 @@ def _holdout_labels_as_fitted(encoder, y_train_codes, y_val_codes, y_train_raw):
     return y_train_codes, y_val_codes
 
 
-def _encode_holdout_pair(encoder, y_train, y_val):
+def _encode_holdout_pair(encoder, y_train, y_val, drop_unknown=False):
     """Encode training and validation labels with the same search encoder.
 
     Used by the NSGA-II holdout block: when the search label-encoded the target
     (text / non-integer labels), its models were fitted on codes, so both label
-    vectors handed to the validation rebuild must be codes. Raises ValueError
-    when a label is unknown to the encoder.
+    vectors handed to the validation rebuild must be codes. A label unknown to
+    the encoder raises ValueError, unless ``drop_unknown`` is set: then unknown
+    validation rows are dropped (as in the Bayesian holdout block) and the
+    result is ``(y_train, y_val_kept, keep_mask)``.
     """
     if encoder is None:
+        y_val = np.asarray(y_val)
+        if drop_unknown:
+            return y_train, y_val, np.ones(len(y_val), dtype=bool)
         return y_train, y_val
+
+    classes_str = {str(c) for c in encoder.classes_}
 
     def _enc(values):
         values = np.asarray(values)
@@ -1992,7 +1999,14 @@ def _encode_holdout_pair(encoder, y_train, y_val):
             # the NSGA-II encoder may have been fitted on str-normalised labels
             return encoder.transform(values.astype(str))
 
-    return _enc(y_train), _enc(y_val)
+    if not drop_unknown:
+        return _enc(y_train), _enc(y_val)
+    y_val = np.asarray(y_val)
+    keep = np.array(
+        [v in set(encoder.classes_.tolist()) or str(v) in classes_str for v in y_val.tolist()],
+        dtype=bool,
+    )
+    return _enc(y_train), (_enc(y_val[keep]) if keep.any() else y_val[keep]), keep
 
 
 # ===== HELPER: ROBUST AUTOSCALE FLAG PARSE =====
@@ -30738,10 +30752,15 @@ class SpectralPredictApp:
                 # Store label_encoder for classification (needed for legend display).
                 # None when the labels were fitted raw (integer-valued numeric): the
                 # per-class keys are then the user's own labels, not codes.
+                # Set the local too: the shared tail below (`self.label_encoder =
+                # label_encoder`) runs for every optimization method and would
+                # otherwise wipe the Bayesian encoder (text/fractional labels then
+                # showed codes in the legend and saved models returned codes).
                 if task_type == 'classification':
-                    self.label_encoder = _display_label_encoder(y_np)
+                    label_encoder = _display_label_encoder(y_np)
                 else:
-                    self.label_encoder = None
+                    label_encoder = None
+                self.label_encoder = label_encoder
 
             elif optimization_method == "nsga2":
                 # === NSGA-II MULTI-OBJECTIVE OPTIMIZATION ===
@@ -30851,9 +30870,19 @@ class SpectralPredictApp:
                                 # Training labels too: the NSGA-II models were fitted on
                                 # these codes (passing raw training labels with coded
                                 # validation labels scored every row as wrong).
-                                y_np_clean, y_val_np = _encode_holdout_pair(
-                                    label_encoder, y_np_clean, y_val_np
+                                # Unknown validation labels are dropped with a warning
+                                # (as in the Bayesian block) instead of failing every row.
+                                y_np_clean, y_val_np, _keep = _encode_holdout_pair(
+                                    label_encoder, y_np_clean, y_val_np, drop_unknown=True
                                 )
+                                if not _keep.all():
+                                    self._log_progress(
+                                        f"  [Warning] {int((~_keep).sum())} validation labels not in "
+                                        f"training classes; dropping those rows for validation metrics"
+                                    )
+                                    X_val_np = X_val_np[_keep]
+                                if not _keep.any():
+                                    raise ValueError("No validation labels match training classes")
                                 self._log_progress("  Encoded training + validation labels using training encoder")
                             except ValueError as e:
                                 self._log_progress(f"  [Warning] Could not encode validation labels: {e}")
@@ -42721,9 +42750,11 @@ External Validation Performance (n={n_val}):
                 metadata['performance'] = perf
 
             # Save the model
-            # Use refined_label_encoder if available (from Model Development tab),
-            # otherwise fallback to global label_encoder (from Results tab)
-            label_encoder_to_save = getattr(self, 'refined_label_encoder', None) or self.label_encoder
+            # The refined model was fitted by Model Development, so save ITS encoder
+            # only. Falling back to the global search encoder attached an unrelated
+            # encoder (e.g. from an earlier text/fractional run) to a raw-label model,
+            # and predictions were then inverse-transformed through it.
+            label_encoder_to_save = getattr(self, 'refined_label_encoder', None)
 
             # Prepare CV data for uncertainty estimation
             cv_residuals = None

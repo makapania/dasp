@@ -199,6 +199,19 @@ def test_bayesian_label_identity_segment_only_when_needed():
     assert names["codes"] == names["text"]
     # numeric labels that are not 0..K-1: a new study, never resumed with old trials
     assert names["uneven"] != names["codes"]
+    _, y_frac = _data((0.1, 0.2, 0.3))
+    # fractional labels are still encoded: unchanged identity
+    assert _bayes(X, y_frac, "PLS-DA", n_trials=1)[1].study_name == names["codes"]
+
+
+def test_save_refined_model_uses_only_the_model_development_encoder():
+    import inspect
+
+    import spectral_predict_gui_optimized as gui_module
+
+    source = inspect.getsource(gui_module.SpectralPredictApp._save_refined_model)
+    assert "label_encoder_to_save = getattr(self, 'refined_label_encoder', None)\n" in source
+    assert "or self.label_encoder" not in source
 
 
 # ---------------------------------------------------------------------------
@@ -398,5 +411,34 @@ def test_pre_policy_study_is_reported_as_resume_declined(sqlite_storage):
     notices = [e for e in events if e.get("label_policy_changed")]
     assert len(notices) == 1
     assert notices[0].get(RESUME_DECLINED_KEY) is True
-    assert "label policy changed" in notices[0]["message"]
+    # hedged: the name alone cannot tell a pre-policy study from a 0..K-1 study
+    # of other data, so the notice claims only "different class labels"
+    assert "different class labels" in notices[0]["message"]
+    assert "re-coded" not in notices[0]["message"]
     assert old.study_name in notices[0]["message"]
+
+
+def test_xgboost_studies_keep_their_name_and_decode_old_trial_keys(sqlite_storage):
+    pytest.importorskip("xgboost")
+    X, codes = _data((0, 1, 2))
+    y_uneven = np.array([(1, 2, 100)[c] for c in codes])
+    # an XGBoost study as the pre-policy code saved it: fitted on 0..K-1 codes,
+    # per-class metrics keyed "0", "1", "2"
+    _, old = _bayes(X, codes, "XGBoost", n_trials=1, enable_sqlite_persistence="always")
+    events = []
+    df, new = _bayes(
+        X,
+        y_uneven,
+        "XGBoost",
+        n_trials=2,
+        enable_sqlite_persistence="always",
+        progress_callback=events.append,
+    )
+    # the XGBoost fit (codes) is unchanged by the policy: same study, resumed
+    assert new.study_name == old.study_name
+    assert len([t for t in new.trials if t.state.is_finished()]) >= 2
+    assert not [e for e in events if e.get("label_policy_changed")]
+    # every row, the resumed old one included, is keyed by the user's labels
+    for keys in df["per_class_metrics"].dropna():
+        assert set(keys) == {"1", "2", "100"}
+    assert "F1_Class100" in df.columns and "F1_Class0" not in df.columns

@@ -2704,8 +2704,11 @@ def run_unified_bayesian(
         y = _fit_labels.y_fit
         label_classes = _fit_labels.label_classes
         # Only studies whose fitted labels changed under this policy get the
-        # |labels= study-name segment.
-        _label_fit_segment = _fit_labels.policy in ("raw", "xgb_codes")
+        # |labels= study-name segment. XGBoost ("xgb_codes") still fits exactly
+        # the codes LabelEncoder produced, so its study name and cached scores
+        # are unchanged; old trials' code-keyed per-class metrics are decoded
+        # in convert_study_to_dataframe.
+        _label_fit_segment = _fit_labels.policy == "raw"
 
     # Guard against None params
     if imbalance_params is None:
@@ -3095,13 +3098,14 @@ def run_unified_bayesian(
                     else []
                 )
                 if _label_policy_old:
+                    # Names carry no data identity, so this may also be a study of
+                    # other data whose labels were 0..K-1: say only what is known.
                     _notes.append((
-                        f"Resume declined for {model_name}: label policy changed. "
-                        f"Previous Bayesian results were fitted on re-coded class labels "
-                        f"(0..K-1); numeric labels are now fitted as given, so their "
-                        f"cached scores describe a different model and will NOT be "
-                        f"reused — starting a fresh study. The previous results are "
-                        f"preserved: {', '.join(_label_policy_old)}",
+                        f"Resume declined for {model_name}: a Bayesian study with this "
+                        f"configuration but different class labels exists (for example "
+                        f"one saved before numeric class labels were fitted as given). "
+                        f"Its cached scores are NOT reused — starting a fresh study. It "
+                        f"is preserved: {', '.join(_label_policy_old)}",
                         "label_policy_changed",
                         _label_policy_old,
                     ))
@@ -3536,6 +3540,7 @@ def run_unified_bayesian(
         cv_n_repeats=cv_n_repeats,
         n_samples_used=n_samples,
         baseline_params=baseline_params,
+        label_classes=label_classes,
     )
 
     if verbose:
@@ -3593,8 +3598,14 @@ def convert_study_to_dataframe(
     cv_n_repeats: int = 5,
     n_samples_used: Optional[int] = None,
     baseline_params: dict | None = None,
+    label_classes: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Convert Optuna study to results DataFrame.
+
+    ``label_classes`` (XGBoost fitted on 0..K-1 codes of these sorted user
+    labels): per-class metric keys of trials resumed from before the label
+    policy are codes; they are decoded to user labels so every row is keyed
+    the same way.
 
     Parameters
     ----------
@@ -3787,10 +3798,22 @@ def convert_study_to_dataframe(
             row['BERcv'] = trial.user_attrs.get('BERcv', np.nan)
             row['LogLosscv'] = trial.user_attrs.get('LogLosscv', np.nan)
             # Per-class metrics for class-based coloring in Results tab
-            row['per_class_metrics'] = trial.user_attrs.get('per_class_metrics', None)
-            row['class_labels'] = trial.user_attrs.get('class_labels', None)
-            # Individual class F1 columns for display/sorting
             per_class = trial.user_attrs.get('per_class_metrics')
+            trial_class_labels = trial.user_attrs.get('class_labels', None)
+            if label_classes is not None and per_class:
+                # A trial saved before the label policy keyed its metrics by
+                # codes ("0".."K-1"); new trials use the user's labels. The two
+                # key sets differ exactly when the labels are not 0..K-1.
+                _code_keys = {str(i) for i in range(len(label_classes))}
+                _user_keys = {str(c) for c in label_classes.tolist()}
+                if set(per_class) == _code_keys and _code_keys != _user_keys:
+                    _decode = {str(i): str(c) for i, c in enumerate(label_classes.tolist())}
+                    per_class = {_decode[k]: v for k, v in per_class.items()}
+                    if trial_class_labels:
+                        trial_class_labels = [_decode.get(str(k), str(k)) for k in trial_class_labels]
+            row['per_class_metrics'] = per_class
+            row['class_labels'] = trial_class_labels
+            # Individual class F1 columns for display/sorting
             if per_class:
                 for class_label, metrics in per_class.items():
                     row[f'F1_Class{class_label}'] = metrics.get('F1', np.nan)

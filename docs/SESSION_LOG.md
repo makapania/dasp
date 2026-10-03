@@ -814,6 +814,15 @@ the same folds, as for PLS LV selection. Implemented on branch fix/booster-early
   NSGA-II holdout encodes training AND validation labels with the search encoder (`_encode_holdout_pair`; raw text
   training labels against coded validation labels scored 0); display encoders are None for raw numeric labels
   (`_display_label_encoder`), and the class legend decodes keys only when every key is a code of the encoder.
+- **Round 5 gotcha: `_run_analysis_thread` ends with a shared `self.label_encoder = label_encoder` for EVERY
+  optimization method.** Setting only `self.label_encoder` inside the Bayesian branch was wiped by that tail (text /
+  fractional Bayesian runs then showed codes in the legend and saved codes). Set the branch's local `label_encoder`.
+- XGBoost Bayesian studies no longer get `|labels=raw1` (their code fit is unchanged); trials resumed from before the
+  policy carry code-keyed per-class metrics, which `convert_study_to_dataframe(label_classes=...)` decodes when the
+  key set is exactly the code set and differs from the user-label set (unambiguous).
+- The pre-policy resume notice is hedged ("a study with this configuration but different class labels exists"):
+  study names carry no data identity, so a 0..K-1 study of other data looks the same.
+- `_save_refined_model` saves only `refined_label_encoder` (no fallback to the global search encoder).
 - Model Development repeated CV now reduces to one prediction per sample (vote / mean / mean proba) before headline
   metrics, plots and stored predictions, as the grid does; its comparison line now uses the row's Accuracycv.
 - NSGA-II classification objective = 1 - pooled accuracy (fold accuracies weighted by test size), so Accuracycv

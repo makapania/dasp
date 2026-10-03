@@ -160,3 +160,123 @@ def test_nsga2_text_holdout_encodes_training_labels_too():
     # was 0 / NaN when y_train stayed raw text against coded y_val
     assert (rows["val_Accuracy"] > 0.6).all()
     assert np.isfinite(pd.to_numeric(rows["val_ROC_AUC"])).all()
+
+
+def test_nsga2_holdout_drops_unknown_validation_labels():
+    from sklearn.preprocessing import LabelEncoder
+
+    enc = LabelEncoder().fit(["clean", "dirty"])
+    y_train = np.array(["clean", "dirty", "clean"], dtype=object)
+    y_val = np.array(["clean", "zzz", "dirty", "zzz"], dtype=object)
+    tr, va, keep = gui_module._encode_holdout_pair(enc, y_train, y_val, drop_unknown=True)
+    np.testing.assert_array_equal(keep, [True, False, True, False])
+    np.testing.assert_array_equal(tr, [0, 1, 0])
+    np.testing.assert_array_equal(va, [0, 1])
+
+
+# ---------------------------------------------------------------------------
+# Real Bayesian classification through the GUI worker (review round 5)
+# ---------------------------------------------------------------------------
+
+_WORKER_VARS = (
+    "optimization_method",
+    "task_type",
+    "n_unified_trials",
+    "folds",
+    "output_dir",
+    "bayesian_persistence_mode",
+)
+
+
+@pytest.fixture
+def bayes_worker(gui_app, tmp_path, monkeypatch, reimport_modules):
+    import sys
+
+    from spectral_predict.search_controller import SearchController
+
+    env_key = "LOCALAPPDATA" if sys.platform == "win32" else "XDG_DATA_HOME"
+    monkeypatch.setenv(env_key, str(tmp_path))
+    _, rs = reimport_modules("spectral_predict.resource_paths", "spectral_predict.run_state")
+    rs._reset_for_tests()
+
+    def run_now(_ms, func=None, *args):
+        if func is not None:
+            func(*args)
+
+    monkeypatch.setattr(gui_app.root, "after", run_now)
+    saved = {name: getattr(gui_app, name).get() for name in _WORKER_VARS}
+    saved_state = (
+        gui_app.active_indices,
+        gui_app.excluded_spectra,
+        gui_app.X,
+        gui_app.y,
+        gui_app.label_encoder,
+        getattr(gui_app, "_class_rankings", None),
+    )
+    gui_app.optimization_method.set("unified")
+    gui_app.task_type.set("classification")
+    gui_app.n_unified_trials.set(2)
+    gui_app.folds.set(3)
+    gui_app.output_dir.set(str(tmp_path / "out"))
+    gui_app.bayesian_persistence_mode.set("never")
+    gui_app.active_indices = None
+    gui_app.search_controller = SearchController()
+    monkeypatch.chdir(tmp_path)  # reports/ is written relative to cwd
+    yield gui_app
+    for name, value in saved.items():
+        getattr(gui_app, name).set(value)
+    (
+        gui_app.active_indices,
+        gui_app.excluded_spectra,
+        gui_app.X,
+        gui_app.y,
+        gui_app.label_encoder,
+        gui_app._class_rankings,
+    ) = saved_state
+    for widget in gui_app.region_legend_frame.winfo_children():
+        widget.destroy()
+    rs._reset_for_tests()
+
+
+@pytest.mark.parametrize(
+    "labels,expected_values",
+    [(("clean", "dirty"), "Values: C0=clean, C1=dirty"), ((0.1, 0.2), "Values: C0=0.1, C1=0.2")],
+    ids=["text", "fractional"],
+)
+def test_bayesian_run_keeps_its_display_encoder(bayes_worker, tmp_path, labels, expected_values):
+    from sklearn.linear_model import LogisticRegression
+
+    from spectral_predict.model_io import load_model, predict_with_model, save_model
+
+    app = bayes_worker
+    X, y = _data(labels, n_per_class=(16, 14))
+    cols = [str(int(w)) for w in _wavelengths(X)]
+    app.X = pd.DataFrame(X, columns=cols)
+    app.y = pd.Series(y)
+    app._run_analysis_thread(["PLS-DA"], "quick")
+
+    # the shared tail of the worker must not wipe the Bayesian branch's encoder
+    enc = app.label_encoder
+    assert enc is not None
+    assert list(enc.classes_) == list(labels)
+
+    # the legend decodes the coded per-class keys back to the user's labels
+    app._class_rankings = {"class_labels": ["0", "1"]}
+    app._update_class_legend()
+    assert _legend_values_text(app) == expected_values
+
+    # a model fitted on the codes and saved with that encoder predicts user labels
+    model = LogisticRegression(max_iter=1000).fit(X, enc.transform(y))
+    wl = [float(c) for c in cols]
+    meta = {
+        "model_name": "LogisticRegression",
+        "task_type": "classification",
+        "wavelengths": wl,
+        "n_vars": len(wl),
+        "preprocessing": "raw",
+    }
+    path = tmp_path / "m.dasp"
+    save_model(model, None, meta, path, label_encoder=enc)
+    pred = predict_with_model(load_model(path), pd.DataFrame(X, columns=wl))
+    assert set(np.unique(pred)) <= set(labels)
+    np.testing.assert_array_equal(pred, enc.inverse_transform(model.predict(X)))
