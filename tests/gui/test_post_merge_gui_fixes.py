@@ -49,8 +49,20 @@ pytestmark = pytest.mark.gui
 
 
 def _reconstruct(app, row: dict, X: pd.DataFrame, y: np.ndarray, task: str):
+    # Real full-spectrum rows carry SubsetTag/n_vars; without all_vars the rebuild
+    # only uses every column when they say so (fix/wavelength-mapping).
     top_models_df = pd.DataFrame(
-        [{"Poly": 2, "Deriv": 0, "Window": 17, "Preprocess": "raw", **row}]
+        [
+            {
+                "Poly": 2,
+                "Deriv": 0,
+                "Window": 17,
+                "Preprocess": "raw",
+                "SubsetTag": "full",
+                "n_vars": X.shape[1],
+                **row,
+            }
+        ]
     )
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -355,6 +367,8 @@ def test_ensemble_reconstruction_accepts_dict_params_cell(gui_app):
                 "Deriv": None,
                 "Window": None,
                 "Poly": None,
+                "SubsetTag": "full",
+                "n_vars": X.shape[1],
             }
         ]
     )
@@ -410,7 +424,10 @@ def _validation_rmsep(row: dict, X: pd.DataFrame, y: np.ndarray, X_val: np.ndarr
     """RMSEP from the public validation rebuild for a single results row."""
     from spectral_predict.search import compute_validation_metrics_for_top_models
 
-    df = pd.DataFrame([{"CompositeScore": 0.0, "Task": "regression", **row}])
+    # A real full-spectrum row carries SubsetTag/n_vars; without all_vars the rebuild
+    # only uses every column when they say so (review round 1 of fix/wavelength-mapping).
+    base = {"CompositeScore": 0.0, "Task": "regression", "SubsetTag": "full", "n_vars": X.shape[1]}
+    df = pd.DataFrame([{**base, **row}])
     with contextlib.redirect_stdout(io.StringIO()):
         out = compute_validation_metrics_for_top_models(
             df, X.values, y, X_val, y_val, "regression", np.array(WL, dtype=float), top_n=1
@@ -521,7 +538,8 @@ def test_ensemble_loop_survives_malformed_chromosome_rows(gui_app, monkeypatch):
     # Bad genes and an unbuildable name: skipped, with a log line.
     skipped = {**good, "preprocess_chromosome": "[100000000000000000000000000000, 3]"}
     plain = {"Model": "Ridge", "Params": str({"alpha": 1.0}), "Preprocess": "raw"}
-    top_models_df = pd.DataFrame([good, fallback, skipped, plain])
+    full = {"SubsetTag": "full", "n_vars": X.shape[1]}
+    top_models_df = pd.DataFrame([{**full, **r} for r in (good, fallback, skipped, plain)])
     logs: list[str] = []
     monkeypatch.setattr(gui_app, "_log_progress", logs.append)
 
@@ -610,7 +628,15 @@ def test_learning_curve_error_callback_receives_message(gui_app, monkeypatch):
     scheduled = []
     monkeypatch.setattr(app, "_on_learning_curve_error", received.append)
     monkeypatch.setattr(app.root, "after", lambda ms, func=None, *args: scheduled.append(func))
-    monkeypatch.setattr(app, "refined_config", None, raising=False)  # .get() raises
+    # Force the worker into its except block. (It used to rely on refined_config=None
+    # making .get() raise; the worker now reads one RefinedState snapshot and tolerates
+    # a missing config, so fail inside the computation instead.)
+    import spectral_predict.diagnostics as diagnostics
+
+    def _fail(*_a, **_k):
+        raise RuntimeError("learning curve failed")
+
+    monkeypatch.setattr(diagnostics, "compute_learning_curve", _fail)
 
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         app._run_learning_curve_thread()

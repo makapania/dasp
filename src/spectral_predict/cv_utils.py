@@ -699,7 +699,7 @@ def booster_max_rounds(model) -> int:
         ValueError: Conflicting values among LightGBM aliases other than
             ``num_iterations`` (LightGBM's own resolution between them is not defined).
     """
-    est = _get_model_from_pipeline(model)
+    est = _final_estimator(model)
     params = est.get_params()
     if isinstance(est, XGBOOST_MODELS):
         value = params.get("n_estimators")
@@ -733,7 +733,7 @@ def set_booster_rounds(model, n_rounds: int) -> None:
         model: An XGBoost, LightGBM or CatBoost estimator, or a Pipeline ending in one.
         n_rounds: Round count to fit.
     """
-    est = _get_model_from_pipeline(model)
+    est = _final_estimator(model)
     n_rounds = int(n_rounds)
     if isinstance(est, XGBOOST_MODELS):
         est.set_params(n_estimators=n_rounds)
@@ -752,19 +752,41 @@ def set_booster_rounds(model, n_rounds: int) -> None:
 
 
 def _final_estimator(model):
-    """Innermost estimator: unwraps a TransformedTargetRegressor (fitted or not) and a
-    Pipeline's final step."""
+    """Innermost estimator: unwraps a target-transform wrapper (sklearn's
+    TransformedTargetRegressor or the export's YTransformRegressor; fitted or not) and
+    a Pipeline's final step."""
     inner = model
     for _ in range(4):
         if hasattr(inner, "regressor_"):
             inner = inner.regressor_
-        elif hasattr(inner, "regressor") and hasattr(inner, "transformer"):
+        elif hasattr(inner, "regressor") and not hasattr(inner, "steps"):
             inner = inner.regressor
         elif hasattr(inner, "steps"):
             inner = inner.steps[-1][1]
         else:
             break
     return inner
+
+
+def _split_target_wrapper(model):
+    """``(inner model, target transformer or None)`` for a TransformedTargetRegressor.
+
+    The transformer reproduces the wrapper's own (``transformer``, or ``func`` /
+    ``inverse_func``), so CV of the inner model with it equals CV of the wrapper.
+    Anything else is returned unchanged with None.
+    """
+    from sklearn.compose import TransformedTargetRegressor
+    from sklearn.preprocessing import FunctionTransformer
+
+    if not isinstance(model, TransformedTargetRegressor):
+        return model, None
+    if model.transformer is not None:
+        return model.regressor, clone(model.transformer)
+    if model.func is None and model.inverse_func is None:
+        return model.regressor, None
+    return model.regressor, FunctionTransformer(
+        func=model.func, inverse_func=model.inverse_func, validate=True, check_inverse=False
+    )
 
 
 def truncate_booster(model, n_rounds: int) -> None:
@@ -855,14 +877,24 @@ def round_truncation_from_row(row) -> Optional[tuple]:
     return fit_rounds, selected
 
 
+def parse_bool_cell(value) -> bool:
+    """Public form of the row-flag parser (also used by the code generator)."""
+    return _parse_bool(value)
+
+
+def parse_count_cell(value) -> Optional[int]:
+    """Public form of the round-count parser (also used by the code generator)."""
+    return _parse_count(value)
+
+
 def _parse_bool(value) -> bool:
     """Row flag as bool: True/1/"True"/"1"/"yes"; NaN, None, "" and anything else False."""
     if value is None or isinstance(value, float) and np.isnan(value):
         return False
     if isinstance(value, (bool, np.bool_)):
         return bool(value)
-    if isinstance(value, (int, np.integer)):
-        return value == 1
+    if isinstance(value, (int, np.integer, float, np.floating)):
+        return bool(value == 1)  # integral floats (1.0) from numeric storage count too
     if isinstance(value, str):
         return value.strip().lower() in ("true", "1", "yes")
     return False
@@ -874,9 +906,9 @@ def _parse_count(value) -> Optional[int]:
         return None
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
-    if np.isnan(number) or number < 1 or number != int(number):
+    if not np.isfinite(number) or number < 1 or number != np.floor(number):
         return None
     return int(number)
 
@@ -992,7 +1024,7 @@ def round_selection_unsupported_reason(model) -> Optional[str]:
     Returns:
         A user-facing reason, or None when round selection is valid.
     """
-    est = _get_model_from_pipeline(model)
+    est = _final_estimator(model)
     if not is_boosting_model(est):
         return None
     params = est.get_params()
@@ -1507,6 +1539,11 @@ def cross_val_boosting_rounds(
 
     X = np.asarray(X) if not hasattr(X, "iloc") else X.to_numpy()
     y = np.asarray(y)
+    model, wrapped_tt = _split_target_wrapper(model)
+    if wrapped_tt is not None:
+        if target_transformer is not None:
+            raise ValueError("Pass a target-transform wrapper or target_transformer, not both")
+        target_transformer = wrapped_tt
     final_proto = _get_model_from_pipeline(model)
     if not is_boosting_model(final_proto):
         raise TypeError(f"{type(final_proto).__name__} is not a supported boosting model")
@@ -1656,7 +1693,7 @@ def uses_round_selection(model, early_stopping_rounds: Optional[int], warn: bool
         early_stopping_rounds: Requested patience.
         warn: Emit the fallback warning.
     """
-    est = _get_model_from_pipeline(model)
+    est = _final_estimator(model)
     if not (
         is_boosting_model(est) and early_stopping_rounds is not None and early_stopping_rounds > 0
     ):

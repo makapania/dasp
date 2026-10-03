@@ -1539,3 +1539,234 @@ def test_failed_final_refit_does_not_claim_a_truncated_model(monkeypatch):
     )
     assert row["round_selection_truncated"] is False
     assert row["n_estimators_fit"] is None
+
+
+# --- Review round 4 -------------------------------------------------------------------
+
+
+def test_round_truncated_wrapper_on_target_transformed_booster():
+    """Round 4 #3: booster_max_rounds / set_booster_rounds resolve through a
+    TransformedTargetRegressor, so the wrapper fits it at R and truncates to k."""
+    from sklearn.compose import TransformedTargetRegressor
+    from xgboost import XGBRegressor
+
+    from spectral_predict.cv_utils import (
+        booster_max_rounds,
+        booster_predict_at,
+        round_truncated_from_row,
+    )
+
+    X, y = _regression_data()
+    y = y - y.min() + 1.0
+    ttr = TransformedTargetRegressor(
+        regressor=XGBRegressor(n_estimators=9, n_jobs=1, random_state=0),
+        func=np.log,
+        inverse_func=np.exp,
+    )
+    assert booster_max_rounds(ttr) == 9
+    row = {"round_selection_truncated": True, "n_estimators_fit": 30, "n_estimators_selected": 9}
+    wrapped = round_truncated_from_row(ttr, row, "regression").fit(X, y)
+    reference = XGBRegressor(n_estimators=30, n_jobs=1, random_state=0).fit(X, np.log(y))
+    np.testing.assert_allclose(
+        np.log(wrapped.predict(X)), booster_predict_at(reference, X, 9), rtol=1e-6, atol=1e-6
+    )
+
+
+def test_cross_val_boosting_rounds_accepts_a_target_transform_wrapper():
+    from sklearn.compose import TransformedTargetRegressor
+    from xgboost import XGBRegressor
+
+    from spectral_predict.y_transform import YTransformWrapper
+
+    X, y = _regression_data()
+    y = y - y.min() + 1.0
+    cv = KFold(3, shuffle=True, random_state=0)
+    base = XGBRegressor(n_estimators=30, n_jobs=1, random_state=0)
+    via_wrapper = cross_val_boosting_rounds(
+        TransformedTargetRegressor(regressor=base, func=np.log, inverse_func=np.exp),
+        X,
+        y,
+        cv,
+        patience=5,
+    )
+    via_transformer = cross_val_boosting_rounds(
+        base, X, y, cv, patience=5, target_transformer=YTransformWrapper._get_transformer("log")
+    )
+    assert via_wrapper.n_rounds == via_transformer.n_rounds
+    for a, b in zip(via_wrapper.fold_predictions, via_transformer.fold_predictions):
+        np.testing.assert_allclose(a, b, rtol=1e-12)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (float("inf"), None),
+        (float("-inf"), None),
+        ("inf", None),
+        (1e400, None),
+        ("1e3", 1000),
+        (7.0, 7),
+        (np.float32(3.0), 3),
+        (0.5, None),
+        (None, None),
+        (True, None),
+    ],
+)
+def test_parse_count_is_total(value, expected):
+    from spectral_predict.cv_utils import parse_count_cell
+
+    assert parse_count_cell(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (1.0, True),
+        (0.0, False),
+        (np.float64(1.0), True),
+        (2.0, False),
+        ("TRUE", True),
+        ("0", False),
+        (float("nan"), False),
+        (np.bool_(True), True),
+    ],
+)
+def test_parse_bool_accepts_integral_floats(value, expected):
+    from spectral_predict.cv_utils import parse_bool_cell
+
+    assert parse_bool_cell(value) is expected
+
+
+@pytest.mark.parametrize(
+    ("flag", "fit", "selected", "expected"),
+    [
+        (True, 40, 9, (40, 9)),
+        ("False", 40, 9, (None, None)),
+        (1.0, 40, 9, (40, 9)),
+        (True, 8, 9, (None, None)),
+        (True, float("inf"), 9, (None, None)),
+        (True, 40, 0, (None, None)),
+    ],
+)
+def test_code_generator_parses_truncation_metadata_like_the_rebuild(flag, fit, selected, expected):
+    from spectral_predict.code_generator import CodeGenerator
+
+    gen = CodeGenerator(
+        {
+            "model_name": "XGBoost",
+            "task_type": "regression",
+            "params": {},
+            "round_selection_truncated": flag,
+            "n_estimators_fit": fit,
+            "n_estimators_selected": selected,
+        }
+    )
+    assert (gen.n_estimators_fit, gen.n_estimators_selected) == expected
+
+
+def _wrapper_cases():
+    from catboost import CatBoostClassifier
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+    from xgboost import XGBClassifier, XGBRegressor
+
+    return [
+        pytest.param(
+            "regression",
+            XGBRegressor(n_estimators=5, n_jobs=1, random_state=0),
+            id="xgb-regression",
+        ),
+        pytest.param(
+            "binary", XGBClassifier(n_estimators=5, n_jobs=1, random_state=0), id="xgb-binary"
+        ),
+        pytest.param(
+            "multiclass",
+            Pipeline(
+                [
+                    ("scaler", StandardScaler()),
+                    (
+                        "model",
+                        CatBoostClassifier(
+                            iterations=5,
+                            random_seed=0,
+                            verbose=0,
+                            thread_count=1,
+                            allow_writing_files=False,
+                        ),
+                    ),
+                ]
+            ),
+            id="catboost-multiclass-pipeline",
+        ),
+    ]
+
+
+@pytest.mark.parametrize(("kind", "estimator"), _wrapper_cases())
+def test_round_truncated_wrappers_clone_pickle_and_predict(kind, estimator):
+    """Round 4 #5: wrapper unit tests (clone, pickle, predict_proba, multiclass,
+    Pipeline(scaler, booster)) against a reference fitted at R and truncated to k."""
+    import pickle
+
+    from spectral_predict.cv_utils import (
+        RoundTruncatedClassifier,
+        round_truncated_from_row,
+        set_booster_rounds,
+        truncate_booster,
+    )
+
+    X, y = _regression_data()
+    task = "regression"
+    if kind == "binary":
+        y, task = (y > np.median(y)).astype(int), "classification"
+    elif kind == "multiclass":
+        y, task = np.digitize(y, np.quantile(y, [1 / 3, 2 / 3])), "classification"
+    row = {"round_selection_truncated": True, "n_estimators_fit": 25, "n_estimators_selected": 6}
+    wrapped = round_truncated_from_row(estimator, row, task)
+    assert isinstance(wrapped, RoundTruncatedClassifier) == (task == "classification")
+    fitted = clone(wrapped).fit(X, y)
+
+    reference = clone(estimator)
+    set_booster_rounds(reference, 25)
+    reference.fit(X, y)
+    truncate_booster(reference, 6)
+    method = "predict_proba" if task == "classification" else "predict"
+    expected = getattr(reference, method)(X)
+    np.testing.assert_allclose(getattr(fitted, method)(X), expected, rtol=0, atol=1e-12)
+    restored = pickle.loads(pickle.dumps(fitted))
+    np.testing.assert_allclose(getattr(restored, method)(X), expected, rtol=0, atol=1e-12)
+    if task == "classification":
+        np.testing.assert_array_equal(fitted.classes_, np.unique(y))
+        np.testing.assert_array_equal(np.ravel(fitted.predict(X)), np.ravel(reference.predict(X)))
+
+
+@pytest.mark.parametrize("library", ["xgboost", "lightgbm"])
+def test_truncated_xgboost_lightgbm_model_io_round_trip(library, tmp_path):
+    from lightgbm import LGBMRegressor
+    from xgboost import XGBRegressor
+
+    from spectral_predict.cv_utils import truncate_booster
+    from spectral_predict.model_io import load_model, predict_with_model, save_model
+
+    X, y = _regression_data()
+    model = (
+        XGBRegressor(n_estimators=40, n_jobs=1, random_state=0)
+        if library == "xgboost"
+        else LGBMRegressor(n_estimators=40, verbose=-1, random_state=0)
+    ).fit(X, y)
+    truncate_booster(model, 7)
+    expected = model.predict(X)
+    path = tmp_path / f"{library}.dasp"
+    save_model(
+        model,
+        None,
+        {
+            "model_name": library,
+            "task_type": "regression",
+            "wavelengths": list(range(X.shape[1])),
+            "n_vars": X.shape[1],
+        },
+        path,
+    )
+    loaded = load_model(path)
+    assert loaded["model"].get_params()["n_estimators"] == 7
+    np.testing.assert_array_equal(predict_with_model(loaded, X), expected)

@@ -37,6 +37,7 @@ from sklearn.metrics import (
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.linear_model import Ridge, RidgeClassifier, Lasso, ElasticNet
 from .models import PLSTransformer  # Wrapper that ensures 2D output for PLS-DA
+from .wavelength_matching import format_wavelength_list
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.svm import SVR, SVC
 from sklearn.neural_network import MLPRegressor, MLPClassifier
@@ -3543,7 +3544,7 @@ def _indices_to_wavelength_str(indices: List[int], wavelengths: np.ndarray = Non
     if wavelengths is not None:
         # Convert indices to actual wavelength values
         selected_wl = [wavelengths[i] for i in indices if i < len(wavelengths)]
-        return ','.join([f"{w:g}" for w in selected_wl])
+        return format_wavelength_list(selected_wl)
     else:
         # Fallback to indices if wavelengths not available
         return ','.join([str(i) for i in indices])

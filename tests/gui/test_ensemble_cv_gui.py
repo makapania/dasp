@@ -80,6 +80,10 @@ def _rows() -> pd.DataFrame:
         ),
     ]
     df = pd.DataFrame(rows)
+    # Real search rows carry SubsetTag/n_vars; without all_vars the ensemble rebuild
+    # uses every column only when they say so (fix/wavelength-mapping).
+    df["SubsetTag"] = ["full", "top20", "full"]
+    df["n_vars"] = [N_WL, 20, N_WL]
     df["CompositeScore"] = np.arange(len(df), dtype=float)
     df["R2cv"] = np.nan
     df["RMSE"] = np.nan

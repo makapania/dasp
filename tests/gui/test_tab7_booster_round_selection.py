@@ -173,3 +173,93 @@ def test_tab7_rejected_selection_with_y_transform_does_not_crash(gui_app):
     finally:
         gui_app.refine_y_transform.set("None")
     assert "selection skipped" in out
+
+
+def test_tab7_log_transform_booster_saves_the_cv_model_in_original_units(gui_app, tmp_path):
+    """Round 4 #2: with a log Y-transform and round selection, the saved model is the
+    transformed-scale booster fitted at the maximum round count and truncated to the
+    selected count (what the CV curve was read from), wrapped so predict_with_model
+    returns original units."""
+    from unittest.mock import patch
+
+    from sklearn.compose import TransformedTargetRegressor
+    from xgboost import XGBRegressor
+
+    from spectral_predict.cv_utils import booster_predict_at
+    from spectral_predict.model_io import load_model, predict_with_model
+
+    X_df, y = _data()
+    y = y - y.min() + 1.0  # positive for log
+    row = {
+        "Model": "XGBoost",
+        "Task": "regression",
+        "Preprocess": "raw",
+        "Deriv": 0,
+        "Window": 17,
+        "LVs": None,
+        "early_stopping_rounds": 10,
+        "Params": str(
+            {
+                "n_estimators": 40,
+                "learning_rate": 0.2,
+                "max_depth": 3,
+                "random_state": 0,
+                "n_jobs": 1,
+            }
+        ),
+    }
+    gui_app.refine_model_type.set("XGBoost")
+    gui_app.refine_y_transform.set("Log")
+    try:
+        app = gui_app
+        app.X_original = X_df
+        app.X = X_df
+        app.y = y
+        app.active_indices = None
+        app.excluded_spectra = set()
+        app.validation_enabled.set(False)
+        app.validation_indices = []
+        app.use_autoscale.set(False)
+        app.selected_model_config = dict(row)
+        app._original_wavelength_order = [float(c) for c in X_df.columns]
+        app.refine_task_type.set("regression")
+        app.refine_preprocess.set("raw")
+        app.refine_folds.set(3)
+        app.refine_cv_strategy.set("kfold")
+        app.model_loaded_from_results = True
+        app.refine_hyperparams_modified = False
+        app.refined_model = None
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            app._run_refined_model_thread()
+        app.root.update()
+        assert app.refined_model is not None, buf.getvalue()[-4000:]
+    finally:
+        gui_app.refine_y_transform.set("None")
+
+    saved = gui_app.refined_model
+    assert isinstance(saved, TransformedTargetRegressor)
+    k = gui_app.refined_config["n_estimators_selected"]
+    assert gui_app.refined_config["n_estimators_fit"] == 40 and 1 <= k <= 40
+    booster = saved.regressor_
+    booster = booster.steps[-1][1] if hasattr(booster, "steps") else booster
+    assert booster.get_booster().num_boosted_rounds() == k
+
+    # The CV curve's model at k, on the transformed scale: XGBoost fitted on log(y) at
+    # the maximum round count, read at round k.
+    params = dict(booster.get_params())
+    params["n_estimators"] = 40
+    X = X_df.to_numpy()
+    reference = XGBRegressor(**params).fit(X, np.log(y.to_numpy()))
+    on_log_scale = booster_predict_at(reference, X, k)
+    np.testing.assert_allclose(np.log(saved.predict(X)), on_log_scale, rtol=1e-6, atol=1e-6)
+
+    path = tmp_path / "yt_booster.dasp"
+    with (
+        patch("tkinter.filedialog.asksaveasfilename", return_value=str(path)),
+        contextlib.redirect_stdout(io.StringIO()),
+    ):
+        gui_app._save_refined_model()
+    loaded = load_model(path)
+    pred = np.asarray(predict_with_model(loaded, X_df), dtype=float).ravel()
+    np.testing.assert_allclose(pred, np.exp(on_log_scale), rtol=1e-6, atol=1e-6)
