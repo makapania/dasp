@@ -427,8 +427,7 @@ class GUITestHarness:
         Returns:
             Tuple of (X_cal, y_cal, X_val, y_val)
         """
-        import numpy as np
-        from spectral_predict.sample_selection import spxy
+        from spectral_predict.sample_selection import split_calibration_holdout
 
         if self.app.X is None or self.app.y is None:
             raise ValueError("No data loaded in app")
@@ -436,16 +435,14 @@ class GUITestHarness:
         X = self.app.X.values if hasattr(self.app.X, 'values') else self.app.X
         y = self.app.y.values if hasattr(self.app.y, 'values') else self.app.y
 
-        # Get validation indices using SPXY
-        val_indices = spxy(X, y, n_samples=n_holdout)
-
-        # Create mask for calibration samples
-        all_indices = np.arange(len(X))
-        cal_mask = ~np.isin(all_indices, val_indices)
+        # SPXY picks the calibration set; the remaining samples are the holdout.
+        cal_indices, val_indices = split_calibration_holdout(
+            X, n_holdout, method="spxy", y=y
+        )
 
         # Split data
-        X_cal = self.app.X.iloc[cal_mask]
-        y_cal = self.app.y.iloc[cal_mask]
+        X_cal = self.app.X.iloc[cal_indices]
+        y_cal = self.app.y.iloc[cal_indices]
         X_val = self.app.X.iloc[val_indices]
         y_val = self.app.y.iloc[val_indices]
 

@@ -68,6 +68,8 @@ PRIMITIVES: dict[str, list[str]] = {
         "plsda_head_kwargs",
     ],
     "model_io": ["save_model", "load_model", "predict_with_model"],
+    # QW4: KS / SPXY / DUPLEX calibration-holdout split (KS/SPXY pick calibration)
+    "sample_selection": ["split_calibration_holdout"],
     "wavelength_matching": [
         "match_wavelengths",
         "resolve_wavelength_list",

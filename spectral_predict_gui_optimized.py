@@ -14924,31 +14924,38 @@ class SpectralPredictApp:
         algo_frame = ttk.Frame(validation_frame)
         algo_frame.grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=5)
 
+        # QW4: Kennard-Stone and SPXY choose the calibration set (extremes
+        # included); the holdout is the remaining samples.
         ttk.Radiobutton(algo_frame, text="Kennard-Stone",
                        variable=self.validation_algorithm, value="Kennard-Stone").grid(row=0, column=0, sticky=tk.W, padx=(0, 15))
-        ttk.Label(algo_frame, text="Maximizes spectral diversity only (ignores y distribution)",
+        ttk.Label(algo_frame, text="Calibration covers the spectral range; holdout = the remaining samples",
                  style='Caption.TLabel').grid(row=0, column=1, sticky=tk.W)
 
         self.validation_spxy_radio = ttk.Radiobutton(algo_frame, text="SPXY ⭐",
                        variable=self.validation_algorithm, value="SPXY")
         self.validation_spxy_radio.grid(row=1, column=0, sticky=tk.W, padx=(0, 15), pady=3)
-        ttk.Label(algo_frame, text="Balances spectral and target diversity (recommended)",
+        ttk.Label(algo_frame, text="Calibration covers spectral and target range; holdout = the rest (recommended)",
                  style='Caption.TLabel').grid(row=1, column=1, sticky=tk.W, pady=3)
 
-        ttk.Radiobutton(algo_frame, text="Random",
-                       variable=self.validation_algorithm, value="Random").grid(row=2, column=0, sticky=tk.W, padx=(0, 15), pady=3)
-        ttk.Label(algo_frame, text="Simple random selection",
+        ttk.Radiobutton(algo_frame, text="DUPLEX",
+                       variable=self.validation_algorithm, value="DUPLEX").grid(row=2, column=0, sticky=tk.W, padx=(0, 15), pady=3)
+        ttk.Label(algo_frame, text="Calibration and holdout chosen alternately, so both span the spectral range",
                  style='Caption.TLabel').grid(row=2, column=1, sticky=tk.W, pady=3)
 
-        ttk.Radiobutton(algo_frame, text="Stratified",
-                       variable=self.validation_algorithm, value="Stratified").grid(row=3, column=0, sticky=tk.W, padx=(0, 15), pady=3)
-        ttk.Label(algo_frame, text="Ensures balanced target variable distribution",
+        ttk.Radiobutton(algo_frame, text="Random",
+                       variable=self.validation_algorithm, value="Random").grid(row=3, column=0, sticky=tk.W, padx=(0, 15), pady=3)
+        ttk.Label(algo_frame, text="Simple random selection",
                  style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, pady=3)
 
-        ttk.Radiobutton(algo_frame, text="Manual",
-                       variable=self.validation_algorithm, value="Manual").grid(row=4, column=0, sticky=tk.W, padx=(0, 15), pady=3)
-        ttk.Label(algo_frame, text="Select samples manually from Data Viewer tab",
+        ttk.Radiobutton(algo_frame, text="Stratified",
+                       variable=self.validation_algorithm, value="Stratified").grid(row=4, column=0, sticky=tk.W, padx=(0, 15), pady=3)
+        ttk.Label(algo_frame, text="Ensures balanced target variable distribution",
                  style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, pady=3)
+
+        ttk.Radiobutton(algo_frame, text="Manual",
+                       variable=self.validation_algorithm, value="Manual").grid(row=5, column=0, sticky=tk.W, padx=(0, 15), pady=3)
+        ttk.Label(algo_frame, text="Select samples manually from Data Viewer tab",
+                 style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, pady=3)
 
         # Manual selection button (initially hidden)
         self.manual_validation_button_frame = ttk.Frame(validation_frame)
@@ -21273,73 +21280,90 @@ class SpectralPredictApp:
 
     # ==================== Validation Set Selection Methods ====================
 
+    # Kennard-Stone, SPXY and DUPLEX choose the CALIBRATION set (the
+    # representative samples, extremes included); the holdout is what is left.
+    # QW4 (2026-10-02): these used to pick the holdout itself, which put the
+    # extremes in validation and made the model extrapolate. Only NEW selections
+    # use this: a saved or resumed holdout is restored from its stored sample IDs
+    # and never re-selected (see _reconcile_resume_validation_split).
+
+    @staticmethod
+    def _holdout_labels_by_selection(X, n_samples, method, y_array=None):
+        """Holdout labels for a ``sample_selection.split_calibration_holdout`` split.
+
+        Args:
+            X: pandas DataFrame of spectral data (rows = candidate samples).
+            n_samples: number of samples to hold out.
+            method: ``"kennard-stone"``, ``"spxy"`` or ``"duplex"``.
+            y_array: numeric target values, required for SPXY.
+
+        Returns:
+            list of DataFrame index labels in the holdout, in row order.
+        """
+        from spectral_predict.sample_selection import split_calibration_holdout
+
+        n_total = len(X)
+        if n_samples >= n_total:
+            raise ValueError(
+                f"Validation set size ({n_samples}) must be less than total samples ({n_total})"
+            )
+        _, holdout = split_calibration_holdout(
+            np.asarray(X.values, dtype=float), n_samples, method=method, y=y_array
+        )
+        return X.index[holdout].tolist()
+
     def _validation_kennard_stone(self, X, n_samples):
         """
-        Select validation samples using Kennard-Stone algorithm.
-        Maximizes Euclidean distance in X-space for spectral diversity.
+        Select a validation holdout with Kennard-Stone.
+
+        Kennard-Stone picks the ``n_total - n_samples`` calibration samples that
+        cover the spectral space (extremes included); the remaining interior
+        samples are the holdout.
 
         Args:
             X: pandas DataFrame of spectral data
-            n_samples: number of samples to select
+            n_samples: number of samples to hold out
 
         Returns:
-            list of indices to include in validation set
+            list of indices in the validation set
         """
-        from scipy.spatial.distance import pdist, squareform
+        return SpectralPredictApp._holdout_labels_by_selection(X, n_samples, "kennard-stone")
 
-        X_array = X.values
-        n_total = len(X_array)
+    def _validation_duplex(self, X, n_samples):
+        """
+        Select a validation holdout with DUPLEX (Snee 1977).
 
-        if n_samples >= n_total:
-            raise ValueError(f"Validation set size ({n_samples}) must be less than total samples ({n_total})")
+        Calibration and validation sets are grown alternately, each by max-min
+        distance to its own members, so both span the spectral space.
 
-        # Compute pairwise Euclidean distances
-        distances = squareform(pdist(X_array, metric='euclidean'))
+        Args:
+            X: pandas DataFrame of spectral data
+            n_samples: number of samples to hold out
 
-        # Start with the two samples that are farthest apart
-        max_dist_idx = np.unravel_index(distances.argmax(), distances.shape)
-        selected = [max_dist_idx[0], max_dist_idx[1]]
-
-        # Iteratively select samples that maximize minimum distance to already selected
-        remaining = list(set(range(n_total)) - set(selected))
-
-        while len(selected) < n_samples:
-            # For each remaining sample, find minimum distance to selected samples
-            min_distances = []
-            for idx in remaining:
-                min_dist = min(distances[idx, s] for s in selected)
-                min_distances.append((min_dist, idx))
-
-            # Select the sample with maximum minimum distance
-            _, best_idx = max(min_distances)
-            selected.append(best_idx)
-            remaining.remove(best_idx)
-
-        # Convert array indices to DataFrame indices
-        return X.index[selected].tolist()
+        Returns:
+            list of indices in the validation set
+        """
+        return SpectralPredictApp._holdout_labels_by_selection(X, n_samples, "duplex")
 
     def _validation_spxy(self, X, y, n_samples):
         """
-        Select validation samples using SPXY algorithm.
-        Maximizes distance in both X-space and Y-space.
+        Select a validation holdout with SPXY (Galvão et al. 2005).
+
+        SPXY picks the ``n_total - n_samples`` calibration samples that cover the
+        joint spectral and target space, using the X-distance and y-distance
+        matrices each divided by its maximum; the rest are the holdout.
 
         Args:
             X: pandas DataFrame of spectral data
             y: pandas Series of target values
-            n_samples: number of samples to select
+            n_samples: number of samples to hold out
 
         Returns:
-            list of indices to include in validation set
+            list of indices in the validation set
         """
-        from scipy.spatial.distance import pdist, squareform
         from sklearn.preprocessing import LabelEncoder
 
-        X_array = X.values
         y_values = y.values
-        n_total = len(X_array)
-
-        if n_samples >= n_total:
-            raise ValueError(f"Validation set size ({n_samples}) must be less than total samples ({n_total})")
 
         # Handle categorical y values by encoding them
         if not pd.api.types.is_numeric_dtype(y_values.dtype):
@@ -21349,45 +21373,13 @@ class SpectralPredictApp:
                 if len(_types) > 1:
                     y_values = _normalize_mixed_type_labels(y_values)
             le = LabelEncoder()
-            y_array = le.fit_transform(y_values).reshape(-1, 1).astype(float)
+            y_array = le.fit_transform(y_values).astype(float)
         else:
-            # Numeric data - use as is
-            y_array = y_values.reshape(-1, 1).astype(float)
+            y_array = np.asarray(y_values, dtype=float)
 
-        # Normalize X and y to [0, 1]
-        X_norm = (X_array - X_array.min(axis=0)) / (X_array.max(axis=0) - X_array.min(axis=0) + 1e-10)
-        y_norm = (y_array - y_array.min()) / (y_array.max() - y_array.min() + 1e-10)
-
-        # Compute distances in X-space
-        dist_X = squareform(pdist(X_norm, metric='euclidean'))
-
-        # Compute distances in y-space
-        dist_y = squareform(pdist(y_norm, metric='euclidean'))
-
-        # Combine distances: d_SPXY = d_X + d_y
-        distances = dist_X + dist_y
-
-        # Start with the two samples that are farthest apart
-        max_dist_idx = np.unravel_index(distances.argmax(), distances.shape)
-        selected = [max_dist_idx[0], max_dist_idx[1]]
-
-        # Iteratively select samples that maximize minimum distance to already selected
-        remaining = list(set(range(n_total)) - set(selected))
-
-        while len(selected) < n_samples:
-            # For each remaining sample, find minimum distance to selected samples
-            min_distances = []
-            for idx in remaining:
-                min_dist = min(distances[idx, s] for s in selected)
-                min_distances.append((min_dist, idx))
-
-            # Select the sample with maximum minimum distance
-            _, best_idx = max(min_distances)
-            selected.append(best_idx)
-            remaining.remove(best_idx)
-
-        # Convert array indices to DataFrame indices
-        return X.index[selected].tolist()
+        return SpectralPredictApp._holdout_labels_by_selection(
+            X, n_samples, "spxy", y_array=y_array
+        )
 
     def _validation_random(self, X, y, n_samples):
         """
@@ -21546,6 +21538,8 @@ class SpectralPredictApp:
                 selected_indices = self._validation_kennard_stone(X_available, n_val)
             elif algorithm == "SPXY":
                 selected_indices = self._validation_spxy(X_available, y_available, n_val)
+            elif algorithm == "DUPLEX":
+                selected_indices = self._validation_duplex(X_available, n_val)
             elif algorithm == "Random":
                 selected_indices = self._validation_random(X_available, y_available, n_val)
             elif algorithm == "Stratified":
