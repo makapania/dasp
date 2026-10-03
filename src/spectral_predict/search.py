@@ -769,6 +769,34 @@ def _multiclass_holdout_metrics(
     }
 
 
+def check_validation_axes(X_train, X_val, wavelengths=None) -> None:
+    """Raise ValueError unless training and validation spectra share one axis.
+
+    The validation helpers map ``all_vars`` wavelengths to column positions on the
+    training axis and apply the same positions to ``X_val``. A validation matrix
+    of another width (e.g. taken before a wavelength-range change) would then be
+    scored on the wrong wavelengths with no error, because row-wise
+    preprocessing accepts any width. Only widths can be compared on arrays; the
+    caller must make sure equal-width axes are the same wavelengths.
+
+    Args:
+        X_train: Training spectra, shape (n_train, n_wavelengths).
+        X_val: Validation spectra, shape (n_val, n_wavelengths).
+        wavelengths: Wavelengths of the training columns, if known.
+    """
+    n_train = np.shape(X_train)[1] if np.ndim(X_train) == 2 else None
+    n_val = np.shape(X_val)[1] if np.ndim(X_val) == 2 else None
+    if n_train is not None and n_val is not None and n_train != n_val:
+        raise ValueError(
+            f"Validation spectra have {n_val} wavelengths but the training spectra "
+            f"have {n_train}; they must be on the same wavelength axis."
+        )
+    if wavelengths is not None and n_train is not None and len(wavelengths) != n_train:
+        raise ValueError(
+            f"{len(wavelengths)} wavelengths given for {n_train} training columns."
+        )
+
+
 def compute_validation_metrics_for_top_models(
     df_results: pd.DataFrame,
     X_train: np.ndarray,
@@ -839,6 +867,8 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
     pd.DataFrame
         Results with RMSEP, R2pred (or val_Accuracy) columns added
     """
+    check_validation_axes(X_train, X_val, wavelengths)
+
     # Drop samples with NaN target values (safety net — upstream should filter but may not)
     train_nan_mask = pd.isna(y_train)
     if np.any(train_nan_mask):

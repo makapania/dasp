@@ -351,9 +351,12 @@ def read_csv_dir(
     return df, metadata
 
 
-def _rename_duplicate_ids(index: pd.Index) -> tuple:
+def rename_duplicate_ids(index: pd.Index) -> tuple:
     """
     Rename duplicate IDs by adding .1, .2, etc. suffix.
+
+    The result is always unique: a suffix that is already an ID in the index
+    (``["A", "A.1", "A"]``) is skipped, so the second ``"A"`` becomes ``"A.2"``.
 
     Parameters
     ----------
@@ -369,31 +372,81 @@ def _rename_duplicate_ids(index: pd.Index) -> tuple:
         - rename_mapping: dict mapping original IDs to list of new IDs
           e.g., {"SampleA": ["SampleA", "SampleA.1", "SampleA.2"]}
     """
-    if not index.duplicated().any():
+    # Compare missing-aware keys: pandas' duplicated() treats NaN and pd.NA (or
+    # None) as different, though neither can be told apart as a sample ID.
+    if not _has_repeated_ids(index):
         return index, 0, {}
 
     new_ids = []
     seen = {}
+    # Missing-aware comparison keys: NaN never equals NaN, so repeated missing
+    # IDs (and tuple IDs with missing parts) would otherwise never match. Missing
+    # scalar IDs are grouped under "nan". Never pd.isna(index): that raises on a
+    # MultiIndex.
+    keys = [_id_key(idx) for idx in index]
+    labels = ["nan" if key == _MISSING_ID else idx for idx, key in zip(index, keys)]
+    # Every original ID's key, plus each suffix handed out.
+    taken = {key for key in keys if key != _MISSING_ID}
     rename_mapping = {}  # Track original -> [new names] for warning display
+    n_renamed = 0
 
-    for idx in index:
-        if idx in seen:
-            seen[idx] += 1
-            new_id = f"{idx}.{seen[idx]}"
+    for label, key in zip(labels, keys):
+        is_na = key == _MISSING_ID
+        group = "nan" if is_na else key
+        if group in seen or (is_na and "nan" in taken):
+            suffix = seen.get(group, 0)
+            while True:
+                suffix += 1
+                new_id = f"{label}.{suffix}"
+                if new_id not in taken:
+                    break
+            seen[group] = suffix
+            taken.add(new_id)
             new_ids.append(new_id)
-            rename_mapping[idx].append(new_id)
+            rename_mapping.setdefault(label, [label]).append(new_id)
+            n_renamed += 1
         else:
-            seen[idx] = 0
-            new_ids.append(idx)
-            rename_mapping[idx] = [idx]  # Start tracking this ID
-
-    # Count how many were renamed (exclude originals)
-    n_renamed = sum(1 for idx in new_ids if '.' in str(idx) and str(idx).rsplit('.', 1)[-1].isdigit())
+            seen[group] = 0
+            new_ids.append(label)
+            taken.add("nan" if is_na else key)
+            if is_na:
+                n_renamed += 1  # a missing ID became "nan"
+            rename_mapping[label] = [label]  # Start tracking this ID
 
     # Filter rename_mapping to only include IDs that had duplicates
     rename_mapping = {k: v for k, v in rename_mapping.items() if len(v) > 1}
 
-    return pd.Index(new_ids), n_renamed, rename_mapping
+    result = pd.Index(new_ids, tupleize_cols=False)
+    if len({_id_key(v) for v in result}) != len(result):
+        raise ValueError("Could not give every sample a unique ID")
+    return result, n_renamed, rename_mapping
+
+
+_MISSING_ID = ("__missing_sample_id__",)
+
+
+def _id_key(value):
+    """A comparison key for a sample ID that treats missing values as equal."""
+    if isinstance(value, tuple):
+        return ("__tuple__",) + tuple(
+            _MISSING_ID if _is_missing_scalar(part) else part for part in value
+        )
+    return _MISSING_ID if _is_missing_scalar(value) else value
+
+
+def _has_repeated_ids(index) -> bool:
+    """True if two sample IDs are the same, counting every missing ID (NaN, pd.NA) as one."""
+    return len({_id_key(idx) for idx in index}) != len(index)
+
+
+def _is_missing_scalar(value) -> bool:
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False  # not a scalar
+
+
+_rename_duplicate_ids = rename_duplicate_ids  # the combined-file readers' name
 
 
 def read_reference_csv(path, id_column):
@@ -1624,7 +1677,7 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None, drop_na_y=True
     # Use X.index since specimen_ids may be out of sync after NaN removal
     n_duplicates_renamed = 0
     duplicate_rename_mapping = {}
-    if not generated_ids and X.index.duplicated().any():
+    if not generated_ids and _has_repeated_ids(X.index):
         # Rename duplicates by adding .1, .2, etc. suffix instead of removing them
         new_index, n_duplicates_renamed, duplicate_rename_mapping = _rename_duplicate_ids(X.index)
 
@@ -3498,7 +3551,7 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
     # Use X.index since specimen_ids may be out of sync after NaN removal
     n_duplicates_renamed = 0
     duplicate_rename_mapping = {}
-    if not generated_ids and X.index.duplicated().any():
+    if not generated_ids and _has_repeated_ids(X.index):
         # Rename duplicates by adding .1, .2, etc. suffix instead of removing them
         new_index, n_duplicates_renamed, duplicate_rename_mapping = _rename_duplicate_ids(X.index)
 

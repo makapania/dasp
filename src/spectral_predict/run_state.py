@@ -51,6 +51,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
+import numpy as np
+
 from spectral_predict.resource_paths import get_user_optuna_dir
 
 logger = logging.getLogger(__name__)
@@ -180,6 +182,21 @@ class RunMetadata:
     # persisting the indices is cheaper and removes an entire class of
     # "user forgets to click Create Validation Set on resume" footguns.
     validation_indices: list[Any] | None = None
+    # The calibration-row choice (``calibration_rows_record``): versioned
+    # ``canonical_label`` keys of the excluded samples, the Analysis Subset
+    # ("active" None = all samples) and the holdout. Reloading the same file
+    # clears exclusions; the resume gate uses these keys to offer restoring them.
+    calibration_rows: dict[str, Any] | None = None
+    # How sample labels were normalised when the run started
+    # (``LABEL_NORMALIZATION``), written by the GUI, which also records
+    # ``calibration_rows``. None: a legacy or headless record, saved before
+    # repeated IDs got collision-free suffixes, so the same file can now give a
+    # saved label to other rows.
+    label_normalization: int | None = None
+    # ``calibration_identity`` digest of the exact calibration and holdout rows
+    # the run trained and scored on. The resume gate recomputes it and resumes
+    # only on a match. None with the two fields above also None: a legacy record.
+    calibration_identity: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         _validate_persistence_mode(self.bayesian_persistence_mode)
@@ -240,7 +257,221 @@ class RunMetadata:
                     type(vi).__name__,
                 )
                 filtered["validation_indices"] = None
+        # calibration_rows / calibration_identity / label_normalization are kept
+        # as stored: the resume gate treats an unrecognised value as "can't
+        # verify" and asks, rather than silently resuming as if it were absent.
         return cls(**filtered)
+
+
+# Version of the sample-label normalisation recorded with a run. 1: repeated
+# IDs get collision-free suffixes ("A", "A.1", "A" -> "A", "A.1", "A.2"; the
+# old scheme gave "A.1" twice) and the GUI suffixes any repeats left at install.
+LABEL_NORMALIZATION = 1
+# Version of the ``calibration_rows`` key encoding.
+CALIBRATION_RECORD_VERSION = 1
+# Version of the ``calibration_identity`` digest. 2: every label and section is
+# length-prefixed, row counts are hashed, integer targets are hashed losslessly.
+CALIBRATION_IDENTITY_VERSION = 2
+
+
+class UnsupportedLabelError(ValueError):
+    """A sample label has no deterministic, type-preserving encoding."""
+
+
+def canonical_label(value: Any) -> str:
+    """A type-tagged string for a sample label that round-trips through JSON.
+
+    Supported: int (numpy ints too), float (numpy floats too, NaN allowed), str,
+    bool, and tuples of these. Equal labels give equal keys and labels of
+    different types never collide (``5``, ``5.0`` and ``"5"`` all differ).
+
+    Raises:
+        UnsupportedLabelError: any other label type. Its encoding would not be
+            guaranteed to be distinct or stable across sessions.
+    """
+    if isinstance(value, np.generic):
+        value = value.item()  # numpy scalar -> Python scalar
+    if isinstance(value, bool):
+        return f"b:{value}"
+    if isinstance(value, int):
+        return f"i:{value}"
+    if isinstance(value, float):
+        return f"f:{value!r}"
+    if isinstance(value, str):
+        return f"s:{value}"
+    if isinstance(value, tuple):
+        return "t:" + json.dumps([canonical_label(v) for v in value])
+    raise UnsupportedLabelError(f"unsupported sample label type {type(value).__name__}")
+
+
+def _valid_key_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(x, str) for x in value)
+
+
+_ROWS_KEYS = frozenset({"version", "excluded", "active", "holdout"})
+_IDENTITY_KEYS = frozenset({"version", "calibration", "holdout", "n_calibration", "n_holdout"})
+
+
+def valid_calibration_rows(rows: Any) -> bool:
+    """True if ``rows`` is a ``calibration_rows_record`` of the current version.
+
+    Every key must be present with the right type, so a record that passes can
+    be decoded without further checks.
+    """
+    return (
+        isinstance(rows, dict)
+        and set(rows) == _ROWS_KEYS
+        and rows["version"] == CALIBRATION_RECORD_VERSION
+        and _valid_key_list(rows["excluded"])
+        and _valid_key_list(rows["holdout"])
+        and (rows["active"] is None or _valid_key_list(rows["active"]))
+    )
+
+
+def valid_calibration_identity(identity: Any) -> bool:
+    """True if ``identity`` is a ``calibration_identity`` of the current version."""
+    return (
+        isinstance(identity, dict)
+        and set(identity) == _IDENTITY_KEYS
+        and identity["version"] == CALIBRATION_IDENTITY_VERSION
+        and isinstance(identity["calibration"], str)
+        and isinstance(identity["holdout"], str)
+        and all(
+            isinstance(identity[k], int) and not isinstance(identity[k], bool)
+            for k in ("n_calibration", "n_holdout")
+        )
+    )
+
+
+def calibration_rows_record(excluded, active, holdout=()) -> dict[str, Any]:
+    """The calibration-row choice in a form the run record can store.
+
+    Used to offer restoring a run's exclusions and holdout on resume; the
+    ``calibration_identity`` digest is what decides whether a resume matches.
+
+    Args:
+        excluded: Labels the user excluded from the analysis.
+        active: Labels of the Analysis Subset, or None for all samples.
+        holdout: Labels of the validation holdout.
+
+    Returns:
+        ``{"version", "excluded", "active", "holdout"}`` with sorted
+        ``canonical_label`` keys.
+
+    Raises:
+        UnsupportedLabelError: a label has no deterministic encoding.
+    """
+    return {
+        "version": CALIBRATION_RECORD_VERSION,
+        "excluded": sorted({canonical_label(v) for v in (excluded or ())}),
+        "active": None if active is None else sorted({canonical_label(v) for v in active}),
+        "holdout": sorted({canonical_label(v) for v in (holdout or ())}),
+    }
+
+
+def _put(h, tag: bytes, payload: bytes) -> None:
+    """Feed one tagged, length-prefixed section, so sections can't run together."""
+    h.update(tag)
+    h.update(len(payload).to_bytes(8, "little"))
+    h.update(payload)
+
+
+def _target_bytes(y) -> tuple[bytes, bytes]:
+    """``(tag, bytes)`` for a target column, lossless and container-independent.
+
+    Integers are hashed as int64, or uint64 above the int64 range (float64 would
+    merge values above 2**53). An object column whose values are all numbers is
+    hashed like the numeric column it equals, so the same targets in a different
+    container give the same digest. Integer columns that fit neither int64 nor
+    uint64 (values beyond 2**64, or negatives mixed with values above the int64
+    range) fall back to a per-value repr encoding.
+    """
+    import pandas as pd
+
+    def _numeric(values) -> tuple[bytes, bytes] | None:
+        if pd.api.types.is_bool_dtype(values):
+            return b"yb", np.ascontiguousarray(values.to_numpy(dtype=np.uint8)).tobytes()
+        if (
+            pd.api.types.is_unsigned_integer_dtype(values)
+            and not values.isna().any()
+            and len(values)
+            and int(values.max()) > np.iinfo(np.int64).max
+        ):
+            # Only values beyond int64 need their own encoding: casting them to
+            # int64 would wrap them onto negatives.
+            return b"yu", np.ascontiguousarray(values.to_numpy(dtype=np.uint64)).tobytes()
+        if pd.api.types.is_integer_dtype(values) and not values.isna().any():
+            return b"yi", np.ascontiguousarray(values.to_numpy(dtype=np.int64)).tobytes()
+        if pd.api.types.is_numeric_dtype(values):
+            return b"yf", np.ascontiguousarray(values.to_numpy(dtype=np.float64)).tobytes()
+        return None
+
+    encoded = _numeric(y)
+    if encoded is not None:
+        return encoded
+    items = [v.item() if isinstance(v, np.generic) else v for v in y]
+    numbers = [v for v in items if not (isinstance(v, float) and np.isnan(v))]
+    if numbers and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in numbers):
+        # Python numbers only (missing values as NaN): hash as the numeric column
+        # they equal, provided the conversion loses nothing.
+        if any(isinstance(v, float) for v in items):
+            dtypes = ("float64",)
+        else:
+            dtypes = ("int64", "uint64")  # uint64 for non-negative ints above int64
+        for dtype in dtypes:
+            try:
+                converted = pd.Series(items, dtype=dtype)
+            except (OverflowError, ValueError, TypeError):
+                continue  # out of this dtype's range
+            if all(a == b or (a != a and b != b) for a, b in zip(items, converted.tolist())):
+                return _numeric(converted)
+    parts = []
+    for value in items:
+        text = repr(value).encode("utf-8")
+        parts.append(len(text).to_bytes(8, "little") + text)
+    return b"yo", b"".join(parts)
+
+
+def _rows_digest(X, y) -> str:
+    """blake2b over the ordered labels, wavelengths, spectra and targets of ``X``."""
+    h = hashlib.blake2b(digest_size=16)
+    h.update(f"calibration-identity-v{CALIBRATION_IDENTITY_VERSION}".encode("ascii"))
+    n_rows = 0 if X is None else len(X)
+    n_cols = 0 if X is None else X.shape[1]
+    _put(h, b"shape", f"{n_rows}x{n_cols}".encode("ascii"))
+    if X is None or n_rows == 0:
+        return h.hexdigest()
+    for tag, labels in ((b"col", X.columns), (b"row", X.index)):
+        for label in labels:
+            _put(h, tag, canonical_label(label).encode("utf-8"))
+    _put(h, b"X", np.ascontiguousarray(X.to_numpy(dtype=np.float64)).tobytes())
+    if y is None:
+        _put(h, b"ynone", b"")
+    else:
+        y_aligned = y if y.index.equals(X.index) else y.reindex(X.index)
+        tag, payload = _target_bytes(y_aligned)
+        _put(h, tag, payload)
+    return h.hexdigest()
+
+
+def calibration_identity(X_cal, y_cal, X_holdout, y_holdout) -> dict[str, Any]:
+    """Digest of exactly the calibration and holdout rows a run trains and scores on.
+
+    Covers each row's label and position, the wavelength axis, every spectral
+    value, the target and the row counts, so a resume on relabelled, reordered
+    or edited data, or on a different sample selection, gives a different
+    identity.
+
+    Raises:
+        UnsupportedLabelError: a label has no deterministic encoding.
+    """
+    return {
+        "version": CALIBRATION_IDENTITY_VERSION,
+        "calibration": _rows_digest(X_cal, y_cal),
+        "holdout": _rows_digest(X_holdout, y_holdout),
+        "n_calibration": 0 if X_cal is None else int(len(X_cal)),
+        "n_holdout": 0 if X_holdout is None else int(len(X_holdout)),
+    }
 
 
 @dataclasses.dataclass
@@ -382,6 +613,9 @@ def start_run(
     bayesian_persistence_mode: PersistenceMode = "auto",
     gui_settings: dict[str, Any] | None = None,
     validation_indices: list[Any] | None = None,
+    calibration_rows: dict[str, Any] | None = None,
+    label_normalization: int | None = None,
+    calibration_identity: dict[str, Any] | None = None,
 ) -> RunMetadata:
     """Begin a new Optuna-persisted run. Idempotent within one search.
 
@@ -393,6 +627,12 @@ def start_run(
     T-41: when ``bayesian_persistence_mode='never'``, no SQLite URL is
     generated (``get_storage_url()`` returns ``None``). This saves I/O and
     avoids orphaned ``.sqlite3`` sidecars for all-in-memory sessions.
+
+    ``calibration_rows`` / ``label_normalization`` / ``calibration_identity``:
+    the GUI passes the run's exclusions, Analysis Subset and holdout
+    (``calibration_rows_record``), ``LABEL_NORMALIZATION`` and the digest of
+    the rows it trains on (``calibration_identity``), so a resume can verify
+    that it continues on the same calibration set.
     """
     _validate_persistence_mode(bayesian_persistence_mode)
     global _active_storage_url, _active_run_id, _active_metadata, _is_resuming
@@ -445,6 +685,13 @@ def start_run(
                 _coerce_validation_indices(validation_indices)
                 if validation_indices else None
             ),
+            calibration_rows=_recordable(
+                calibration_rows, valid_calibration_rows, "calibration_rows"
+            ),
+            label_normalization=label_normalization,
+            calibration_identity=_recordable(
+                calibration_identity, valid_calibration_identity, "calibration_identity"
+            ),
         )
         _atomic_write_json(_sidecar_path(), meta.to_dict())
         _active_storage_url = storage_url
@@ -452,6 +699,19 @@ def start_run(
         _active_metadata = meta
         _is_resuming = False
         return meta
+
+
+def _recordable(value: Any, is_valid, name: str) -> Any:
+    if value is None:
+        return None
+    if not is_valid(value):
+        logger.warning(
+            "start_run: %s has an unexpected shape and was not recorded; a resume "
+            "of this run can't verify its calibration rows",
+            name,
+        )
+        return None
+    return value
 
 
 def mark_complete() -> None:
