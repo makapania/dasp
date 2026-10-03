@@ -213,6 +213,7 @@ def bayes_worker(gui_app, tmp_path, monkeypatch, reimport_modules):
         gui_app.label_encoder,
         getattr(gui_app, "_class_rankings", None),
     )
+    saved_results_df = getattr(gui_app, "results_df", None)
     gui_app.optimization_method.set("unified")
     gui_app.task_type.set("classification")
     gui_app.n_unified_trials.set(2)
@@ -235,6 +236,12 @@ def bayes_worker(gui_app, tmp_path, monkeypatch, reimport_modules):
     ) = saved_state
     for widget in gui_app.region_legend_frame.winfo_children():
         widget.destroy()
+    # The run populated the Results tree; later tests insert their own rows
+    # with the same item ids ("Item 0 already exists"), so leave it empty.
+    children = gui_app.results_tree.get_children()
+    if children:
+        gui_app.results_tree.delete(*children)
+    gui_app.results_df = saved_results_df
     rs._reset_for_tests()
 
 
