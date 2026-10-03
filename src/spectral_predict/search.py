@@ -108,6 +108,12 @@ from .ga_pls import ga_pls_selection
 from .ga_lightgbm import ga_lightgbm_selection
 from .model_registry import supports_subset_analysis, supports_feature_importance
 from .constants import RANDOM_STATE
+from .wavelength_matching import (
+    WavelengthMatchError,
+    _full_spectrum_fallback_refusal,
+    format_wavelength_list,
+    resolve_wavelength_list,
+)
 
 # Import early stopping CV utilities
 from .cv_utils import is_boosting_model, _fit_with_early_stopping, build_cv_splitter
@@ -927,6 +933,13 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
 
     # Cache preprocessed data by preprocessing config to avoid redundant computation
     preprocess_cache = {}
+    # Rows whose validation could not be computed, with the reason. Returned on
+    # df.attrs["validation_failures"] so callers can show them (R031).
+    validation_failures: dict = {}
+    # Rows validated to completion in THIS call (df.attrs["validation_succeeded"]).
+    # Callers count these instead of inferring success from a metric that can be
+    # legitimately NaN.
+    validation_succeeded: list = []
 
     for i, idx in enumerate(top_indices):
         row = df_results.loc[idx]
@@ -948,10 +961,12 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
                 )
                 for _col, _val in mc_metrics.items():
                     df_results.loc[idx, _col] = _val
+                validation_succeeded.append(idx)
             except Exception as e:  # noqa: BLE001 — one bad row must not abort the rest
                 print(
                     f"  [Warning] Failed multi-class holdout metrics for model {i+1}: {e}"
                 )
+                validation_failures[idx] = f"multi-class holdout metrics failed: {e}"
             continue
 
         try:
@@ -1099,47 +1114,40 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
             # GA-PLS) actually subsets wavelengths during training.
             col_indices = None
 
-            # Check for variable selection wavelengths (all_vars stores wavelength VALUES)
+            # all_vars stores the wavelength VALUES the model was trained on, in
+            # training order. Resolve them with the shared contract (R031): every
+            # value must map to exactly one column. A zero or partial match is a
+            # failure for this row, never a silent full-spectrum or fewer-column
+            # refit. Old %g-rounded rows still resolve when unambiguous.
             all_vars_str = row.get("all_vars", "N/A")
-            if all_vars_str != "N/A" and all_vars_str and isinstance(all_vars_str, str):
-                # Parse wavelengths from all_vars (e.g., "1520.0, 1540.0, 1560.0, ...")
+            if isinstance(all_vars_str, str) and all_vars_str.strip() not in ("", "N/A"):
                 try:
-                    model_wavelengths = [
-                        float(w.strip()) for w in all_vars_str.split(",") if w.strip()
-                    ]
-                    # Create mapping from wavelength to column index
-                    # CRITICAL: Do NOT sort - preserve the order from all_vars
-                    wl_to_idx = {float(wl): idx_wl for idx_wl, wl in enumerate(wavelengths)}
-                    # Get column indices for model wavelengths (in order)
-                    col_indices = []
-                    for wl in model_wavelengths:
-                        if wl in wl_to_idx:
-                            col_indices.append(wl_to_idx[wl])
-                    if len(col_indices) != len(model_wavelengths):
-                        print(
-                            f"  [Warning] Only found {len(col_indices)}/{len(model_wavelengths)} wavelengths for model {i+1}"
-                        )
-                    if not col_indices:
-                        col_indices = None
-                except Exception as e:
-                    print(f"  [Warning] Could not parse all_vars for model {i+1}: {e}")
-                    col_indices = None
+                    col_indices = resolve_wavelength_list(all_vars_str, wavelengths)
+                except WavelengthMatchError as e:
+                    reason = f"all_vars does not match the spectral axis: {e}"
+                    validation_failures[idx] = reason
+                    print(f"  [Warning] Skipping validation for model {i+1}: {reason}")
+                    continue
+            else:
+                # No usable wavelength list. The full-spectrum fallback is safe only
+                # when the row itself says it used every column of this axis.
+                reason = _full_spectrum_fallback_refusal(row, X_train_preprocessed.shape[1])
+                if reason is not None:
+                    validation_failures[idx] = reason
+                    print(f"  [Warning] Skipping validation for model {i+1}: {reason}")
+                    continue
 
             # Subset AFTER preprocessing (matching Model Dev behavior)
-            if col_indices is not None and len(col_indices) > 0:
-                # Validate indices are within bounds
-                max_idx = X_train_preprocessed.shape[1] - 1
-                valid_indices = [idx for idx in col_indices if 0 <= idx <= max_idx]
-                if len(valid_indices) != len(col_indices):
-                    print(
-                        f"  [Warning] {len(col_indices) - len(valid_indices)} indices out of bounds for model {i+1}"
-                    )
-                if not valid_indices:
-                    print(f"  [Warning] No valid indices for model {i+1}, skipping")
+            if col_indices is not None:
+                n_cols = X_train_preprocessed.shape[1]
+                if col_indices.size and int(col_indices.max()) >= n_cols:
+                    reason = f"all_vars maps outside the preprocessed matrix ({n_cols} columns)"
+                    validation_failures[idx] = reason
+                    print(f"  [Warning] Skipping validation for model {i+1}: {reason}")
                     continue
                 # Subset the PREPROCESSED data to selected columns
-                X_train_final = X_train_preprocessed[:, valid_indices]
-                X_val_final = X_val_preprocessed[:, valid_indices]
+                X_train_final = X_train_preprocessed[:, col_indices]
+                X_val_final = X_val_preprocessed[:, col_indices]
             else:
                 # Full spectrum model - use all preprocessed data
                 X_train_final = X_train_preprocessed
@@ -1155,6 +1163,10 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
             if hasattr(model, "n_components") and model.n_components > X_train_final.shape[1]:
                 print(
                     f"  [Warning] Skipping model {i+1}: n_components ({model.n_components}) > n_features ({X_train_final.shape[1]})"
+                )
+                validation_failures[idx] = (
+                    f"n_components ({model.n_components}) > n_features "
+                    f"({X_train_final.shape[1]})"
                 )
                 continue
 
@@ -1287,10 +1299,14 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
 
         except Exception as e:
             print(f"  [Warning] Failed to compute validation for model {i+1}: {e}")
+            validation_failures[idx] = f"validation failed: {e}"
             import traceback
 
             traceback.print_exc()
             continue
+        else:
+            # Reached only when the row ran to the end (a skip `continue`s past it).
+            validation_succeeded.append(idx)
 
         # Progress update
         if progress_callback and (i + 1) % 10 == 0:
@@ -1348,6 +1364,9 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
 
         df_results = df_results[cols]
 
+    df_results.attrs["validation_failures"] = validation_failures
+    df_results.attrs["validation_attempted"] = list(top_indices)
+    df_results.attrs["validation_succeeded"] = validation_succeeded
     return df_results
 
 
@@ -5520,11 +5539,11 @@ def _run_single_config(
     if subset_tag != "full" and subset_indices is not None:
         # Subset model: save only the subset wavelengths
         subset_wavelengths = wavelengths[subset_indices]
-        all_vars_str = ",".join([f"{w:g}" for w in subset_wavelengths])
+        all_vars_str = format_wavelength_list(subset_wavelengths)
         result["all_vars"] = all_vars_str
     else:
         # Full model: save ALL wavelengths used (may be filtered by wl_min/wl_max)
-        all_vars_str = ",".join([f"{w:g}" for w in wavelengths])
+        all_vars_str = format_wavelength_list(wavelengths)
         result["all_vars"] = all_vars_str
 
     # Continue with feature importance extraction if model was already fitted above
@@ -5570,7 +5589,7 @@ def _run_single_config(
                 top_wavelengths = wavelengths[top_indices]
 
             # Format as comma-separated string
-            top_vars_str = ",".join([f"{w:g}" for w in top_wavelengths])
+            top_vars_str = format_wavelength_list(top_wavelengths)
             result["top_vars"] = top_vars_str
 
         except Exception as e:
@@ -6492,7 +6511,7 @@ def run_one_class_search(
                     # Mirrors the classification grid path at search.py:4506-4507.
                     "PreprocessBase": preprocess_cfg.get("method", preprocess_cfg["name"]),
                     "top_vars": "N/A",
-                    "all_vars": ",".join([f"{float(w):g}" for w in wavelengths_current]),
+                    "all_vars": format_wavelength_list(wavelengths_current),
                     "per_contaminant_sensitivity": cal_metrics.get("per_contaminant", {}),
                     # Persist scaler/PCA/stats for model save/load
                     "scaler": cv_result.get("cal_scaler"),
@@ -7101,12 +7120,8 @@ def run_one_class_search(
                                 # full spectrum, producing wrong predictions.
                                 # Mirrors the Bayesian contract at
                                 # unified_bayesian.py:1046-1050.
-                                "top_vars": ",".join(
-                                    [f"{float(w):g}" for w in wavelengths_subset]
-                                ),
-                                "all_vars": ",".join(
-                                    [f"{float(w):g}" for w in wavelengths_subset]
-                                ),
+                                "top_vars": format_wavelength_list(wavelengths_subset),
+                                "all_vars": format_wavelength_list(wavelengths_subset),
                                 "uniform_fallback": used_uniform_fallback,
                                 "per_contaminant_sensitivity": cal_metrics.get(
                                     "per_contaminant", {}

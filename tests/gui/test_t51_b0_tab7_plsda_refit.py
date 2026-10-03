@@ -106,6 +106,8 @@ def test_ensemble_reconstruction_plsda_head_matrix(
                 "Deriv": 0,
                 "Window": 17,
                 "Poly": 2,
+                "SubsetTag": "full",
+                "n_vars": X_TRAIN.shape[1],
             }
         ]
     )

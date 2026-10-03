@@ -176,6 +176,13 @@ from spectral_predict.search_controller import SearchController
 
 from spectral_predict import __version__ as _DASP_VERSION
 
+# One wavelength-to-column contract for training, prediction and validation (R009/R031).
+from spectral_predict.wavelength_matching import (
+    WavelengthMatchError,
+    match_wavelengths,
+    resolve_wavelength_list,
+)
+
 # Analysis subset pure-logic helpers
 from spectral_predict.analysis_subset import (
     compute_matches,
@@ -2411,6 +2418,48 @@ def _parse_autoscale_flag(raw, default: bool = False) -> bool:
     from spectral_predict.preprocess import parse_bool_cell
 
     return parse_bool_cell(raw, default)
+
+
+def _validation_summary_lines(results_df, top_n: int, metric_col: str) -> list[str]:
+    """Progress-log lines: how many top rows got validation metrics, and why not.
+
+    The validation helpers leave NaN metrics on a row they could not rebuild and
+    list it in ``results_df.attrs["validation_failures"]`` (R031/R078). Saying
+    "computed for top N" regardless hid those rows.
+    """
+    failures = results_df.attrs.get("validation_failures", {}) or {}
+    attempted = results_df.attrs.get("validation_attempted")
+    if attempted is None:
+        attempted = list(results_df.index[: min(int(top_n), len(results_df))])
+    attempted = [i for i in attempted if i in results_df.index]
+    n_requested = len(attempted)
+    # Count only this run's successes over the rows it attempted. The helpers record
+    # them explicitly; a metric can be legitimately NaN (one-class val_BalancedAcc on
+    # an inlier-only validation set), so it is only a fallback for older callers.
+    succeeded = results_df.attrs.get("validation_succeeded")
+    if succeeded is not None:
+        done = set(succeeded)
+        ok = [i for i in attempted if i in done and i not in failures]
+    else:
+        ok = [
+            i for i in attempted
+            if i not in failures
+            and metric_col in results_df
+            and pd.notna(results_df.at[i, metric_col])
+        ]
+    n_ok = len(ok)
+    if n_ok >= n_requested:
+        return [f"  [OK] Validation metrics computed for top {n_requested} models"]
+    lines = [
+        f"  [Warning] Validation metrics computed for only {n_ok} of the top "
+        f"{n_requested} models; the others show no validation values."
+    ]
+    for row_idx, reason in list(failures.items())[:5]:
+        name = results_df.loc[row_idx, "Model"] if "Model" in results_df.columns else ""
+        lines.append(f"    - row {row_idx} {name}: {reason}")
+    if len(failures) > 5:
+        lines.append(f"    ... and {len(failures) - 5} more (see console)")
+    return lines
 
 
 # ===== HELPER: IMBALANCE CATEGORY SUFFIX FOR FILENAMES =====
@@ -24644,139 +24693,32 @@ class SpectralPredictApp:
         # GA preprocessing suffixes
         GA_SUFFIXES = ('_pls', '_neural_svm', '_tree', '_neuralboosted')
 
-        def match_wavelengths_exact(requested_wavelengths, available_columns, precision=1):
+        def parse_wavelength_subset(row, X_columns):
+            """Columns of ``X_columns`` a results row was trained on, in stored order.
+
+            Uses the shared resolver (``resolve_wavelength_list``): every stored
+            wavelength must name exactly one column. Returns None when the row used
+            every column. Raises ValueError when the list cannot be mapped, or when it
+            is missing on a row that does not demonstrably cover the whole axis, so
+            the caller excludes the row instead of training a full-spectrum model.
             """
-            Match wavelengths with exact precision after normalization.
+            from spectral_predict.wavelength_matching import _full_spectrum_fallback_refusal
 
-            This function solves the CARS wavelength matching bug where tolerance-based
-            matching (±0.5nm) could match wrong wavelengths or fail silently.
-
-            FIXED VERSION - preserves order during multi-precision fallback.
-
-            Args:
-                requested_wavelengths: List of float wavelengths to match
-                available_columns: Column names from X_train (can be strings or floats)
-                precision: Decimal places to round to (default 1)
-
-            Returns:
-                List of matched column names (in order of requested_wavelengths)
-
-            Raises:
-                ValueError: If any wavelength cannot be matched exactly
-            """
-            # Build lookup dict: normalized wavelength string -> original column name
-            col_lookup = {}
-            col_names = list(available_columns)
-
-            for col in col_names:
-                try:
-                    col_float = float(col)
-                    # Round to specified precision and convert to string key
-                    normalized_key = f"{round(col_float, precision):.{precision}f}"
-                    # Store first match only (for duplicate handling)
-                    if normalized_key not in col_lookup:
-                        col_lookup[normalized_key] = col
-                except (ValueError, TypeError):
-                    # Non-numeric column - skip
-                    continue
-
-            # Match each requested wavelength - TRACK MATCHES BY INDEX to preserve order
-            matched_by_index = {}  # index -> matched column
-            missing_by_index = {}  # index -> wavelength
-
-            for idx, wl in enumerate(requested_wavelengths):
-                normalized_key = f"{round(wl, precision):.{precision}f}"
-                if normalized_key in col_lookup:
-                    matched_by_index[idx] = col_lookup[normalized_key]
-                else:
-                    missing_by_index[idx] = wl
-
-            # Try different precision levels for missing wavelengths
-            if missing_by_index:
-                for alt_precision in [0, 2, 3]:
-                    if alt_precision == precision:
-                        continue
-
-                    # Rebuild lookup at alternative precision
-                    col_lookup_alt = {}
-                    for col in col_names:
-                        try:
-                            col_float = float(col)
-                            normalized_key = f"{round(col_float, alt_precision):.{alt_precision}f}"
-                            if normalized_key not in col_lookup_alt:
-                                col_lookup_alt[normalized_key] = col
-                        except (ValueError, TypeError):
-                            continue
-
-                    # Try matching still-missing wavelengths
-                    still_missing = {}
-                    for idx, wl in missing_by_index.items():
-                        normalized_key = f"{round(wl, alt_precision):.{alt_precision}f}"
-                        if normalized_key in col_lookup_alt:
-                            matched_by_index[idx] = col_lookup_alt[normalized_key]  # PRESERVES ORDER
-                        else:
-                            still_missing[idx] = wl
-
-                    missing_by_index = still_missing
-                    if not missing_by_index:
-                        break
-
-            # Report any still-missing wavelengths
-            if missing_by_index:
-                missing_wls = list(missing_by_index.values())
-                raise ValueError(
-                    f"Could not find matching columns for {len(missing_wls)} wavelengths: "
-                    f"{missing_wls[:5]}{'...' if len(missing_wls) > 5 else ''}"
-                )
-
-            # Return matched columns IN ORIGINAL ORDER
-            return [matched_by_index[i] for i in range(len(requested_wavelengths))]
-
-        def parse_wavelength_subset(all_vars_str, X_columns):
-            """
-            Parse wavelength subset from all_vars string and find matching columns.
-
-            Uses exact matching with normalized precision to avoid CARS wavelength
-            mismatch bugs where tolerance-based matching could fail silently.
-
-            FIXED VERSION - no code duplication, uses match_wavelengths_exact() only.
-
-            Args:
-                all_vars_str: Comma-separated wavelength values like "1500,1520,1540"
-                X_columns: List/Index of column names from X_train
-
-            Returns:
-                List of column names to use, or None if no subset should be applied
-            """
-            if not all_vars_str or all_vars_str == 'N/A' or pd.isna(all_vars_str):
+            row_dict = row._asdict() if hasattr(row, '_asdict') else dict(row)
+            col_names = list(X_columns)
+            all_vars_str = row_dict.get('all_vars')
+            if not isinstance(all_vars_str, str) or all_vars_str.strip() in ('', 'N/A'):
+                reason = _full_spectrum_fallback_refusal(row_dict, len(col_names))
+                if reason is not None:
+                    raise ValueError(reason)
                 return None
-
             try:
-                # Parse comma-separated wavelengths
-                wavelengths = [float(w.strip()) for w in str(all_vars_str).split(',')]
-
-                col_names = list(X_columns)
-
-                # Use exact matching with normalized precision
-                try:
-                    matching_cols = match_wavelengths_exact(wavelengths, col_names, precision=1)
-                except ValueError as e:
-                    # Log warning and skip subsetting for this model
-                    self._log_progress(f"    [WARN] Wavelength matching failed: {e}")
-                    self._log_progress(f"    [WARN] Training model without wavelength subsetting")
-                    return None
-
-                # Only return if we found a meaningful subset
-                if len(matching_cols) > 0 and len(matching_cols) < len(col_names):
-                    return matching_cols
-                return None
-
-            except Exception as e:
-                # If parsing fails, log and don't subset
-                self._log_progress(f"    [WARN] Failed to parse wavelength subset: {e}")
-                return None
-
-        # NOTE: WavelengthSubsetWrapper is now defined at module level (sklearn-compatible)
+                indices = resolve_wavelength_list(all_vars_str, [float(c) for c in col_names])
+            except WavelengthMatchError as e:
+                raise ValueError(f"all_vars does not match the spectral axis: {e}") from e
+            if indices.tolist() == list(range(len(col_names))):
+                return None  # every column, in axis order
+            return [col_names[i] for i in indices]
 
         def parse_ga_preprocess_name(name):
             """
@@ -25028,11 +24970,11 @@ class SpectralPredictApp:
                     steps.append(('model', model))
 
                 # Check for wavelength subset (NSGA-II and other methods store selected wavelengths in all_vars)
-                wavelength_subset = None
-                if hasattr(row, 'all_vars'):
-                    wavelength_subset = parse_wavelength_subset(row.all_vars, X_train.columns)
-                    if wavelength_subset:
-                        self._log_progress(f"    [Subset] Using {len(wavelength_subset)} of {len(X_train.columns)} wavelengths")
+                # Raises (row excluded, reason logged) rather than silently training on
+                # the full spectrum when all_vars is missing or cannot be mapped.
+                wavelength_subset = parse_wavelength_subset(row, X_train.columns)
+                if wavelength_subset:
+                    self._log_progress(f"    [Subset] Using {len(wavelength_subset)} of {len(X_train.columns)} wavelengths")
 
                 if shared_prep is not None and wavelength_subset is not None:
                     # Select the subset from the preprocessed full spectrum, as search did
@@ -30060,10 +30002,10 @@ class SpectralPredictApp:
                             progress_callback=self._progress_callback,
                         )
 
-                        n_computed = min(top_n_val, len(results_df))
-                        self._log_progress(
-                            f"  [OK] Validation metrics computed for top {n_computed} one-class models"
-                        )
+                        for _line in _validation_summary_lines(
+                            results_df, top_n_val, 'val_BalancedAcc'
+                        ):
+                            self._log_progress(_line)
                         self.results_df = results_df
                         self.results = results_df
                         self.root.after(0, lambda: self._populate_results_table(results_df))
@@ -30630,8 +30572,12 @@ class SpectralPredictApp:
                                 imbalance_method=imbalance_method,
                             )
 
-                            n_computed = min(self.validation_top_n.get(), len(results_df))
-                            self._log_progress(f"  ✓ Validation metrics computed for top {n_computed} models")
+                            for _line in _validation_summary_lines(
+                                results_df,
+                                self.validation_top_n.get(),
+                                'R2pred' if task_type == 'regression' else 'val_Accuracy',
+                            ):
+                                self._log_progress(_line)
 
                         except Exception as e:
                             self._log_progress(f"  [Warning] Failed to compute validation metrics: {e}")
@@ -30785,8 +30731,12 @@ class SpectralPredictApp:
                             imbalance_method=imbalance_method,
                         )
 
-                        n_computed = min(self.validation_top_n.get(), len(results_df))
-                        self._log_progress(f"  ✓ Validation metrics computed for top {n_computed} models")
+                        for _line in _validation_summary_lines(
+                            results_df,
+                            self.validation_top_n.get(),
+                            'R2pred' if task_type == 'regression' else 'val_Accuracy',
+                        ):
+                            self._log_progress(_line)
 
                     except Exception as e:
                         self._log_progress(f"  [Warning] Failed to compute validation metrics: {e}")
@@ -36872,56 +36822,67 @@ Performance (Classification):
                 if 'all_vars' in config and config['all_vars'] != 'N/A' and config['all_vars']:
                     print(f"DEBUG: Model has all_vars, parsing complete wavelength list")
                     try:
-                        # Parse wavelengths from all_vars string (e.g., "1520.0, 1540.0, 1560.0, ...")
+                        # Resolve all_vars to the exact axis values (R009/R031): old
+                        # %g-rounded text maps to the channel it stood for, and text
+                        # that cannot be mapped one-to-one is an error, not a
+                        # silent fallback to top_vars or the full spectrum.
                         all_vars_str = str(config['all_vars']).strip()
-                        wavelength_strings = [w.strip() for w in all_vars_str.split(',')]
-                        model_wavelengths = [float(w) for w in wavelength_strings if w]
+                        try:
+                            _cols = resolve_wavelength_list(all_vars_str, all_wavelengths)
+                        except WavelengthMatchError:
+                            self._original_wavelength_order = None
+                            raise
+                        model_wavelengths = [float(all_wavelengths[c]) for c in _cols]
                         # Don't sort - preserve importance order from search results
                         # Sorting destroys feature order which affects PLS R² reproducibility
                         # Store original order for later use (as Python floats for consistent comparison)
                         self._original_wavelength_order = [float(wl) for wl in model_wavelengths]
                         print(f"DEBUG: Parsed {len(model_wavelengths)} wavelengths from all_vars")
                         print(f"DEBUG: Stored original wavelength order (type={type(self._original_wavelength_order[0]).__name__}): {self._original_wavelength_order[:5]}...")
+                    except WavelengthMatchError:
+                        raise  # shown in the wavelength box by the handler below
                     except Exception as e:
                         print(f"WARNING: Could not parse all_vars: {e}")
                         model_wavelengths = None
 
-                # Fallback to top_vars for backward compatibility with old results
-                if model_wavelengths is None and 'top_vars' in config and config['top_vars'] != 'N/A' and config['top_vars']:
-                    model_name = config.get('Model', 'Unknown')
-                    print(f"[!]  CRITICAL WARNING: Model '{model_name}' missing complete wavelength list ('all_vars')")
-                    print(f"[!]  Falling back to 'top_vars' - this may cause R² mismatch if model used >30 wavelengths!")
-                    print(f"[!]  Expected n_vars: {config.get('n_vars', 'unknown')}")
-                    try:
-                        # Parse wavelengths from top_vars string (e.g., "1520.0, 1540.0, 1560.0")
-                        top_vars_str = str(config['top_vars']).strip()
-                        wavelength_strings = [w.strip() for w in top_vars_str.split(',')]
-                        model_wavelengths = [float(w) for w in wavelength_strings if w]
-                        # Don't sort - preserve importance order from search results
-                        # Sorting destroys feature order which affects PLS R² reproducibility
-                        # Store original order for later use (as Python floats for consistent comparison)
-                        self._original_wavelength_order = [float(wl) for wl in model_wavelengths]
-                        expected_n_vars = config.get('n_vars', len(model_wavelengths))
-                        if len(model_wavelengths) < expected_n_vars:
-                            print(f"[!]  MISMATCH: Loaded {len(model_wavelengths)} wavelengths but model expects {expected_n_vars}!")
-                            print(f"[!]  This WILL cause different R² when running refined model!")
-                        print(f"DEBUG: Parsed {len(model_wavelengths)} wavelengths from top_vars")
-                        print(f"DEBUG: Stored original wavelength order (type={type(self._original_wavelength_order[0]).__name__}): {self._original_wavelength_order[:5]}...")
-                    except Exception as e:
-                        print(f"WARNING: Could not parse top_vars: {e}")
-                        model_wavelengths = None
-
-                # For full models or if parsing failed: Use all wavelengths
+                # No usable all_vars. Use every column only when the row says it is a
+                # full-spectrum model of this axis. Otherwise top_vars (at most the top
+                # 30) is accepted only when it is the complete trained subset: its count
+                # equals n_vars and every value maps to one channel. Anything else is
+                # shown as an error in the wavelength box, never expanded to the full
+                # spectrum (R009/R031 review round 3).
                 if model_wavelengths is None:
-                    if subset_tag == 'full' or subset_tag == 'N/A':
+                    from spectral_predict.wavelength_matching import (
+                        _full_spectrum_fallback_refusal,
+                    )
+
+                    self._original_wavelength_order = None
+                    refusal = _full_spectrum_fallback_refusal(config, len(all_wavelengths))
+                    if refusal is None:
                         print(f"DEBUG: Full model - using all {len(all_wavelengths)} wavelengths")
                         model_wavelengths = list(all_wavelengths)
-                        self._original_wavelength_order = None  # Clear for full spectrum
                     else:
-                        # Fallback: use all wavelengths
-                        print(f"WARNING: Subset model but no top_vars, using all wavelengths")
-                        model_wavelengths = list(all_wavelengths)
-                        self._original_wavelength_order = None  # Clear for fallback
+                        top_vars_str = config.get('top_vars')
+                        if not isinstance(top_vars_str, str) or top_vars_str.strip() in ('', 'N/A'):
+                            raise WavelengthMatchError(
+                                f"Cannot load this model's wavelengths: {refusal}, and "
+                                f"top_vars is empty."
+                            )
+                        _cols = resolve_wavelength_list(top_vars_str, all_wavelengths)
+                        try:
+                            expected_n_vars = int(config.get('n_vars'))
+                        except (TypeError, ValueError):
+                            expected_n_vars = None
+                        if expected_n_vars is None or len(_cols) != expected_n_vars:
+                            raise WavelengthMatchError(
+                                f"Cannot load this model's wavelengths: {refusal}. top_vars "
+                                f"lists {len(_cols)} wavelengths but the model used "
+                                f"{config.get('n_vars', 'an unknown number of')}, so the "
+                                f"trained subset is unknown."
+                            )
+                        model_wavelengths = [float(all_wavelengths[c]) for c in _cols]
+                        self._original_wavelength_order = list(model_wavelengths)
+                        print(f"DEBUG: Using complete top_vars ({len(model_wavelengths)} wavelengths)")
 
                 # Detect if this is a subset (variable selection) vs full spectrum
                 is_subset = (subset_tag not in ['full', 'N/A', ''])
@@ -40755,14 +40716,13 @@ F1 Score:  {f1:.4f}
                 else:
                     X_full_preprocessed = X_full
 
-                # Subset to selected wavelengths
+                # Subset to selected wavelengths with the shared exact-first contract
+                # that predict_with_model also uses (R112). Keep the axis values
+                # actually used, so the saved model names its training columns.
                 original_wavelengths = X_base_df.columns.astype(float).values
-                wavelength_indices = []
-                for wl in selected_wl:
-                    idx = np.where(np.abs(original_wavelengths - wl) < 0.5)[0]
-                    if len(idx) > 0:
-                        wavelength_indices.append(idx[0])
-                X_work = X_full_preprocessed[:, wavelength_indices] if wavelength_indices else X_full_preprocessed
+                wavelength_indices = match_wavelengths(selected_wl, original_wavelengths).tolist()
+                selected_wl = [float(original_wavelengths[i]) for i in wavelength_indices]
+                X_work = X_full_preprocessed[:, wavelength_indices]
 
                 # Required for predict-time Mode A in model_io.py: training applies
                 # preprocessing (SNV, SG deriv, baseline) on the FULL spectrum then
@@ -41326,19 +41286,14 @@ F1 Score:  {f1:.4f}
                 print(f"DEBUG: Original wavelengths: {len(original_wavelengths)}, Preprocessed shape: {X_full_preprocessed.shape[1]}")
 
                 # Find indices of selected wavelengths in the original array
-                # (which matches the preprocessed array since savgol preserves shape)
-                wavelength_indices = []
-                missing_wavelengths = []
-                for wl in selected_wl:
-                    idx = np.where(np.abs(original_wavelengths - wl) < 0.5)[0]
-                    if len(idx) > 0:
-                        wavelength_indices.append(idx[0])
-                    else:
-                        missing_wavelengths.append(wl)
-
-                if missing_wavelengths:
-                    print(f"WARNING: {len(missing_wavelengths)} wavelengths not found:")
-                    print(f"  Missing: {missing_wavelengths[:10]}{'...' if len(missing_wavelengths) > 10 else ''}")
+                # (which matches the preprocessed array since savgol preserves shape).
+                # Shared exact-first contract with predict_with_model (R009/R026): the
+                # old first-hit-within-0.5 rule trained on the lower neighbour on
+                # grids finer than 0.5. Missing or ambiguous wavelengths raise.
+                wavelength_indices = match_wavelengths(selected_wl, original_wavelengths).tolist()
+                # Store the axis values actually used, so refined_wavelengths (and the
+                # saved model's metadata) name exactly the training columns.
+                selected_wl = [float(original_wavelengths[i]) for i in wavelength_indices]
 
                 # 4. Subset the PREPROCESSED data (not raw!)
                 X_work = X_full_preprocessed[:, wavelength_indices]
@@ -42559,9 +42514,10 @@ External Validation Performance (n={n_val}):
                 metadata['performance'] = perf
 
             # Save the model
-            # Use refined_label_encoder if available (from Model Development tab),
-            # otherwise fallback to global label_encoder (from Results tab)
-            label_encoder_to_save = getattr(self, 'refined_label_encoder', None) or self.label_encoder
+            # R016: only the encoder the refined model was trained with. Refinement
+            # encodes text labels itself and trains on raw numeric labels, so the
+            # search's encoder (self.label_encoder) never describes this model.
+            label_encoder_to_save = getattr(self, 'refined_label_encoder', None)
 
             # Prepare CV data for uncertainty estimation
             cv_residuals = None
@@ -43948,6 +43904,19 @@ External Validation Performance (n={n_val}):
                         model_dict['filename'] = Path(filepath).name
                         model_dict['is_ensemble'] = False
 
+                    # R009: a pre-fix model on a fine grid was trained on neighbouring
+                    # channels; tell the user to retrain it (ensembles: any member).
+                    _wl_warnings = [model_dict.get('wavelength_mapping_warning')] + [
+                        md.get('wavelength_mapping_warning')
+                        for md in model_dict.get('base_model_dicts') or []
+                    ]
+                    _wl_warnings = list(dict.fromkeys(w for w in _wl_warnings if w))
+                    if _wl_warnings:
+                        messagebox.showwarning(
+                            "Retrain Model",
+                            f"{Path(filepath).name}:\n\n" + "\n\n".join(_wl_warnings),
+                        )
+
                     # Check x-unit compatibility
                     model_x_unit = model_dict.get('metadata', {}).get('x_unit', 'nm')
                     current_unit = self.current_x_unit.get()
@@ -44978,7 +44947,15 @@ External Validation Performance (n={n_val}):
         if is_classification:
             # === CLASSIFICATION: Show probabilities and confidence ===
             # Build columns: Sample | Model | Predicted | Confidence | Prob(Class1) | Prob(Class2) | ...
-            class_names = first_uncertainty.get('class_names', [])
+            # Headers are the union of every loaded model's class labels: models can
+            # know different classes (a/b vs b/c), and each row's probabilities are
+            # placed under their own label, blank where that model lacks the class.
+            class_names = list(dict.fromkeys(
+                cls
+                for unc in self.predictions_uncertainty.values()
+                if 'probabilities' in unc
+                for cls in (unc.get('class_names') or [])
+            ))
 
             columns = ['Sample', 'Model', 'Predicted', 'Confidence%']
             if class_names:
@@ -45005,7 +44982,8 @@ External Validation Performance (n={n_val}):
 
                 probabilities = uncertainty['probabilities']
                 confidence = uncertainty['confidence']
-                class_names = uncertainty.get('class_names', [])
+                model_classes = list(uncertainty.get('class_names') or [])
+                column_of = {cls: j for j, cls in enumerate(model_classes)}
 
                 # Get predictions for this model
                 predictions = self.predictions_df[model_name].values
@@ -45018,10 +44996,10 @@ External Validation Performance (n={n_val}):
                         f"{confidence[i]*100:.2f}"
                     ]
 
-                    # Add class probabilities
-                    if class_names:
-                        for j in range(len(class_names)):
-                            row_values.append(f"{probabilities[i, j]*100:.2f}")
+                    # Add class probabilities under their own label (blank if absent)
+                    for cls in class_names:
+                        j = column_of.get(cls)
+                        row_values.append("" if j is None else f"{probabilities[i, j]*100:.2f}")
 
                     # Color-code by confidence
                     item_id = self.uncertainty_tree.insert('', 'end', values=row_values)
