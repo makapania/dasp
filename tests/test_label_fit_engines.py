@@ -210,7 +210,9 @@ def test_save_refined_model_uses_only_the_model_development_encoder():
     import spectral_predict_gui_optimized as gui_module
 
     source = inspect.getsource(gui_module.SpectralPredictApp._save_refined_model)
-    assert "label_encoder_to_save = getattr(self, 'refined_label_encoder', None)\n" in source
+    # PR #89: the encoder comes from the frozen RefinedState snapshot of the run
+    # that produced the model, never from the global search encoder.
+    assert "label_encoder_to_save = snap['label_encoder']\n" in source
     assert "or self.label_encoder" not in source
 
 

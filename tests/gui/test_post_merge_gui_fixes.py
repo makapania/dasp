@@ -628,7 +628,15 @@ def test_learning_curve_error_callback_receives_message(gui_app, monkeypatch):
     scheduled = []
     monkeypatch.setattr(app, "_on_learning_curve_error", received.append)
     monkeypatch.setattr(app.root, "after", lambda ms, func=None, *args: scheduled.append(func))
-    monkeypatch.setattr(app, "refined_config", None, raising=False)  # .get() raises
+    # Force the worker into its except block. (It used to rely on refined_config=None
+    # making .get() raise; the worker now reads one RefinedState snapshot and tolerates
+    # a missing config, so fail inside the computation instead.)
+    import spectral_predict.diagnostics as diagnostics
+
+    def _fail(*_a, **_k):
+        raise RuntimeError("learning curve failed")
+
+    monkeypatch.setattr(diagnostics, "compute_learning_curve", _fail)
 
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         app._run_learning_curve_thread()
