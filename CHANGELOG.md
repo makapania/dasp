@@ -92,6 +92,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   continues only on exactly the interrupted run's calibration samples (same IDs, order,
   spectra, targets and selection); otherwise it offers to start fresh or keep the run.
 
+
+- **Model Development Y-transform now refits, saves and predicts correctly** (review
+  R048, R001, R020, R014/R019). Selecting any Y-transform for a model without booster
+  early stopping crashed the refit, and 'Box-Cox' was rejected outright. The save path
+  behind the crash would have dropped the spectral preprocessing (derivatives, SNV,
+  baseline) from the .dasp file and saved the Ridge/SVR/MLP scaler twice. Now the saved
+  preprocessor is the fitted full-spectrum preprocessing, and the saved model is a
+  TransformedTargetRegressor around the same prediction model an untransformed save
+  would hold (including its per-subset scaler), so a loaded model reproduces the
+  in-app predictions. With booster early stopping, the final model used to be fitted on
+  raw y while CV, the reported metrics and the file's `y_transform` described the
+  transformed model. It is now fitted on the transformed full-calibration y and
+  inverse-transforms its predictions. `y_transform` in the file is the transform the
+  model was trained with (canonical name: `log`, `log1p`, `sqrt`, `boxcox`,
+  `yeo-johnson` or `none`), not the widget at save time. **Existing .dasp files saved
+  from an early-stopping booster with a Y-transform hold a raw-y model and must be
+  retrained**; no other Y-transform file could be produced before this fix.
+  Everything else that uses the model follows the transform. Python, notebook and R code
+  exports train on the transformed target in CV and in the final fit; exporting a
+  Y-transformed model with imbalance handling is refused, with a message. The Model
+  Complexity curve is computed on the transformed model. Random Forest per-sample tree
+  spread is reported in original units. SHAP for a tree model with a Y-transform uses
+  the slower KernelExplainer, as TreeExplainer cannot see inside the transform.
+- **A bias or nonlinear correction is saved only with the model it was computed for**
+  (review R010/R064). A correction left from an earlier Model Development run (for
+  example a polynomial fitted to another model, or a regression correction after
+  switching to classification) used to be embedded in the next saved model and applied
+  to all of its predictions. Each new fit now clears corrections, computing one after
+  the run and then saving still works, and classification/one-class models never get
+  one. Only one Model Development run can be active at a time (a second Run click is
+  refused even if the button was re-enabled by switching tabs), Save, Export Code and
+  the nonlinear Compute button wait for the run to finish, a save or export uses one
+  consistent snapshot of the model and its correction, a failed run leaves the
+  previous model exactly as it was (still savable), and a correction whose model
+  changed while it was being computed is discarded. Saved metadata and exported code
+  now take the model's hyperparameters, derivative/polynomial settings, imbalance,
+  early-stopping and autoscale settings from the run that trained it, not from
+  whichever Results row is selected when you click Save or Export. A run also reads
+  every setting once, when it starts: double-clicking another Results row (now refused
+  while a run is going) or changing widgets mid-run no longer leaks into the run, and
+  the saved data type, x unit and validation split are those of the run. Prediction
+  also ignores a correction stored with a non-regression model. **Already
+  saved regression files with a stale correction cannot be detected automatically**:
+  if a model was saved with "apply correction" ticked after more than one run in the
+  session, recompute the correction and re-save.
 - **Model Development trains, saves and predicts on the same wavelength columns
   (R009/R026/R112).** The Tab 7 refit (regression, classification and one-class) mapped
   each selected wavelength to the *first* column within ±0.5 units, while prediction
