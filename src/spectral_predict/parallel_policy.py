@@ -247,62 +247,88 @@ def pool_model_threads(n_jobs: int | None) -> int:
     return max(1, physical_cores() // pool_workers(n_jobs))
 
 
-def contains_catboost(estimator: Any, _depth: int = 0) -> bool:
+def _is_estimator(value: Any) -> bool:
+    return hasattr(value, "get_params") and not isinstance(value, type)
+
+
+def _sub_estimators(est: Any) -> Iterator[Any]:
+    """Estimators held directly by ``est``.
+
+    Covers estimator-valued params (``GridSearchCV.estimator``, wrappers) and
+    containers of them in any params: pipeline ``steps`` and ``VotingRegressor`` /
+    ``StackingRegressor`` ``estimators`` (lists of ``(name, estimator)``),
+    ``ColumnTransformer`` ``transformers`` (``(name, estimator, columns)``), plain
+    lists/tuples of estimators, and dict values. ``"passthrough"``/``"drop"``/``None``
+    entries are skipped. Objects without ``get_params`` but with a ``steps`` list are
+    walked through it.
+    """
+
+    def from_container(value: Any) -> Iterator[Any]:
+        items = value.values() if isinstance(value, dict) else value
+        for item in items:
+            if _is_estimator(item):
+                yield item
+            elif isinstance(item, tuple) and len(item) >= 2 and _is_estimator(item[1]):
+                yield item[1]
+
+    if hasattr(est, "get_params") and not isinstance(est, type):
+        values = est.get_params(deep=False).values()
+    else:
+        steps = getattr(est, "steps", None)
+        values = [steps] if isinstance(steps, list) else []
+    for value in values:
+        if _is_estimator(value):
+            yield value
+        elif isinstance(value, (list, tuple, dict)):
+            yield from from_container(value)
+
+
+def _walk_estimators(est: Any) -> Iterator[Any]:
+    """``est`` and every estimator nested in it, depth-first, each object once.
+
+    No depth cap: an id-based visited set stops cycles instead, so long wrapper
+    chains and ensembles of pipelines are walked to the bottom.
+    """
+    seen: set[int] = set()
+    stack = [est]
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        stack.extend(reversed(list(_sub_estimators(current))))
+
+
+def contains_catboost(estimator: Any) -> bool:
     """True if a CatBoost model is anywhere in ``estimator``.
 
-    Looks through pipeline steps (any position) and estimator-valued params
-    (``GridSearchCV.estimator``, wrappers), the same way :func:`limit_estimator_threads`
-    walks them.
+    Walks the same structure :func:`limit_estimator_threads` caps: pipeline steps in
+    any position, estimator-valued params and ensembles' ``estimators`` lists.
     """
-    if (type(estimator).__module__ or "").startswith("catboost"):
-        return True
-    if _depth > 6:
-        return False
-    steps = getattr(estimator, "steps", None)
-    if isinstance(steps, list):
-        return any(
-            step is not None and step != "passthrough" and contains_catboost(step, _depth + 1)
-            for _name, step in steps
-        )
-    if not hasattr(estimator, "get_params") or isinstance(estimator, type):
-        return False
     return any(
-        hasattr(value, "get_params")
-        and not isinstance(value, type)
-        and contains_catboost(value, _depth + 1)
-        for value in estimator.get_params(deep=False).values()
+        (type(est).__module__ or "").startswith("catboost") for est in _walk_estimators(estimator)
     )
 
 
 def _set_threads(est: Any, n_threads: int) -> None:
-    """Set the thread count on one estimator (and on the steps of a pipeline) in place."""
-    steps = getattr(est, "steps", None)
-    if isinstance(steps, list):
-        for _name, step in steps:
-            if step is not None and step != "passthrough":
-                _set_threads(step, n_threads)
-        return
-    if not hasattr(est, "get_params") or not hasattr(est, "set_params"):
-        return
-    module = type(est).__module__ or ""
-    if module.startswith("imblearn"):
-        # Resamplers' n_jobs is deprecated and irrelevant to the thread budget.
-        return
-    if module.startswith("catboost"):
-        est.set_params(thread_count=n_threads)
-        return
-    params = est.get_params(deep=False)
-    if "n_jobs" in params:
-        est.set_params(n_jobs=n_threads)
-    # Wrappers (wavelength-subset / preprocessing wrappers, meta-estimators) hold the
-    # model as a param; sklearn.clone has already copied it, so cap it in place.
-    for value in params.values():
-        if (
-            hasattr(value, "get_params")
-            and hasattr(value, "set_params")
-            and not isinstance(value, type)
-        ):
-            _set_threads(value, n_threads)
+    """Set the thread count on ``est`` and on every estimator nested in it, in place.
+
+    ``sklearn.clone`` (in :func:`limit_estimator_threads`) has already deep-copied the
+    nested estimators, so capping them in place never touches the caller's object.
+    """
+    for current in _walk_estimators(est):
+        if not hasattr(current, "set_params"):
+            continue
+        module = type(current).__module__ or ""
+        if module.startswith("imblearn"):
+            # Resamplers' n_jobs is deprecated and irrelevant to the thread budget.
+            continue
+        if module.startswith("catboost"):
+            current.set_params(thread_count=n_threads)
+            continue
+        if "n_jobs" in current.get_params(deep=False):
+            current.set_params(n_jobs=n_threads)
 
 
 def limit_estimator_threads(estimator: Any, n_threads: int | None) -> Any:
@@ -381,8 +407,8 @@ def native_thread_limit(n_threads: int, user_api: str) -> Iterator[None]:
     Raises:
         ValueError: If ``n_threads`` is below 1.
     """
-    if n_threads < 1:
-        raise ValueError(f"n_threads must be >= 1, got {n_threads}")
+    if isinstance(n_threads, bool) or not isinstance(n_threads, int) or n_threads < 1:
+        raise ValueError(f"n_threads must be an int >= 1, got {n_threads!r}")
     with _LIMIT_LOCK:
         state = _ACTIVE_LIMITS.get(user_api)
         narrowed = _controller(user_api).select(user_api=user_api)
@@ -392,7 +418,20 @@ def native_thread_limit(n_threads: int, user_api: str) -> Iterator[None]:
                 "originals": narrowed.limit(limits=n_threads),
             }
         state["limits"].append(n_threads)
-        narrowed.limit(limits=min(state["limits"]))
+        try:
+            narrowed.limit(limits=min(state["limits"]))
+        except BaseException:
+            # Roll back so a failed enter leaves no stale (stricter) cap behind.
+            state["limits"].remove(n_threads)
+            try:
+                if state["limits"]:
+                    narrowed.limit(limits=min(state["limits"]))
+                else:
+                    state["originals"].restore_original_limits()
+            finally:
+                if not state["limits"]:
+                    del _ACTIVE_LIMITS[user_api]
+            raise
     try:
         yield
     finally:

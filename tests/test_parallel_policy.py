@@ -178,15 +178,73 @@ def test_contains_catboost_sees_wrapped_and_non_terminal_models():
     )
 
 
-def test_spa_seed_pool_is_physical_cores_with_capped_blas(cores):
+def test_spa_seed_pool_is_physical_cores_with_capped_blas(cores, monkeypatch):
+    import joblib
+
     from spectral_predict.variable_selection import _spa_seed_plan
 
+    # Pin both counts: pool_workers also reads joblib's logical CPU count, which is
+    # 4 on CI runners.
+    monkeypatch.setattr(joblib, "effective_n_jobs", lambda n: 24)
     cores(24)
     plan = _spa_seed_plan()
     assert plan.backend == "threading" and plan.n_jobs == 8 and plan.model_threads == 3
-    cores(4)
+    monkeypatch.setattr(joblib, "effective_n_jobs", lambda n: 8)
+    cores(4)  # 4 cores / 8 hyper-threads
     plan = _spa_seed_plan()
     assert plan.n_jobs == 4 and plan.n_jobs * plan.model_threads <= 4
+
+
+def _ensembles_with(model):
+    from sklearn.ensemble import StackingRegressor, VotingRegressor
+    from sklearn.linear_model import Ridge
+
+    return [
+        VotingRegressor([("cb", model), ("ridge", Ridge())], n_jobs=-1),
+        StackingRegressor([("cb", model), ("ridge", Ridge())], final_estimator=Ridge()),
+        Pipeline([("scaler", StandardScaler()), ("vote", VotingRegressor([("m", model)]))]),
+    ]
+
+
+@pytest.mark.parametrize("idx", range(3))
+def test_ensemble_wrapped_catboost_is_found_and_capped(idx):
+    catboost = pytest.importorskip("catboost")
+    cb = catboost.CatBoostRegressor(verbose=False, allow_writing_files=False)
+    wrapper = _ensembles_with(cb)[idx]
+    assert parallel_policy.contains_catboost(wrapper)
+
+    capped = limit_estimator_threads(wrapper, 2)
+    nested = [
+        e
+        for e in parallel_policy._walk_estimators(capped)
+        if type(e).__module__.startswith("catboost")
+    ]
+    assert nested and all(e.get_params()["thread_count"] == 2 for e in nested)
+    assert cb.get_params().get("thread_count") is None  # the caller's model is untouched
+
+
+@pytest.mark.parametrize("idx", range(3))
+def test_ensemble_wrapped_n_jobs_models_are_capped(idx):
+    wrapper = _ensembles_with(RandomForestRegressor(n_jobs=-1))[idx]
+    assert not parallel_policy.contains_catboost(wrapper)
+    capped = limit_estimator_threads(wrapper, 3)
+    forests = [
+        e for e in parallel_policy._walk_estimators(capped) if isinstance(e, RandomForestRegressor)
+    ]
+    assert forests and all(f.n_jobs == 3 for f in forests)
+
+
+def test_long_wrapper_chain_is_walked_to_the_bottom():
+    from sklearn.compose import TransformedTargetRegressor
+
+    model = RandomForestRegressor(n_jobs=-1)
+    for _ in range(10):  # deeper than the old depth cap
+        model = TransformedTargetRegressor(regressor=model)
+    capped = limit_estimator_threads(model, 1)
+    forests = [
+        e for e in parallel_policy._walk_estimators(capped) if isinstance(e, RandomForestRegressor)
+    ]
+    assert len(forests) == 1 and forests[0].n_jobs == 1
 
 
 def test_caller_sized_pools_are_capped_at_physical_cores(cores, monkeypatch):
@@ -409,10 +467,55 @@ def test_cross_api_overlap_from_two_threads_never_clobbers(raised_blas):
     assert _openmp_threads() == {3}
 
 
-def test_cap_below_one_is_rejected():
+@pytest.mark.parametrize("bad", [0, -1, None, "auto", 2.0, True])
+def test_cap_must_be_an_int_of_at_least_one(bad):
     with pytest.raises(ValueError):
-        with parallel_policy.native_thread_limit(0, "blas"):
+        with parallel_policy.native_thread_limit(bad, "blas"):
             pass
+    assert "blas" not in parallel_policy._ACTIVE_LIMITS
+
+
+class _FailingLimits:
+    """Narrowed-controller stand-in: the first ``ok`` limit() calls succeed."""
+
+    def __init__(self, ok: int):
+        self.ok, self.calls, self.restored = ok, 0, False
+
+    def select(self, user_api):
+        return self
+
+    def limit(self, limits):
+        self.calls += 1
+        if self.calls > self.ok:
+            raise OSError("set_num_threads failed")
+        return self
+
+    def restore_original_limits(self):
+        self.restored = True
+
+
+def test_failed_first_enter_rolls_back_completely(monkeypatch):
+    fake = _FailingLimits(ok=1)  # records originals, then the apply fails
+    monkeypatch.setattr(parallel_policy, "_controller", lambda api: fake)
+    with pytest.raises(OSError):
+        with parallel_policy.native_thread_limit(2, "fake-api"):
+            pytest.fail("body must not run")
+    assert fake.restored
+    assert "fake-api" not in parallel_policy._ACTIVE_LIMITS
+
+
+def test_failed_nested_enter_keeps_the_outer_cap(raised_openmp, monkeypatch):
+    with parallel_policy.native_thread_limit(2, "openmp"):
+        real_controller = parallel_policy._controller
+        monkeypatch.setattr(parallel_policy, "_controller", lambda api: _FailingLimits(ok=0))
+        with pytest.raises(OSError):
+            with parallel_policy.native_thread_limit(1, "openmp"):
+                pytest.fail("body must not run")
+        monkeypatch.setattr(parallel_policy, "_controller", real_controller)
+        assert parallel_policy._ACTIVE_LIMITS["openmp"]["limits"] == [2]
+        assert _openmp_threads() == {2}
+    assert _openmp_threads() == {3}
+    assert "openmp" not in parallel_policy._ACTIVE_LIMITS
 
 
 def test_one_class_cv_runs_under_openmp_cap(monkeypatch, raised_openmp):

@@ -1148,3 +1148,10 @@ the same folds, as for PLS LV selection. Implemented on branch fix/booster-early
   bit-identical on example data). Notes: `plan_cv(requested_n_jobs=0)` now raises; a single non-tiny split keeps the
   estimator's own n_jobs, so LightGBM/XGBoost may differ in the last bits from a 1-thread fit; the GUI fixture's raw
   `after cancel` leaves one Tcl command per cancelled callback registered until its widget dies.
+- **Review round 3 (DeepSeek):** (1) a policy test that pins `physical_cores` must also pin
+  `joblib.effective_n_jobs` - `pool_workers` reads the real logical count (4 on CI runners). (2) VotingRegressor /
+  StackingRegressor keep their models in list-valued `estimators` params, which a "values with get_params" walk skips,
+  so a wrapped CatBoost kept `thread_count=None`. `_set_threads` and `contains_catboost` now share one walker
+  (`_sub_estimators` / `_walk_estimators`) that also reads `(name, estimator)` lists, tuples and dicts, with an
+  id-visited set instead of a depth cap. (3) `native_thread_limit` rolls back its bookkeeping if applying the cap
+  fails on enter, and rejects non-int / < 1 thread counts with ValueError.
