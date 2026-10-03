@@ -4,7 +4,7 @@
 
 ## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-27)
 
-### 0. IN PROGRESS (2026-10-02): Wave 1 + Wave 2 fixes, 8 of 11 branches merged — HAND-OFF
+### 0. IN PROGRESS (2026-10-02): Wave 1 + Wave 2 fixes, 9 of 11 branches merged — HAND-OFF
 Every Wave 1/2 item was cross-checked by Codex gpt-6-astra and GLM 5.3 before fixing. User decisions: booster tree
 count = one value from the pooled CV curve; chemometrics validation conventions (CLAUDE.md).
 **Merged:** #83 fix/ct-honest-labels; #84 fix/ensemble-cv (wrappers now in `model_wrappers.py`); #85 feat/dpi-fonts; #86 fix/contaminant-maths (QW3, QW6; auto EPO count
@@ -14,14 +14,13 @@ carried through every tab; comma files dot-decimal + warning).
 #88 fix/wavelength-mapping (R009/R031/R016: tolerant wavelength matching everywhere incl. model_wrappers;
 encoders decode only when owned); #89 fix/ytransform-save (Tab 7 saves/exports the trained model: Y-transform,
 bias correction bound by token, frozen refit inputs, atomic RefinedState); #90 fix/preexisting-test-export (multiclass GUI test fake Thread;
-code export without CV / imbalance / plot fixes; PLS + regression imbalance sample_weight still open).
+code export without CV / imbalance / plot fixes; PLS + regression imbalance sample_weight still open); #91 fix/classification-metrics (one label rule
+`scoring.classification_fit_labels` in every engine; pooled CV metrics; regression FoM).
 **Reviewers:** Codex is reset but reserved for MAJOR checks only (user, 2026-10-03); routine confirms use GLM 5.3 + DeepSeek (deepseek-flash; Pro only if the
 user says "pro") stand in. opencode prompts must forbid shell redirection, writes, and reads outside the repo, and
 demand a verdict even if a tool call is rejected. Merge rule: well-reviewed PR → merge origin/main into branch, test,
 `gh pr create`, `gh pr merge N --merge --match-head-commit <full sha>`.
 **Open branches** (pushed to origin as backup; worktrees under `.claude/worktrees/agent-*`), state at hand-off:
-- `fix/classification-metrics` e5e012e — round 4 done (`scoring.classification_fit_labels`); GLM + DeepSeek pending.
-  At merge with booster branch keep `|labels=` after `|boost_rounds=`; on "resume declined" KEEP the run record.
 - `fix/booster-early-stopping` — round 3 in progress (Codex r3 BLOCK: export metrics before truncation; CatBoost auto
   LR replaced by 0.1 in rebuild/export; sanitize None breaks clone; resume flag; ensemble rebuild via truncation).
   Reconcile with fix/ytransform-save: Tab 7 y-transform k read off transformed-y curve vs final fit on raw y (~41998).
@@ -31,6 +30,9 @@ demand a verdict even if a tool call is rejected. Merge rule: well-reviewed PR �
 - `perf/thread-budget` c53c6f2 — GLM r2 MWF (GA candidate pool lacks CatBoost-serial rule; `native_thread_limit`
   cross-API restore via `restore_original_limits()` clobbers other APIs; stricter nested exit never re-loosens);
   DeepSeek r2 pending; then fix round + merge main.
+Known on main: `tests/gui/test_tab7_correction_binding.py::test_double_click_during_refit_keeps_selection_and_run_uses_a`
+(from #89) fails after test_multiclass_gui (Results tree rows left over) and hangs alone (real validation curve);
+fix in progress on `fix/tab7-test-isolation`.
 **Open questions for the user:** Import rounds wavelengths to integers and refuses sub-unit spacing (FTIR?); comma
 ASCII files default to dot-decimal with a warning (my call); advisory EPO count (my call); delete stray GLM temp files
 in %TEMP% (diff.txt, gui_f359708.py, opencodeepo_*).
