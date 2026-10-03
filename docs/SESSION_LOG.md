@@ -831,6 +831,11 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
     `plot_state = self._refined_state` for itself and its callbacks.
   - The Export dialog shows and exports the snapshot taken when it opened; `do_export` refuses if the current
     token is no longer that snapshot's.
+- **Review round 6 (DeepSeek MERGE-WITH-FIXES):** helpers called FROM the worker count too:
+  `_parse_wavelength_spec` read the live `_original_wavelength_order`; it now takes `original_order` (worker passes
+  its frozen copy; None or [] = available order). Plot callbacks no longer fall back to the live `self.y.index`
+  (no specimen IDs in the run = nothing offered). GA inputs are stored via `root.after` (`_store_ga_inputs`),
+  not from the worker. Captured frames are `copy(deep=False)`: shares data under pandas CoW, freezes the object.
 - **Merge / follow-up items (not fixed here):**
   - R015: the bundle export ships already-preprocessed `refined_X_train` but its script preprocesses again
     (pre-existing; still true with the Y-transform wrapper).

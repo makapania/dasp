@@ -760,3 +760,87 @@ def test_one_class_save_and_export_ignore_switched_row(gui_app, tmp_path):
     assert cfg["params"] == {"nu": 0.1}
     assert cfg["polyorder"] == 2
     assert cfg["inlier_class_label"] == "good"
+
+
+# --- Round 6 ---------------------------------------------------------------------------
+
+
+def _set_wl_spec(app, text: str) -> None:
+    app.refine_wl_spec.delete("1.0", "end")
+    app.refine_wl_spec.insert("1.0", text)
+
+
+def test_worker_ignores_wavelength_order_changed_mid_run(gui_app, deferred_refits):
+    """DeepSeek round 6: the spec parser used the live _original_wavelength_order."""
+    X_df, _ = _refit(gui_app, "PLS", "None", subset=True)
+    all_wl = [float(c) for c in X_df.columns]
+    in_range = [w for w in all_wl if 1200.0 <= w <= 1400.0]
+    try:
+        _set_wl_spec(gui_app, "1200-1400")
+        gui_app._original_wavelength_order = []  # empty: the worker parses the spec text
+        gui_app._run_refined_model()  # inputs frozen, worker deferred
+        # Mid-run, a variable-selection order appears (reversed, and only 5 wavelengths).
+        gui_app._original_wavelength_order = list(reversed(in_range))[:5]
+        target, args = deferred_refits[0]
+        with contextlib.redirect_stdout(io.StringIO()):
+            target(*args)
+        gui_app.root.update()
+        assert gui_app.refined_wavelengths == in_range
+    finally:
+        _set_wl_spec(gui_app, "")
+        gui_app._original_wavelength_order = None
+
+
+def test_plot_click_without_run_specimen_ids_offers_nothing(gui_app, monkeypatch):
+    """No pairing of a run's CV indices with the live self.y.index (round 6)."""
+    import types
+
+    import matplotlib.backend_bases as backend_bases
+    from matplotlib.axes import Axes
+
+    _refit(gui_app, "PLS", "None", subset=True)
+    state = _state_fields(gui_app)
+    state.update(specimen_ids=None)
+    gui_app._publish_refined_state(state)
+    st = gui_app._refined_state
+
+    callbacks = []
+    real_connect = backend_bases.FigureCanvasBase.mpl_connect
+
+    def _record(canvas, name, func):
+        callbacks.append((name, func))
+        return real_connect(canvas, name, func)
+
+    monkeypatch.setattr(backend_bases.FigureCanvasBase, "mpl_connect", _record)
+    offered = []
+    monkeypatch.setattr(
+        gui_app, "_show_exclude_button", lambda _f, label, *a: offered.append(label)
+    )
+    monkeypatch.setattr(gui_app, "_create_or_update_annotation", lambda *a, **k: None)
+    gui_app._plot_regression_predictions()
+    click = [f for n, f in callbacks if n == "button_press_event"][-1]
+    ax = next(
+        c.cell_contents
+        for c in click.__closure__
+        if isinstance(getattr(c, "cell_contents", None), Axes)
+    )
+    click(types.SimpleNamespace(inaxes=ax, xdata=st.y_true[2], ydata=st.y_pred[2], button=1))
+    assert offered == []
+
+
+def test_captured_frames_are_frozen_shallow_copies(gui_app):
+    """Round 6: captured frames share data (no memory cost) but ignore in-place edits."""
+    X_df, _ = _refit(gui_app, "PLS", "None", subset=True)
+    inputs = gui_app._capture_refit_inputs()
+    captured = inputs["X"]
+    assert captured is not gui_app.X
+    assert np.shares_memory(captured.to_numpy(), gui_app.X.to_numpy())
+
+    original_columns = list(captured.columns)
+    gui_app.X.columns = [f"w{i}" for i in range(gui_app.X.shape[1])]  # in-place edit
+    gui_app.X.iloc[0, 0] = 1e9
+    try:
+        assert list(captured.columns) == original_columns
+        assert captured.iloc[0, 0] != 1e9
+    finally:
+        gui_app.X = X_df

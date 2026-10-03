@@ -37294,8 +37294,7 @@ Performance (Classification):
 
         # Resolve specimen IDs for label-based metadata/set lookup
         specimen_ids = plot_state.get('specimen_ids')
-        if specimen_ids is None and plot_state.get('cv_indices') is not None and self.y is not None:
-            specimen_ids = self.y.index[plot_state.get('cv_indices')].tolist()
+        # No fallback to the live self.y.index: it may belong to another dataset
 
         # Resolve color values using shared helper
         color_values, is_categorical, color_label = self._resolve_cv_color_values(
@@ -37422,9 +37421,12 @@ Performance (Classification):
                     residual = y_actual - y_predicted
 
                     # Get specimen label for exclusion
-                    specimen_label = (plot_state.get('specimen_ids')[nearest_idx]
-                                     if plot_state.get('specimen_ids') is not None
-                                     else self.y.index[original_idx])
+                    # This plot's run only (R010): never pair its CV indices with the live
+                    # self.y.index, which may be another dataset's.
+                    specimen_ids_ = plot_state.get('specimen_ids')
+                    if specimen_ids_ is None:
+                        return
+                    specimen_label = specimen_ids_[nearest_idx]
 
                     if event.button == 1:  # Left click - annotation + exclude button
                         extra_info = {
@@ -38412,8 +38414,7 @@ F1 Score:  {f1:.4f}
 
         # Resolve specimen IDs for label-based metadata/set lookup
         specimen_ids = plot_state.get('specimen_ids')
-        if specimen_ids is None and plot_state.get('cv_indices') is not None and self.y is not None:
-            specimen_ids = self.y.index[plot_state.get('cv_indices')].tolist()
+        # No fallback to the live self.y.index: it may belong to another dataset
 
         # Resolve color values using shared helper
         color_values, is_categorical, color_label = self._resolve_cv_color_values(
@@ -38492,9 +38493,12 @@ F1 Score:  {f1:.4f}
                 residual_val = residuals[nearest_idx]
 
                 # Get specimen label for exclusion
-                specimen_label = (plot_state.get('specimen_ids')[nearest_idx]
-                                 if plot_state.get('specimen_ids') is not None
-                                 else self.y.index[original_idx])
+                # This plot's run only (R010): never pair its CV indices with the live
+                # self.y.index, which may be another dataset's.
+                specimen_ids_ = plot_state.get('specimen_ids')
+                if specimen_ids_ is None:
+                    return
+                specimen_label = specimen_ids_[nearest_idx]
 
                 if event.button == 1:  # Left click
                     extra_info = {
@@ -38536,9 +38540,12 @@ F1 Score:  {f1:.4f}
                 residual_val = residuals[bar_idx]
 
                 # Get specimen label for exclusion
-                specimen_label = (plot_state.get('specimen_ids')[bar_idx]
-                                 if plot_state.get('specimen_ids') is not None
-                                 else self.y.index[original_idx])
+                # This plot's run only (R010): never pair its CV indices with the live
+                # self.y.index, which may be another dataset's.
+                specimen_ids_ = plot_state.get('specimen_ids')
+                if specimen_ids_ is None:
+                    return
+                specimen_label = specimen_ids_[bar_idx]
 
                 if event.button == 1:  # Left click
                     extra_info = {
@@ -38906,9 +38913,12 @@ F1 Score:  {f1:.4f}
                 original_idx = plot_state.get('cv_indices')[nearest_idx]
                 y_value = plot_state.get('y_true')[nearest_idx] if plot_state.get('y_true') is not None else None
                 leverage_val = leverage[nearest_idx]
-                specimen_label = (plot_state.get('specimen_ids')[nearest_idx]
-                                  if plot_state.get('specimen_ids') is not None
-                                  else self.y.index[original_idx])
+                # This plot's run only (R010): never pair its CV indices with the live
+                # self.y.index, which may be another dataset's.
+                specimen_ids_ = plot_state.get('specimen_ids')
+                if specimen_ids_ is None:
+                    return
+                specimen_label = specimen_ids_[nearest_idx]
 
                 # Determine leverage category
                 if leverage_val > threshold_3p:
@@ -39836,6 +39846,12 @@ F1 Score:  {f1:.4f}
         if self.refined_model is not None and self._refined_model_token is not None:
             self._set_refit_dependent_buttons('normal')
 
+    def _store_ga_inputs(self, genes, config, model_type) -> None:
+        """Remember a GA wavelength selection as input for later runs (Tk thread)."""
+        self.refined_ga_genes = genes
+        self.refined_ga_config = config
+        self.refined_ga_model_type = model_type
+
     def _capture_refit_inputs(self) -> dict:
         """Freeze everything a Model Development run reads, on the Tk thread (R010/R050).
 
@@ -39848,6 +39864,14 @@ F1 Score:  {f1:.4f}
         def _copy(value):
             if isinstance(value, (list, set, dict)):
                 return type(value)(value)
+            return value
+
+        def _frame(value):
+            # Shallow copy: shares the data (no memory cost; pandas copy-on-write keeps
+            # it shared until written) but freezes the object against later in-place
+            # edits of the live frame (index/column/value changes).
+            if isinstance(value, (pd.DataFrame, pd.Series)):
+                return value.copy(deep=False)
             return value
 
         model_widget = self.refine_model_type.get()
@@ -39882,13 +39906,13 @@ F1 Score:  {f1:.4f}
             'training': training,
             'row': training['row'],
             'loaded_model_config': dict(loaded) if loaded else None,
-            'X': self.X,
-            'X_original': self.X_original,
-            'y': self.y,
+            'X': _frame(self.X),
+            'X_original': _frame(self.X_original),
+            'y': _frame(self.y),
             'active_indices': _copy(self.active_indices),
             'excluded_spectra': _copy(self.excluded_spectra),
-            'validation_X': self.validation_X,
-            'validation_y': self.validation_y,
+            'validation_X': _frame(self.validation_X),
+            'validation_y': _frame(self.validation_y),
             'validation_indices': training['validation_indices'],
             'original_wavelength_order': _copy(self._original_wavelength_order),
             'model_loaded_from_results': self.model_loaded_from_results,
@@ -39965,7 +39989,10 @@ F1 Score:  {f1:.4f}
             else:
                 # No stored order (user edited manually or full spectrum) - parse as usual
                 print(f"DEBUG: No stored wavelength order - parsing spec text")
-                selected_wl = self._parse_wavelength_spec(wl_spec_text, available_wl)
+                selected_wl = self._parse_wavelength_spec(
+                    wl_spec_text, available_wl,
+                    original_order=run_inputs['original_wavelength_order'],
+                )
 
             print(f"DEBUG: Parsed wavelengths: {len(selected_wl)} total")
             print(f"DEBUG: First 10 parsed: {selected_wl[:10]}")
@@ -41462,10 +41489,14 @@ F1 Score:  {f1:.4f}
                         best_genes = ga_result['best_genes']
                         ga_config = ga_result.get('ga_config', {})
 
-                        # Store GA state for future use
-                        self.refined_ga_genes = best_genes
-                        self.refined_ga_config = ga_config
-                        self.refined_ga_model_type = model_name
+                        # Store GA state for future use -- on the Tk thread, where the
+                        # next run's inputs are captured (R010), not from this worker.
+                        self.root.after(
+                            0,
+                            lambda g=best_genes, c=ga_config, m=model_name: (
+                                self._store_ga_inputs(g, c, m)
+                            ),
+                        )
                         run_ga_genes, run_ga_config, run_ga_model_type = (
                             best_genes, ga_config, model_name
                         )
@@ -43380,9 +43411,13 @@ External Validation Performance (n={n_val}):
 
         return ", ".join(ranges)
 
-    def _parse_wavelength_spec(self, spec_text, available_wavelengths):
+    def _parse_wavelength_spec(self, spec_text, available_wavelengths, original_order=_UNSET):
         """
         Parse wavelength specification string into list of wavelengths.
+
+        ``original_order`` is the stored variable-selection order to keep; by default
+        the live ``self._original_wavelength_order``. The refit worker passes its frozen
+        copy (R010). None or an empty list means: keep the available-wavelength order.
 
         Format: "1920, 1930-1940, 1950, 1960-2000"
         - Individual wavelengths: 1920, 1950
@@ -43443,10 +43478,12 @@ External Validation Performance (n={n_val}):
         selected_set = set(float(wl) for wl in selected)
 
         # If we have stored order from variable selection, use it
-        if self._original_wavelength_order is not None:
-            print(f"DEBUG: Using stored wavelength order from variable selection (n={len(self._original_wavelength_order)})")
+        if original_order is _UNSET:
+            original_order = self._original_wavelength_order
+        if original_order:  # None or [] -> available-wavelength order (as the worker)
+            print(f"DEBUG: Using stored wavelength order from variable selection (n={len(original_order)})")
             # Convert stored order to Python floats for consistent comparison
-            original_floats = [float(wl) for wl in self._original_wavelength_order]
+            original_floats = [float(wl) for wl in original_order]
             selected = [wl for wl in original_floats if wl in selected_set]
             print(f"DEBUG: After filtering, {len(selected)} wavelengths remain")
         else:
