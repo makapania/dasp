@@ -75,7 +75,14 @@ from spectral_predict.wavelength_matching import format_wavelength_list
 from spectral_predict.variable_selection import (
     spa_selection, uve_selection, cars_selection, _cap_top_n
 )
-from spectral_predict.scoring import compute_cv_anova_pvalue, compute_specificity, lins_ccc
+from spectral_predict.scoring import (
+    align_proba_to_classes,
+    classification_metrics,
+    compute_cv_anova_pvalue,
+    compute_specificity,
+    lins_ccc,
+    regression_figures_of_merit,
+)
 from spectral_predict.search_spaces import (
     BundleSpec,
     ExtraAxesConfigError,
@@ -245,6 +252,14 @@ def _environment_digest(environment: Optional[Dict[str, Any]] = None) -> str:
 
 def _supports_early_stopping(model_name: str) -> bool:
     return model_name in _EARLY_STOPPING_MODELS
+
+
+# Study-name segment for classification studies whose numeric labels are not
+# already 0..K-1. Before 2026-10 every classification target was re-coded to
+# 0..K-1 before fitting; from "raw1" numeric labels are fitted as given (XGBoost
+# excepted), which changes PLS-DA trial scores. The segment keeps old trials
+# from being resumed alongside new ones; all other study names are unchanged.
+LABEL_FIT_POLICY = "raw1"
 
 
 def _capture_serializable_params(model) -> Optional[Dict[str, Any]]:
@@ -1146,6 +1161,7 @@ def create_unified_objective(
     y_original: np.ndarray | None = None,
     seen_fingerprints: Optional[Dict[tuple, tuple]] = None,
     resolved_extra_axes: Tuple[BundleSpec, ...] = (),
+    label_classes: np.ndarray | None = None,
 ) -> Callable[[Trial], float]:
     """Create objective function for Optuna optimization.
 
@@ -1201,6 +1217,11 @@ def create_unified_objective(
         selection method. Coerced to False for ``task_type='one_class'``
         with a warning (UVE on y_oc is a discrimination method, not a
         one-class method per CLAUDE.md:66 / Pomerantsev et al. 2025 LOVE).
+    label_classes : np.ndarray, optional
+        Classification only. When set, ``y`` holds 0..K-1 codes into these
+        sorted user labels (XGBoost cannot fit anything else); predictions and
+        references are decoded back to the user's labels before any metric so
+        every engine scores in the same label space.
 
     Returns
     -------
@@ -1871,14 +1892,17 @@ def create_unified_objective(
                         )
                         trial.set_user_attr('cv_anova_pvalue', cv_anova_p)
 
-                # Compute additional NIR spectroscopy metrics from CV predictions
-                mae_cv = mean_absolute_error(y, y_pred_cv)
-                bias_cv = float(np.mean(y_pred_cv - y))
-                y_std = float(np.std(y))
-                y_range = float(np.ptp(y))
-                rpd = y_std / rmse if rmse > 0 else 0.0
-                rer = y_range / rmse if rmse > 0 else 0.0
-                ccc_cv = lins_ccc(y, y_pred_cv)
+                # Additional NIR figures of merit from the pooled CV predictions,
+                # same function and definitions as the grid search
+                # (scoring.regression_figures_of_merit; perfect model -> RPD inf).
+                fom_cv = regression_figures_of_merit(y, y_pred_cv, context="cv")
+                mae_cv = fom_cv["MAE"]
+                bias_cv = fom_cv["Bias"]
+                rpd = fom_cv["RPD"]
+                rer = fom_cv["RER"]
+                secv = fom_cv["SEP"]
+                rpiq = fom_cv["RPIQ"]
+                ccc_cv = fom_cv["CCC"]
 
                 # Compute regional RMSE (per-quartile performance) for coloring in Results tab
                 # This enables the same quartile-based highlighting as Grid search
@@ -1936,71 +1960,44 @@ def create_unified_objective(
                             model, X_final, y, cv=cv, method='predict_proba', n_jobs=n_jobs_cv,
                             fit_params=_cv_fit_params,
                         )
-                    n_classes = len(np.unique(y))
-                    if n_classes == 2:
-                        # Binary classification
-                        roc_auc = roc_auc_score(y, y_proba[:, 1])
-                    else:
-                        # Multiclass - use weighted average
-                        roc_auc = roc_auc_score(y, y_proba, multi_class='ovr', average='weighted')
+                except Exception as e:
+                    logger.debug(f"Bayesian CV predict_proba unavailable: {e}")
+                    y_proba = None
 
-                    # Compute Log Loss from probabilities
-                    try:
-                        logloss_cv = log_loss(y, y_proba)
-                    except Exception:
-                        logloss_cv = np.nan
-                except Exception:
-                    roc_auc = np.nan
-                    logloss_cv = np.nan
+                # XGBoost was fitted on 0..K-1 codes: score in the user's labels
+                # (probability columns are already in sorted-label order).
+                if label_classes is not None:
+                    y_score = label_classes[np.asarray(y, dtype=int)]
+                    y_pred_cv = label_classes[np.asarray(y_pred_cv, dtype=int)]
+                else:
+                    y_score = y
 
-                # Compute additional classification metrics from CV predictions
-                # Determine averaging method (binary or macro)
-                n_classes = len(np.unique(y))
-                average_method = 'binary' if n_classes == 2 else 'macro'
-
-                try:
-                    f1_cv = f1_score(y, y_pred_cv, average=average_method, zero_division=0)
-                except Exception:
-                    f1_cv = np.nan
-
-                try:
-                    precision_cv = precision_score(y, y_pred_cv, average=average_method, zero_division=0)
-                except Exception:
-                    precision_cv = np.nan
-
-                try:
-                    recall_cv = recall_score(y, y_pred_cv, average=average_method, zero_division=0)
-                except Exception:
-                    recall_cv = np.nan
-
-                try:
-                    specificity_cv = compute_specificity(y, y_pred_cv, average='macro')
-                except Exception:
-                    specificity_cv = np.nan
-
-                try:
-                    kappa_cv = cohen_kappa_score(y, y_pred_cv)
-                except Exception:
-                    kappa_cv = np.nan
-
-                try:
-                    mcc_cv = matthews_corrcoef(y, y_pred_cv)
-                except Exception:
-                    mcc_cv = np.nan
-
-                try:
-                    balanced_acc_cv = balanced_accuracy_score(y, y_pred_cv)
-                    ber_cv = 1.0 - balanced_acc_cv
-                except Exception:
-                    balanced_acc_cv = np.nan
-                    ber_cv = np.nan
+                # All CV classification metrics from the pooled predictions with
+                # the same definitions as the grid search (scoring.
+                # classification_metrics: binary positive = second sorted class,
+                # multiclass macro; cross_val_predict columns are np.unique(y)).
+                _cv_m = classification_metrics(
+                    y_score, y_pred_cv, classes=np.unique(y_score), y_proba=y_proba
+                )
+                roc_auc = _cv_m["ROC_AUC"]
+                logloss_cv = _cv_m["LogLoss"]
+                f1_cv = _cv_m["F1"]
+                precision_cv = _cv_m["Precision"]
+                recall_cv = _cv_m["Recall"]
+                specificity_cv = _cv_m["Specificity"]
+                kappa_cv = _cv_m["Kappa"]
+                mcc_cv = _cv_m["MCC"]
+                balanced_acc_cv = _cv_m["BalancedAcc"]
+                ber_cv = _cv_m["BER"]
 
                 # Compute per-class metrics for coloring in Results tab
                 # This enables the same class-based highlighting as Grid search
                 per_class_metrics = {}
                 class_labels = None
                 try:
-                    report = classification_report(y, y_pred_cv, output_dict=True, zero_division=0)
+                    report = classification_report(
+                        y_score, y_pred_cv, output_dict=True, zero_division=0
+                    )
                     class_labels = sorted([k for k in report.keys()
                                            if k not in ['accuracy', 'macro avg', 'weighted avg']])
                     for class_label in class_labels:
@@ -2074,86 +2071,51 @@ def create_unified_objective(
                 trial.set_user_attr('RPD', rpd)
                 trial.set_user_attr('Bias', bias_cv)
                 trial.set_user_attr('RER', rer)
+                trial.set_user_attr('SECV', secv)
+                trial.set_user_attr('RPIQ', rpiq)
                 # Regional RMSE for quartile-based coloring in Results tab
                 trial.set_user_attr('regional_rmse', regional_rmse)
                 trial.set_user_attr('y_quartiles', y_quartiles)
             else:
-                # Calibration metrics
-                cal_accuracy = accuracy_score(y, y_pred_cal)
-                trial.set_user_attr('Accuracy', cal_accuracy)    # Calibration
+                # Calibration metrics: same definitions as the CV columns and the
+                # grid search (scoring.classification_metrics). Pre-2026-10 the
+                # calibration F1/Precision/Recall were support-weighted and the
+                # multiclass AUC weighted, so F1 and F1cv were not comparable.
                 trial.set_user_attr('Accuracycv', accuracy)      # CV
-
-                # Calibration ROC AUC and Log Loss
-                try:
-                    if hasattr(model, 'predict_proba'):
-                        y_proba_cal = model.predict_proba(X_final)
-                        n_classes = len(np.unique(y))
-                        if n_classes == 2:
-                            cal_roc_auc = roc_auc_score(y, y_proba_cal[:, 1])
-                        else:
-                            cal_roc_auc = roc_auc_score(y, y_proba_cal, multi_class='ovr', average='weighted')
-                        trial.set_user_attr('ROC_AUC', cal_roc_auc)     # Calibration
-
-                        # Calibration Log Loss
-                        try:
-                            cal_logloss = log_loss(y, y_proba_cal)
-                            trial.set_user_attr('LogLoss', cal_logloss)
-                        except Exception:
-                            trial.set_user_attr('LogLoss', np.nan)
-                    else:
-                        trial.set_user_attr('LogLoss', np.nan)
-                except Exception:
-                    trial.set_user_attr('ROC_AUC', np.nan)
-                    trial.set_user_attr('LogLoss', np.nan)
-
+                _cal_classes = np.unique(y)
+                y_proba_cal = None
+                if hasattr(model, 'predict_proba'):
+                    try:
+                        y_proba_cal = align_proba_to_classes(
+                            model.predict_proba(X_final),
+                            getattr(model, 'classes_', None),
+                            _cal_classes,
+                        )
+                    except Exception as e:
+                        logger.debug(f"Bayesian calibration predict_proba unavailable: {e}")
+                if label_classes is not None:  # XGBoost codes -> user labels
+                    _cal_m = classification_metrics(
+                        label_classes[np.asarray(y, dtype=int)],
+                        label_classes[np.asarray(y_pred_cal, dtype=int)],
+                        classes=label_classes,
+                        y_proba=y_proba_cal,
+                    )
+                else:
+                    _cal_m = classification_metrics(
+                        y, y_pred_cal, classes=_cal_classes, y_proba=y_proba_cal
+                    )
+                trial.set_user_attr('Accuracy', _cal_m['Accuracy'])    # Calibration
+                trial.set_user_attr('ROC_AUC', _cal_m['ROC_AUC'])
+                trial.set_user_attr('LogLoss', _cal_m['LogLoss'])
                 trial.set_user_attr('ROC_AUCcv', roc_auc)          # CV
-
-                # Calibration F1, Precision, Recall
-                try:
-                    cal_f1 = f1_score(y, y_pred_cal, average='weighted', zero_division=0)
-                    trial.set_user_attr('F1', cal_f1)
-                except Exception:
-                    trial.set_user_attr('F1', np.nan)
-
-                try:
-                    cal_precision = precision_score(y, y_pred_cal, average='weighted', zero_division=0)
-                    trial.set_user_attr('Precision', cal_precision)
-                except Exception:
-                    trial.set_user_attr('Precision', np.nan)
-
-                try:
-                    cal_recall = recall_score(y, y_pred_cal, average='weighted', zero_division=0)
-                    trial.set_user_attr('Recall', cal_recall)
-                except Exception:
-                    trial.set_user_attr('Recall', np.nan)
-
-                # Calibration additional metrics
-                try:
-                    cal_specificity = compute_specificity(y, y_pred_cal, average='macro')
-                    trial.set_user_attr('Specificity', cal_specificity)
-                except Exception:
-                    trial.set_user_attr('Specificity', np.nan)
-
-                try:
-                    cal_kappa = cohen_kappa_score(y, y_pred_cal)
-                    trial.set_user_attr('Kappa', cal_kappa)
-                except Exception:
-                    trial.set_user_attr('Kappa', np.nan)
-
-                try:
-                    cal_mcc = matthews_corrcoef(y, y_pred_cal)
-                    trial.set_user_attr('MCC', cal_mcc)
-                except Exception:
-                    trial.set_user_attr('MCC', np.nan)
-
-                try:
-                    cal_balanced_acc = balanced_accuracy_score(y, y_pred_cal)
-                    cal_ber = 1.0 - cal_balanced_acc
-                    trial.set_user_attr('BalancedAcc', cal_balanced_acc)
-                    trial.set_user_attr('BER', cal_ber)
-                except Exception:
-                    trial.set_user_attr('BalancedAcc', np.nan)
-                    trial.set_user_attr('BER', np.nan)
+                trial.set_user_attr('F1', _cal_m['F1'])
+                trial.set_user_attr('Precision', _cal_m['Precision'])
+                trial.set_user_attr('Recall', _cal_m['Recall'])
+                trial.set_user_attr('Specificity', _cal_m['Specificity'])
+                trial.set_user_attr('Kappa', _cal_m['Kappa'])
+                trial.set_user_attr('MCC', _cal_m['MCC'])
+                trial.set_user_attr('BalancedAcc', _cal_m['BalancedAcc'])
+                trial.set_user_attr('BER', _cal_m['BER'])
 
                 # CV metrics
                 trial.set_user_attr('F1cv', f1_cv)
@@ -2727,13 +2689,30 @@ def run_unified_bayesian(
 
     n_samples, n_features = X.shape
 
-    # Label-encode y for classification (string labels -> integers)
-    # This matches how search.py handles classification at lines 737-740
-    label_encoder = None
+    # Classification labels follow scoring.classification_fit_labels, as in the
+    # grid search and Model Development: integer-valued numeric labels (bool
+    # included) are fitted as given, because PLS-DA regresses on the label
+    # values and re-coding {1, 2, 100} to {0, 1, 2} would fit a model that Model
+    # Development and saved models (raw labels) cannot reproduce. Labels that
+    # are already 0..K-1 become the same int64 array LabelEncoder produced, so
+    # data fingerprints of existing studies still match. Text and non-integer
+    # numeric labels are label-encoded as before. XGBoost only accepts 0..K-1:
+    # it is fitted on codes and decoded back before scoring (label_classes). An
+    # XGBoost label-encoding wrapper for every engine is a follow-up.
+    label_classes = None
+    _label_fit_segment = False
     if task_type == 'classification':
-        from sklearn.preprocessing import LabelEncoder
-        label_encoder = LabelEncoder()
-        y = label_encoder.fit_transform(y)
+        from spectral_predict.scoring import classification_fit_labels
+
+        _fit_labels = classification_fit_labels(y, model_name=model_name)
+        y = _fit_labels.y_fit
+        label_classes = _fit_labels.label_classes
+        # Only studies whose fitted labels changed under this policy get the
+        # |labels= study-name segment. XGBoost ("xgb_codes") still fits exactly
+        # the codes LabelEncoder produced, so its study name and cached scores
+        # are unchanged; old trials' code-keyed per-class metrics are decoded
+        # in convert_study_to_dataframe.
+        _label_fit_segment = _fit_labels.policy == "raw"
 
     # Guard against None params
     if imbalance_params is None:
@@ -2835,6 +2814,7 @@ def run_unified_bayesian(
         y_original=y,
         seen_fingerprints=seen_fingerprints,
         resolved_extra_axes=_resolved_extra_axes,
+        label_classes=label_classes,
     )
 
     # Create TPE sampler with good defaults
@@ -2928,6 +2908,18 @@ def run_unified_bayesian(
     _space_id = canonical_space_identity(_resolved_extra_axes, search_space is not None)
     if _space_id is not None:
         config_components += f"|space={_space_id}"
+    # Numeric labels that are not 0..K-1 are now fitted as given (PLS-DA scores
+    # change), so those studies get their own name; every other study name is
+    # unchanged. Keep this segment AFTER any |boost_rounds= segment.
+    # Base of the same study's name before the label policy, so an old study can
+    # be recognised and the user told why it is not resumed.
+    _pre_label_policy_base = None
+    if _label_fit_segment:
+        _pre_label_policy_base = (
+            f"unified_bayesian_{model_name}_"
+            f"{_hashlib.sha256(config_components.encode('utf-8')).hexdigest()[:8]}"
+        )
+        config_components += f"|labels={LABEL_FIT_POLICY}"
     config_hash = _hashlib.sha256(config_components.encode("utf-8")).hexdigest()[:8]
 
     # The config hash alone is NOT sufficient identity for a resumable study.
@@ -3095,6 +3087,31 @@ def run_unified_bayesian(
                         f"{', '.join(_incompatible)}",
                         "environment_changed",
                         _incompatible,
+                    ))
+                # Studies of this configuration saved before the label policy fitted
+                # {1, 2, 100}-style labels as codes: their scores describe another
+                # model, so they are not resumed. Say so instead of starting over
+                # silently (the old study stays in the database untouched).
+                _label_policy_old = (
+                    sorted(
+                        n for n in _existing
+                        if n == _pre_label_policy_base
+                        or n.startswith(f"{_pre_label_policy_base}_")
+                    )
+                    if _pre_label_policy_base is not None
+                    else []
+                )
+                if _label_policy_old:
+                    # Names carry no data identity, so this may also be a study of
+                    # other data whose labels were 0..K-1: say only what is known.
+                    _notes.append((
+                        f"Resume declined for {model_name}: a Bayesian study with this "
+                        f"configuration but different class labels exists (for example "
+                        f"one saved before numeric class labels were fitted as given). "
+                        f"Its cached scores are NOT reused — starting a fresh study. It "
+                        f"is preserved: {', '.join(_label_policy_old)}",
+                        "label_policy_changed",
+                        _label_policy_old,
                     ))
                 if _legacy:
                     _notes.append((
@@ -3527,6 +3544,7 @@ def run_unified_bayesian(
         cv_n_repeats=cv_n_repeats,
         n_samples_used=n_samples,
         baseline_params=baseline_params,
+        label_classes=label_classes,
     )
 
     if verbose:
@@ -3584,8 +3602,14 @@ def convert_study_to_dataframe(
     cv_n_repeats: int = 5,
     n_samples_used: Optional[int] = None,
     baseline_params: dict | None = None,
+    label_classes: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Convert Optuna study to results DataFrame.
+
+    ``label_classes`` (XGBoost fitted on 0..K-1 codes of these sorted user
+    labels): per-class metric keys of trials resumed from before the label
+    policy are codes; they are decoded to user labels so every row is keyed
+    the same way.
 
     Parameters
     ----------
@@ -3712,6 +3736,8 @@ def convert_study_to_dataframe(
             row['RPD'] = trial.user_attrs.get('RPD', np.nan)
             row['Bias'] = trial.user_attrs.get('Bias', np.nan)
             row['RER'] = trial.user_attrs.get('RER', np.nan)
+            row['SECV'] = trial.user_attrs.get('SECV', np.nan)
+            row['RPIQ'] = trial.user_attrs.get('RPIQ', np.nan)
             # Regional RMSE for quartile-based coloring in Results tab
             row['regional_rmse'] = trial.user_attrs.get('regional_rmse', None)
             row['y_quartiles'] = trial.user_attrs.get('y_quartiles', None)
@@ -3776,10 +3802,22 @@ def convert_study_to_dataframe(
             row['BERcv'] = trial.user_attrs.get('BERcv', np.nan)
             row['LogLosscv'] = trial.user_attrs.get('LogLosscv', np.nan)
             # Per-class metrics for class-based coloring in Results tab
-            row['per_class_metrics'] = trial.user_attrs.get('per_class_metrics', None)
-            row['class_labels'] = trial.user_attrs.get('class_labels', None)
-            # Individual class F1 columns for display/sorting
             per_class = trial.user_attrs.get('per_class_metrics')
+            trial_class_labels = trial.user_attrs.get('class_labels', None)
+            if label_classes is not None and per_class:
+                # A trial saved before the label policy keyed its metrics by
+                # codes ("0".."K-1"); new trials use the user's labels. The two
+                # key sets differ exactly when the labels are not 0..K-1.
+                _code_keys = {str(i) for i in range(len(label_classes))}
+                _user_keys = {str(c) for c in label_classes.tolist()}
+                if set(per_class) == _code_keys and _code_keys != _user_keys:
+                    _decode = {str(i): str(c) for i, c in enumerate(label_classes.tolist())}
+                    per_class = {_decode[k]: v for k, v in per_class.items()}
+                    if trial_class_labels:
+                        trial_class_labels = [_decode.get(str(k), str(k)) for k in trial_class_labels]
+            row['per_class_metrics'] = per_class
+            row['class_labels'] = trial_class_labels
+            # Individual class F1 columns for display/sorting
             if per_class:
                 for class_label, metrics in per_class.items():
                     row[f'F1_Class{class_label}'] = metrics.get('F1', np.nan)
@@ -3863,7 +3901,8 @@ def convert_study_to_dataframe(
 
     # Performance metrics
     if task_type == 'regression':
-        perf_cols = ['RMSE', 'R2', 'RMSEcv', 'R2cv', 'MAEcv', 'RPD', 'Bias', 'RER', 'CompositeScore', 'Score']
+        perf_cols = ['RMSE', 'R2', 'RMSEcv', 'R2cv', 'MAEcv', 'RPD', 'Bias', 'RER', 'SECV', 'RPIQ',
+                     'CompositeScore', 'Score']
     elif task_type == 'one_class':
         perf_cols = [
             # Calibration metrics

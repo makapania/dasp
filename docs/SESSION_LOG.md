@@ -1405,6 +1405,83 @@ the same folds, as for PLS LV selection. Implemented on branch fix/booster-early
 - The worker's X/y realignment after preparation is gone (it was dead after round 6);
   `_prepare_calibration` records `n_realigned` and the worker logs the same warning from it.
 
+## 2026-10-02 - Classification label convention + pooled CV metrics + regression FoM (R029/R030/QW5, branch fix/classification-metrics)
+- **Label convention lives in the METRICS, not the fitted labels.** `scoring.classification_metrics` scores against the
+  sorted class list: binary positive = second sorted label, Specificity = TNR of the first, multiclass macro. Used by
+  grid folds / pooled CV / calibration / `compute_validation_metrics_for_top_models`, Bayesian and NSGA-II CV +
+  calibration, Model Development (CV, calibration, holdout, confusion panel) and the class-specialist ensemble CV F1.
+- **Gotcha (review round 1, Codex HIGH): do NOT re-code numeric labels before fitting.** The first commit encoded
+  every target to 0..K-1 in run_search; PLS-DA regresses on the label VALUES, so {1,2,100} gave a different model
+  from Model Development / the validation helper / saved models, which refit the raw labels (CV acc 0.78 vs 0.83).
+  run_search again fits the user's labels (text labels label-encoded, as before); only metrics apply the convention.
+- **Gotcha: sklearn `cross_val_predict(method="predict_proba")` label-encodes y before fitting.** For PLS-DA with
+  unevenly spaced numeric labels this fits a DIFFERENT model from `method="predict"` (or from a manual fold loop on
+  raw labels). Compare against a manual fold loop, not cross_val_predict proba, when labels are not 0..K-1.
+- **Gotcha: `model_io.save_model` with a LabelEncoder fitted on NUMERIC labels fails** (`label_mapping` has np.int64
+  keys -> json TypeError). Being fixed on fix/wavelength-mapping; not touched here.
+- **R030:** headline CV classification metrics are always computed from pooled out-of-fold predictions. Folds now
+  return `y_proba` aligned to the global class order (zeros for a class missing from the training fold), so pooled
+  AUC/LogLoss work under LOO. Repeated CV: labels majority vote, probabilities per-sample mean (same policy as
+  `cv_utils.cross_val_predict_pooled`); AUC/LogLoss were previously mean-of-folds there. NSGA-II classification CV
+  now pools too. A zero-filled class column can dominate pooled LogLoss (matches sklearn).
+- Calibration F1/Precision/Recall were support-WEIGHTED (grid, Bayesian, NSGA-II, Model Dev) while CV used
+  binary/macro; now the same definition everywhere. Bayesian and Model Dev multiclass AUC: weighted -> macro.
+- **QW5:** `scoring.regression_figures_of_merit`. Bellon-Maurel 2010 "SEP" (Eq. 1) = our RMSE/RMSEP; their SEPc (Eq. 4,
+  /m); our SEP/SECV is the n-1 bias-corrected form. RPIQ = IQR/RMSE (§5.3, Table 2 caption, no equation number).
+  RPD/RER unchanged (ddof=0, RMSE-based) except a perfect model now gives inf instead of 0.0 (`scoring.spread_ratio`,
+  also used by Bayesian, NSGA-II and Model Development). New columns: SECV, RPIQ (CV; grid, Bayesian, NSGA-II); SEP,
+  Biaspred, RPDpred, RPIQpred, RERpred, CCCpred, Slopepred, Interceptpred, Bias_p_pred, Slope_p_pred (external
+  validation). Bias/slope t-tests are acceptance tests only for the holdout; CV/calibration = diagnostic.
+- inf ratios: `json.dump` writes the non-standard token `Infinity` into saved-model metadata; dasp's `json.load` reads
+  it back, strict JSON parsers outside dasp reject it. Documented (scoring.spread_ratio), model_io left alone.
+- Black's py314/py315 target rewrites `except (A, B):` to the PEP 758 `except A, B:` form; do not accept that in src
+  (the py312 spec build cannot parse it). Use `black --target-version py312`.
+- Not covered by the convention: one-class / multi-class SIMCA metrics, the Predictions tab statistics panel
+  (GUI ~45332, weighted), `cv_utils` named scorers.
+- **Round 2 gotcha: repeated-CV probability accumulation broadcast narrower fold probabilities.** SMOTE-ENN on hard
+  data can leave a fold model with ONE class; `cross_val_predict_pooled` added its (n,1) proba into every class
+  column, rows summed to K and Bayesian LogLosscv read ~2e-16 for a failing model. Fold probabilities are now aligned
+  via the fold model's `classes_` (cv_utils `_proba_in_class_order`, also in the early-stopping loop), and
+  `classification_metrics` makes AUC/LogLoss NaN when proba rows do not sum to 1 (atol 1e-4).
+- **Round 3 (user decision, option b): Bayesian and NSGA-II fit numeric labels as given, except XGBoost.** XGBoost
+  rejects labels that are not 0..K-1 (`Invalid classes inferred ... got [1 2]`), so those engines fit it on codes and
+  decode its predictions before scoring. Bayesian studies whose numeric labels are not 0..K-1 get a `|labels=raw1`
+  study-name segment (after `|boost_rounds=` when both apply); other study names are unchanged. NSGA-II's returned
+  `label_encoder` is now None for numeric labels (the GUI used it to re-code validation labels while training labels
+  stayed raw).
+- **Follow-up (c):** an XGBoost label-encoding wrapper in models.py usable by every engine. Grid and Model
+  Development still cannot fit XGBoost on numeric labels that are not 0..K-1.
+- Test gotcha: validation-rebuild tests need round wavelengths; `all_vars` is written with `%g` (R031, being fixed on
+  fix/wavelength-mapping), so `np.linspace` wavelengths silently fail to map back.
+- **Round 4: one label-policy helper, `scoring.classification_fit_labels`** (used by Bayesian, NSGA-II incl.
+  `_compute_top_variables`, the validation rebuild and the GUI). Integer-valued numeric labels (bool included) are
+  fitted raw; text and NON-INTEGER numeric labels ({0.1,0.2}, which sklearn reads as continuous so stratified CV
+  refuses them) are label-encoded as before (user decision). Grid search previously failed outright on fractional
+  labels (StratifiedKFold "continuous"); run_search now encodes them too and returns the encoder (trivial fix), and
+  Model Development encodes them likewise.
+- **Gotcha: the Bayesian data fingerprint is dtype-sensitive.** LabelEncoder used to turn int32 / float64 / bool
+  {0,1} into int64; fitting them "raw" changed the fingerprint and broke `auto` resume of unchanged studies. Labels
+  already 0..K-1 now return exactly that int64 array (policy "codes").
+- Resuming a pre-raw1 {1,2,100} study now emits "Resume declined for <model>: label policy changed" with
+  `label_policy_changed` + `resume_declined` (GUI shows the resume-issue dialog); the old study stays in the SQLite
+  file, and the run record is released after that notice, as for the environment-changed case.
+- GUI: Bayesian holdout rebuild decodes its temporary codes back to raw integer labels (`_holdout_labels_as_fitted`);
+  NSGA-II holdout encodes training AND validation labels with the search encoder (`_encode_holdout_pair`; raw text
+  training labels against coded validation labels scored 0); display encoders are None for raw numeric labels
+  (`_display_label_encoder`), and the class legend decodes keys only when every key is a code of the encoder.
+- **Round 5 gotcha: `_run_analysis_thread` ends with a shared `self.label_encoder = label_encoder` for EVERY
+  optimization method.** Setting only `self.label_encoder` inside the Bayesian branch was wiped by that tail (text /
+  fractional Bayesian runs then showed codes in the legend and saved codes). Set the branch's local `label_encoder`.
+- XGBoost Bayesian studies no longer get `|labels=raw1` (their code fit is unchanged); trials resumed from before the
+  policy carry code-keyed per-class metrics, which `convert_study_to_dataframe(label_classes=...)` decodes when the
+  key set is exactly the code set and differs from the user-label set (unambiguous).
+- The pre-policy resume notice is hedged ("a study with this configuration but different class labels exists"):
+  study names carry no data identity, so a 0..K-1 study of other data looks the same.
+- `_save_refined_model` saves only `refined_label_encoder` (no fallback to the global search encoder).
+- Model Development repeated CV now reduces to one prediction per sample (vote / mean / mean proba) before headline
+  metrics, plots and stored predictions, as the grid does; its comparison line now uses the row's Accuracycv.
+- NSGA-II classification objective = 1 - pooled accuracy (fold accuracies weighted by test size), so Accuracycv
+  matches the pooled definition.
 ## 2026-10-02 - fix/preexisting-test-export: export metric helpers + multiclass fake Thread
 
 - **Export NameErrors came from helpers defined inside the CV block.** `_lins_ccc` (regression) and

@@ -429,6 +429,21 @@ def reduce_repeated_cv_predictions(
     return truth_arr, pred_arr
 
 
+def _proba_in_class_order(fitted, proba, classes) -> np.ndarray:
+    """``predict_proba`` columns mapped onto the dataset's sorted ``classes``.
+
+    Uses the fitted model's ``classes_`` (zero column for a class the fold model
+    never saw), so per-fold probabilities can be accumulated across folds and
+    repeats. See ``scoring.align_proba_to_classes``.
+    """
+    from spectral_predict.scoring import align_proba_to_classes
+
+    model_classes = getattr(fitted, 'classes_', None)
+    if model_classes is None and hasattr(fitted, 'steps'):
+        model_classes = getattr(fitted.steps[-1][1], 'classes_', None)
+    return align_proba_to_classes(proba, model_classes, classes)
+
+
 def _majority_vote(votes_per_sample: list, dtype) -> np.ndarray:
     """Reduce a list of vote-lists to a single prediction per sample via mode.
 
@@ -510,7 +525,16 @@ def cross_val_predict_pooled(
     # the legacy `fit_params=` kwarg in favour of metadata routing
     # (`set_config(enable_metadata_routing=True)` + `set_fit_request(...)`),
     # which would require global state mutation we'd rather avoid here.
-    if not _is_repeated_cv(cv) and not fit_params:
+    # sklearn's cross_val_predict(method='predict_proba') label-encodes y before
+    # fitting. For labels that are not already 0..K-1 that fits a different
+    # model (PLS-DA regresses on the label values), so use the manual loop.
+    _y_classes = np.unique(y)
+    _labels_are_codes = np.array_equal(_y_classes, np.arange(len(_y_classes)))
+    if (
+        not _is_repeated_cv(cv)
+        and not fit_params
+        and (method != 'predict_proba' or _labels_are_codes)
+    ):
         return cross_val_predict(model, X, y, cv=cv, n_jobs=n_jobs, method=method)
 
     # Manual loop: handles repeated CV AND any cv with fit_params.
@@ -547,7 +571,12 @@ def cross_val_predict_pooled(
             **_slice_fit_params(fit_params, train_idx, n_samples),
         )
         if method == 'predict_proba':
-            preds = model_clone.predict_proba(X[test_idx])
+            # One column per dataset class: a resampler (e.g. SMOTE-ENN) can
+            # remove a class from a training fold, and broadcasting its
+            # narrower proba into every column gave rows summing to K.
+            preds = _proba_in_class_order(
+                model_clone, model_clone.predict_proba(X[test_idx]), _y_classes
+            )
         else:
             preds = np.ravel(model_clone.predict(X[test_idx]))
         pred_sum[test_idx] += preds
@@ -1083,6 +1112,9 @@ def cross_val_predict_with_early_stopping(
 
         if method != 'predict_proba':
             preds = np.ravel(preds)
+        else:
+            # Align to the dataset's classes (a resampler can drop a class).
+            preds = _proba_in_class_order(final_model_clone, preds, np.unique(y))
 
         if repeated:
             if use_majority_vote:
