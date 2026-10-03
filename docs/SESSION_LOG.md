@@ -1353,3 +1353,45 @@ the same folds, as for PLS LV selection. Implemented on branch fix/booster-early
   metrics, plots and stored predictions, as the grid does; its comparison line now uses the row's Accuracycv.
 - NSGA-II classification objective = 1 - pooled accuracy (fold accuracies weighted by test size), so Accuracycv
   matches the pooled definition.
+## 2026-10-02 - fix/preexisting-test-export: export metric helpers + multiclass fake Thread
+
+- **Export NameErrors came from helpers defined inside the CV block.** `_lins_ccc` (regression) and
+  `_one_class_metrics` (one-class) lived in the CV templates, yet the final-model block calls them too, so any
+  script exported with `include_cross_validation=False` died at calibration metrics. One-class had the same bug
+  as regression. Both now live in `templates/validation.py` (`LINS_CCC_HELPER`, `ONE_CLASS_METRICS_HELPER`,
+  `get_metric_helpers_template`); `CodeGenerator` emits them once after the model block, in the script and in
+  the notebook's model/CV cell. The imbalance-aware regression CV block (`_render_cross_validation_with_imbalance`)
+  never set `ccc`, which the shared metrics block prints: a third NameError, fixed with one line.
+  Classification exports have no shared helper and were fine. Separate, not fixed: imbalance regression with
+  PLS fails because `PLSRegression.fit` takes no `sample_weight`.
+- **`test_run_analysis_accepts_multiclass_engine_selection`: the test was wrong, not the code.** Its fake
+  `threading.Thread` took only `(target, args, daemon)`; `_run_analysis` correctly passes `kwargs=`. The fake
+  now mirrors Thread's signature and forwards args and kwargs.
+- **Round 2 (Codex probes + GLM review of d4f608a).** A stale `imbalance_method` on a one-class config sent export
+  down the *regression* imbalance CV/final-model path (`_lins_ccc` NameError; it would also have fitted the
+  one-class model with y and sample weights). Imbalance does not apply to one-class (backend fits inliers only, GUI
+  hides the card), so `CodeGenerator.__init__` now drops it for `one_class`. `generate_notebook` ignored
+  `include_cross_validation` and always emitted the CV cell; it now honours the flag as `generate_script` does.
+  With CV off, `include_visualization` emitted plots that read `y_pred_cv` / `all_y_true_arr`;
+  `get_visualization_code(include_cv_plots=False)` now keeps only the spectra plot. The imbalance-regression final
+  model now prints calibration RMSE/R2/CCC like the plain path, and imbalance classification no longer prints its CV
+  metrics twice. Noted, not fixed: the regression pred-vs-actual title prints a literal `{rmse:.4f}` (the viz
+  templates are never `.format`ed but use `{{ }}`), and the one-class "decision score" histogram plots +1/-1
+  labels, not scores.
+- **Round 3: the two plot bugs.** `templates/visualization.py` strings are emitted verbatim (never `.format`ed), so
+  `{{rmse:.4f}}` inside the generated f-string printed literal braces; the template now uses single braces, like the
+  spectra plot. The one-class histogram plotted `y_pred_cv` (the +1/-1 labels). The one-class CV template now also
+  builds `cv_scores`, the out-of-fold `decision_function` (or `score_samples`) values aligned with
+  `all_y_true_arr` (averaged per sample under Repeated K-Fold), plus `cv_scores_are_decision`. The histogram plots
+  those and marks the threshold at score = 0, the same rule the CV block uses to predict. The executed-export test
+  reads every figure title back through matplotlib and fails on any `{`/`}`, and checks the one-class scores have
+  more than two distinct values.
+- **Round 4 (DeepSeek review): tests now check what they claim.** Every executed-export case asserts
+  `Cross-validation Results` appears once with CV on and never with CV off (a classification+imbalance case fails on
+  d4f608a, which printed it twice). `test_exported_regression_metrics_match_independent_computation` recomputes CV
+  and calibration RMSE/R2/MAE/CCC with sklearn + `scoring.lins_ccc` on the same data and KFold splits and matches
+  the printed values to 2e-4 (also true on d4f608a, so CV numbers are unchanged). The one-class probe asserts
+  `len(cv_scores) == len(all_y_true_arr) == len(y_pred_cv)` and that score >= 0 agrees with the reported label
+  outside the 25% of samples nearest the threshold. Added OneClassSVM (scaling branch) and regression-imbalance
+  notebook cases. Gotcha: under Repeated K-Fold `cv_scores` are per-sample means, `y_pred_cv` a majority vote, so
+  they can disagree near 0 (now said in the template comments).

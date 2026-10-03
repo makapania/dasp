@@ -4,7 +4,7 @@
 
 ## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-27)
 
-### 0. IN PROGRESS (2026-10-02): Wave 1 + Wave 2 fixes, 7 of 11 branches merged — HAND-OFF
+### 0. IN PROGRESS (2026-10-02): Wave 1 + Wave 2 fixes, 8 of 11 branches merged — HAND-OFF
 Every Wave 1/2 item was cross-checked by Codex gpt-6-astra and GLM 5.3 before fixing. User decisions: booster tree
 count = one value from the pooled CV curve; chemometrics validation conventions (CLAUDE.md).
 **Merged:** #83 fix/ct-honest-labels; #84 fix/ensemble-cv (wrappers now in `model_wrappers.py`); #85 feat/dpi-fonts; #86 fix/contaminant-maths (QW3, QW6; auto EPO count
@@ -13,7 +13,8 @@ only the first direction); #87 fix/readers (R017 OPUS background, R062 one ASCII
 carried through every tab; comma files dot-decimal + warning).
 #88 fix/wavelength-mapping (R009/R031/R016: tolerant wavelength matching everywhere incl. model_wrappers;
 encoders decode only when owned); #89 fix/ytransform-save (Tab 7 saves/exports the trained model: Y-transform,
-bias correction bound by token, frozen refit inputs, atomic RefinedState).
+bias correction bound by token, frozen refit inputs, atomic RefinedState); #90 fix/preexisting-test-export (multiclass GUI test fake Thread;
+code export without CV / imbalance / plot fixes; PLS + regression imbalance sample_weight still open).
 **Reviewers:** Codex is reset but reserved for MAJOR checks only (user, 2026-10-03); routine confirms use GLM 5.3 + DeepSeek (deepseek-flash; Pro only if the
 user says "pro") stand in. opencode prompts must forbid shell redirection, writes, and reads outside the repo, and
 demand a verdict even if a tool call is rejected. Merge rule: well-reviewed PR → merge origin/main into branch, test,
@@ -30,11 +31,6 @@ demand a verdict even if a tool call is rejected. Merge rule: well-reviewed PR �
 - `perf/thread-budget` c53c6f2 — GLM r2 MWF (GA candidate pool lacks CatBoost-serial rule; `native_thread_limit`
   cross-API restore via `restore_original_limits()` clobbers other APIs; stricter nested exit never re-loosens);
   DeepSeek r2 pending; then fix round + merge main.
-- `fix/preexisting-test-export` d4f608a — fixes multiclass GUI test fake Thread + export NameErrors without CV; GLM
-  MWF; one_class+imbalance export still NameErrors `_lins_ccc` (fix in progress) → review → merge, then delete the
-  "known pre-existing" lines below.
-Known pre-existing on main until that merges: `test_multiclass_gui.py::test_run_analysis_accepts_multiclass_engine_selection`
-fails; regression/one-class code export without CV raises NameError.
 **Open questions for the user:** Import rounds wavelengths to integers and refuses sub-unit spacing (FTIR?); comma
 ASCII files default to dot-decimal with a warning (my call); advisory EPO count (my call); delete stray GLM temp files
 in %TEMP% (diff.txt, gui_f359708.py, opencodeepo_*).
