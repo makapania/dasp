@@ -68,6 +68,12 @@ PRIMITIVES: dict[str, list[str]] = {
         "plsda_head_kwargs",
     ],
     "model_io": ["save_model", "load_model", "predict_with_model"],
+    "wavelength_matching": [
+        "match_wavelengths",
+        "resolve_wavelength_list",
+        "format_wavelength_list",
+        "WavelengthMatchError",
+    ],
     "search": [
         "run_search",
         "run_one_class_search",

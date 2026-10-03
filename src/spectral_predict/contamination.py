@@ -41,6 +41,10 @@ from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.decomposition import PCA
 
 from spectral_predict.cv_utils import build_cv_splitter, _is_repeated_cv
+from spectral_predict.wavelength_matching import (
+    WavelengthMatchError,
+    resolve_wavelength_list,
+)
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import OneClassSVM
 from sklearn.ensemble import IsolationForest
@@ -1013,7 +1017,9 @@ def compute_validation_metrics_for_top_one_class_models(
     Returns
     -------
     pd.DataFrame
-        The same ``df_results`` with val_* columns added/populated.
+        The same ``df_results`` with val_* columns added/populated. Rows that
+        could not be validated keep NaN val_* and are listed, with the reason,
+        in ``df.attrs["validation_failures"]`` (``{row index: reason}``).
     """
     from spectral_predict.preprocess import build_preprocessing_pipeline
     from sklearn.pipeline import Pipeline
@@ -1079,11 +1085,12 @@ def compute_validation_metrics_for_top_one_class_models(
     # sharing preprocessing don't pay the transform cost repeatedly.
     preprocess_cache: dict = {}
 
-    # Pre-compute wavelength → column-index mapping for the all_vars lookup.
-    try:
-        wl_to_idx = {float(wl): i for i, wl in enumerate(np.asarray(wavelengths))}
-    except (TypeError, ValueError):
-        wl_to_idx = {}
+    # Rows that could not be validated, with the reason (returned on
+    # df.attrs["validation_failures"] so callers can report them; R078).
+    validation_failures: dict = {}
+    validation_succeeded: list = []
+    # A re-run must not leave an earlier run's numbers on a row that now fails.
+    df_results.loc[top_indices, list(_VAL_OC_COLUMNS)] = np.nan
 
     for i, idx in enumerate(top_indices):
         # Report progress every 10 models (matches classification helper at
@@ -1231,7 +1238,6 @@ def compute_validation_metrics_for_top_one_class_models(
             # only the first 50 wavelengths there (display-only), while 'all_vars'
             # has the full trained subset. Using selected_wavelengths would silently
             # validate on a truncated feature set.
-            col_indices = None
             all_vars_str = row.get('all_vars', None)
             if isinstance(all_vars_str, float) and pd.isna(all_vars_str):
                 all_vars_str = None
@@ -1241,40 +1247,34 @@ def compute_validation_metrics_for_top_one_class_models(
                     "(both OC grid and Bayesian always populate it — missing means row metadata is corrupt)",
                     idx,
                 )
+                validation_failures[idx] = "all_vars missing or empty"
                 continue
+            # Shared contract (R078): every stored wavelength must map to exactly
+            # one column; old %g-rounded rows resolve when unambiguous. A zero or
+            # partial match skips the row (never a truncated feature set).
             try:
-                model_wls = [float(w.strip()) for w in all_vars_str.split(',') if w.strip()]
-                if wl_to_idx:
-                    missing = [wl for wl in model_wls if wl not in wl_to_idx]
-                    if missing:
-                        logger.warning(
-                            "[OC Validation] Row %s: %d/%d model wavelengths not found in wavelength map, skipping",
-                            idx, len(missing), len(model_wls),
-                        )
-                        continue
-                    col_indices = [wl_to_idx[wl] for wl in model_wls]
-                else:
-                    # No wavelength mapping — nearest-index fallback
-                    all_wl_arr = np.asarray(wavelengths, dtype=float)
-                    col_indices = [int(np.argmin(np.abs(all_wl_arr - wl))) for wl in model_wls]
-                if not col_indices:
-                    logger.warning("[OC Validation] Row %s: no valid wavelength indices resolved, skipping", idx)
-                    continue
-            except Exception as wl_err:
-                logger.warning("[OC Validation] all_vars parse failed for row %s: %s, skipping", idx, wl_err)
+                col_indices = resolve_wavelength_list(all_vars_str, wavelengths)
+            except WavelengthMatchError as wl_err:
+                logger.warning(
+                    "[OC Validation] Row %s: all_vars does not match the spectral axis, "
+                    "skipping: %s",
+                    idx,
+                    wl_err,
+                )
+                validation_failures[idx] = f"all_vars does not match the spectral axis: {wl_err}"
                 continue
 
-            if col_indices is not None:
-                max_col = X_train_prep.shape[1] - 1
-                col_indices = [c for c in col_indices if 0 <= c <= max_col]
-                if not col_indices:
-                    logger.warning("[OC Validation] All wavelength indices out of bounds for row %s", idx)
-                    continue
-                X_train_final = X_train_prep[:, col_indices]
-                X_val_final = X_val_prep[:, col_indices]
-            else:
-                X_train_final = X_train_prep
-                X_val_final = X_val_prep
+            if int(col_indices.max()) >= X_train_prep.shape[1]:
+                logger.warning(
+                    "[OC Validation] Row %s: wavelength indices outside the preprocessed "
+                    "matrix (%d columns), skipping",
+                    idx,
+                    X_train_prep.shape[1],
+                )
+                validation_failures[idx] = "all_vars maps outside the preprocessed matrix"
+                continue
+            X_train_final = X_train_prep[:, col_indices]
+            X_val_final = X_val_prep[:, col_indices]
 
             # === Fit on inliers only (mirrors run_one_class_cv calibration) ===
             inlier_mask = y_train_oc == 1
@@ -1339,7 +1339,12 @@ def compute_validation_metrics_for_top_one_class_models(
 
         except Exception as row_err:
             logger.warning("[OC Validation] Row %s failed: %s", idx, row_err)
+            validation_failures[idx] = f"validation failed: {row_err}"
             continue
+        else:
+            # Only rows that ran to the end. val_BalancedAcc can be legitimately NaN
+            # (inlier-only validation set), so callers must not infer success from it.
+            validation_succeeded.append(idx)
 
     logger.info("[OC Validation] Completed validation metrics for %d models", n_to_process)
 
@@ -1386,6 +1391,9 @@ def compute_validation_metrics_for_top_one_class_models(
 
         df_results = df_results[cols]
 
+    df_results.attrs["validation_failures"] = validation_failures
+    df_results.attrs["validation_attempted"] = list(top_indices)
+    df_results.attrs["validation_succeeded"] = validation_succeeded
     return df_results
 
 

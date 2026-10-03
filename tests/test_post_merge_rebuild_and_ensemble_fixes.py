@@ -399,6 +399,10 @@ def test_validation_rebuild_scores_row_with_missing_derivative_window() -> None:
                 "Deriv": 1,
                 "Window": np.nan,
                 "Poly": 2,
+                # Full-spectrum row without all_vars: the rebuild needs these to use
+                # every column (fix/wavelength-mapping review round 1).
+                "SubsetTag": "full",
+                "n_vars": 30,
             }
         ]
     )
@@ -516,6 +520,8 @@ def test_validation_rebuild_scores_legacy_ga_genes_row_in_mixed_table() -> None:
                 "Preprocess": "deriv",
                 "preprocess_chromosome": np.nan,
                 "ga_genes": "[2, 6]",  # deriv1, window 17
+                "SubsetTag": "full",
+                "n_vars": 40,
             }
         ]
     )

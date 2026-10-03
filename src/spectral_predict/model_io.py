@@ -48,8 +48,242 @@ from typing import Dict, Any, Optional, Union
 from . import __version__
 from .model_wrappers import resolve_legacy_class
 from .resource_paths import is_frozen
+from .wavelength_matching import WavelengthMatchError, match_wavelengths
 
 logger = logging.getLogger(__name__)
+
+#: Stamped into every saved model's metadata. Models without it were saved while Tab 7
+#: mapped wavelengths to columns by first hit within +/-0.5 (R009), so on grids finer
+#: than 0.5 units they may have been trained on a neighbouring channel.
+WAVELENGTH_MATCHING_VERSION = 1
+
+
+def _model_classes(model: Any) -> Optional[np.ndarray]:
+    classes = getattr(model, 'classes_', None)
+    if classes is None:
+        return None
+    try:
+        return np.asarray(classes)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_text_classes(classes: np.ndarray) -> bool:
+    if classes.dtype.kind in 'US':
+        return True
+    return classes.dtype.kind == 'O' and all(isinstance(c, str) for c in classes.tolist())
+
+
+def _integer_codes(classes: np.ndarray) -> Optional[np.ndarray]:
+    """``classes`` as integer codes, or None if they are not whole numbers (bool is not)."""
+    if classes.dtype.kind not in 'iuf':
+        return None
+    if classes.dtype.kind == 'f' and not np.all(np.mod(classes, 1) == 0):
+        return None
+    return classes.astype(np.int64)
+
+
+def _encoder_codes_valid(model: Any, label_encoder: Any) -> bool:
+    """False when the model's classes prove it was not trained on this encoder's codes.
+
+    A model fitted on encoded labels predicts integer codes in ``0..n-1``. Classes such
+    as ``1.5``, booleans or codes >= n prove the model was trained on raw labels and
+    decoding would mislabel every prediction (R016). A model may have seen fewer
+    classes than the encoder knows, so this alone cannot prove ownership; that is what
+    the ``label_encoder_owned`` stamp records. True when there is nothing to check
+    (no ``classes_``, or text classes: the model decodes itself).
+    """
+    classes = _model_classes(model)
+    if classes is None or _is_text_classes(classes):
+        return True
+    codes = _integer_codes(classes)
+    if codes is None:
+        return False
+    try:
+        n_codes = len(label_encoder.classes_)
+    except (TypeError, AttributeError):
+        return False
+    return bool(np.all((codes >= 0) & (codes < n_codes)))
+
+
+def _encoder_provably_fits(model: Any, label_encoder: Any) -> bool:
+    """For files without the ownership stamp: does the encoder demonstrably belong?
+
+    Only when the model's classes are exactly the encoder's codes ``0..n-1`` (same class
+    count). A stale search encoder with as many or more classes than a raw-label model
+    (``{0, 1}`` vs ``x, y, z``) cannot be told apart from a subset-trained model
+    otherwise, so such files are not decoded.
+    """
+    classes = _model_classes(model)
+    if classes is None:
+        return False
+    codes = _integer_codes(classes)
+    if codes is None:
+        return False
+    try:
+        n_codes = len(label_encoder.classes_)
+    except (TypeError, AttributeError):
+        return False
+    return codes.size == n_codes and bool(np.array_equal(np.sort(codes), np.arange(n_codes)))
+
+
+def _effective_task_type(metadata: Dict[str, Any], model: Any) -> Optional[str]:
+    """The task type to dispatch on.
+
+    An explicit ``task_type`` wins. Files without one (absent or null, legacy) are
+    classifiers when the fitted estimator says so (sklearn ``is_classifier`` or a
+    ``classes_`` attribute), otherwise regression, as they always defaulted to.
+    """
+    task_type = metadata.get('task_type')
+    if task_type is not None:
+        return task_type
+    try:
+        from sklearn.base import is_classifier
+
+        if is_classifier(model):
+            return 'classification'
+    except Exception:  # noqa: BLE001 - an exotic estimator must not break prediction
+        pass
+    return 'classification' if getattr(model, 'classes_', None) is not None else 'regression'
+
+
+_UNOWNED_ENCODER_WARNING = (
+    "this file was saved before label-encoder ownership was recorded (R016) and its "
+    "stored encoder cannot be shown to belong to the model; returning the model's own "
+    "labels without decoding. Retrain and save the model again if text labels are expected."
+)
+_INVALID_CODES_WARNING = (
+    "the model's classes are not codes of its saved label encoder; returning the "
+    "model's own labels without decoding."
+)
+
+
+def _decoding_encoder(
+    model: Any, label_encoder: Any, metadata: Dict[str, Any]
+) -> tuple[Optional[Any], Optional[str]]:
+    """The encoder allowed to decode this classifier's outputs, or (None, reason).
+
+    A stamped (``label_encoder_owned``) encoder decodes when the model's classes are
+    valid codes for it. An unstamped legacy encoder decodes only when it provably fits
+    (the model's classes are exactly its codes). Shared by prediction and by the
+    probability-column names of ``predict_with_uncertainty``.
+    """
+    if label_encoder is None:
+        return None, None
+    if metadata.get('label_encoder_owned'):
+        if _encoder_codes_valid(model, label_encoder):
+            return label_encoder, None
+        return None, _INVALID_CODES_WARNING
+    if _encoder_provably_fits(model, label_encoder):
+        return label_encoder, None
+    return None, _UNOWNED_ENCODER_WARNING
+
+
+def _class_names(model: Any, label_encoder: Any, metadata: Dict[str, Any], n_columns: int):
+    """Names for ``predict_proba`` columns, in the model's column order, or None.
+
+    Columns follow ``model.classes_``; they are decoded through the encoder only when it
+    may decode this model (same rule as prediction). Never more names than columns.
+    """
+    classes = _model_classes(model)
+    encoder, _ = _decoding_encoder(model, label_encoder, metadata)
+    if classes is None:
+        if encoder is not None and len(encoder.classes_) == n_columns:
+            return encoder.classes_.tolist()
+        return None
+    if encoder is not None and not _is_text_classes(classes):
+        names = encoder.inverse_transform(_integer_codes(classes)).tolist()
+    else:
+        names = classes.tolist()
+    return names if len(names) == n_columns else None
+
+
+_RETRAIN = "Retrain the model in Model Development and save it again."
+
+
+def _is_legacy_tab7_model(metadata: Dict[str, Any]) -> bool:
+    """Unstamped Path A model of a task type the old Tab 7 refit produced."""
+    if metadata.get('wavelength_matching') is not None:
+        return False
+    if not metadata.get('use_full_spectrum_preprocessing'):
+        return False
+    # Only Tab 7 refits used the first-hit rule. Multi-class SIMCA models and
+    # ensembles (and their base models) stored their exact training columns.
+    if metadata.get('task_type') not in (None, 'regression', 'classification', 'one_class'):
+        return False
+    return not any(
+        metadata.get(key) for key in ('ensemble_type', 'ensemble_parent', 'is_base_model')
+    )
+
+
+def _legacy_wavelength_shift(metadata: Dict[str, Any]) -> Optional[str]:
+    """Warn text if a pre-fix model was probably trained on neighbouring channels.
+
+    Before WAVELENGTH_MATCHING_VERSION, the Tab 7 refit took each wavelength's column
+    as the FIRST axis value within 0.5 of it, while prediction reads the named
+    column. Both axes are in the metadata (``full_wavelengths`` is the training
+    axis), so the old training mapping can be replayed and compared. The stored
+    wavelengths may be ``%g``-rounded (the old refit kept the parsed ``all_vars``).
+    """
+    if not _is_legacy_tab7_model(metadata):
+        return None
+    full = metadata.get('full_wavelengths')
+    requested = metadata.get('wavelengths')
+    if not full or not requested:
+        return None
+    try:
+        full_arr = np.asarray(full, dtype=float)
+        req_arr = np.asarray(requested, dtype=float)
+    except (TypeError, ValueError):
+        return None  # predict will raise with the specific reason
+    try:
+        new_idx = match_wavelengths(req_arr, full_arr, legacy_g=True)
+    except WavelengthMatchError as exc:
+        return (
+            f"This model was saved before the wavelength-mapping fix (R009), and its "
+            f"stored wavelengths do not each name a single channel of its training "
+            f"axis ({exc}). It cannot be applied reliably. {_RETRAIN}"
+        )
+    n_shifted = 0
+    for wl, new in zip(req_arr, new_idx):
+        hits = np.flatnonzero(np.abs(full_arr - wl) < 0.5)
+        if hits.size and hits[0] != new:
+            n_shifted += 1
+    if not n_shifted:
+        return None
+    return (
+        f"This model was saved before the wavelength-mapping fix (R009). Its spectral "
+        f"axis is finer than 0.5 units, and {n_shifted} of {len(req_arr)} features were "
+        f"probably trained on the neighbouring channel while prediction reads the "
+        f"named channel. Its predictions do not match its reported CV metrics. "
+        f"{_RETRAIN}"
+    )
+
+
+def _model_subset_indices(
+    required_wl: Any, full_wavelengths: Any, metadata: Dict[str, Any]
+) -> np.ndarray:
+    """Columns of the model's wavelengths within its full (training) axis.
+
+    Models saved before the fix may store ``%g``-rounded wavelengths, so they are
+    matched with the ``%g``-text rule instead of the fixed 0.01 window; if even that
+    cannot name one channel per wavelength, the error says to retrain.
+    """
+    # Only pre-fix Tab 7 refits stored parsed %g text; ensembles, multi-class SIMCA and
+    # every stamped model keep exact-first matching.
+    legacy = _is_legacy_tab7_model(metadata)
+    try:
+        return match_wavelengths(required_wl, full_wavelengths, legacy_g=legacy)
+    except WavelengthMatchError as exc:
+        if not legacy:
+            raise
+        raise WavelengthMatchError(
+            f"This model was saved before the wavelength-mapping fix and its wavelengths "
+            f"cannot be matched to single channels of its training axis: {exc} {_RETRAIN}",
+            missing=exc.missing,
+            ambiguous=exc.ambiguous,
+        ) from exc
+
 
 class _LegacyAwareNumpyUnpickler(NumpyUnpickler):
     """joblib's unpickler, resolving pre-move GUI wrapper class references.
@@ -200,7 +434,14 @@ def save_model(
         Can be None if model was trained on raw data.
     label_encoder : sklearn.preprocessing.LabelEncoder or None
         Label encoder for classification with text labels (e.g., "low", "medium", "high").
-        Used to convert between text labels and numeric codes.
+        Used to convert between text labels and numeric codes. **Passing one asserts
+        that ``model`` was trained on this encoder's codes**: the file records
+        ``label_encoder_owned`` and prediction decodes through it. Pass ``None`` for a
+        model trained on raw labels (numeric class values included); never pass an
+        encoder left over from another search. An encoder the model's classes prove
+        stale (booleans, non-integer values, codes outside the encoder) is dropped
+        with a warning, but a stale encoder whose codes happen to be valid cannot be
+        detected.
     cv_residuals : np.ndarray or None
         Cross-validation residuals (predictions - actuals) for uncertainty estimation.
         Shape: (n_cv_samples,) for regression or (n_cv_samples, n_classes) for classification probabilities.
@@ -268,14 +509,37 @@ def save_model(
     metadata_complete['dasp_version'] = __version__
     metadata_complete['model_class'] = str(type(model).__name__)
 
+    metadata_complete['wavelength_matching'] = WAVELENGTH_MATCHING_VERSION
+
+    # The saved encoder must be the one the model was trained with (R016). An
+    # encoder left over from an earlier search would decode a raw-label model's
+    # predictions to the wrong classes, so it is refused rather than saved.
+    if label_encoder is not None and not _encoder_codes_valid(model, label_encoder):
+        msg = (
+            "save_model: the label encoder does not match the model (the model was "
+            f"trained on raw labels {np.asarray(model.classes_).tolist()[:10]}); "
+            "saving without it."
+        )
+        warnings.warn(msg, UserWarning, stacklevel=2)
+        logger.warning(msg)
+        label_encoder = None
+
     # Add label encoder information if present
     if label_encoder is not None:
         metadata_complete['has_label_encoder'] = True
+        # Passing an encoder claims it is the one the model was trained with (Tab 7
+        # passes only its own). Prediction decodes only stamped encoders, or legacy
+        # ones that provably fit.
+        metadata_complete['label_encoder_owned'] = True
         metadata_complete['label_classes'] = label_encoder.classes_.tolist()
-        metadata_complete['label_mapping'] = dict(zip(
-            label_encoder.classes_,
-            label_encoder.transform(label_encoder.classes_).tolist()
-        ))
+        # JSON object keys must be str; np.int64 keys crash json.dump (R016).
+        metadata_complete['label_mapping'] = {
+            str(label): int(code)
+            for label, code in zip(
+                label_encoder.classes_.tolist(),
+                label_encoder.transform(label_encoder.classes_).tolist(),
+            )
+        }
     else:
         metadata_complete['has_label_encoder'] = False
 
@@ -517,6 +781,11 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
         with open(metadata_path, 'r', encoding='utf-8') as f:
             metadata = json.load(f)
 
+        legacy_shift = _legacy_wavelength_shift(metadata)
+        if legacy_shift:
+            warnings.warn(f"{filepath.name}: {legacy_shift}", UserWarning, stacklevel=2)
+            logger.warning("%s: %s", filepath.name, legacy_shift)
+
         # Load model
         model_path = tmppath / 'model.pkl'
         if not model_path.exists():
@@ -590,6 +859,7 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
         'preprocessor': preprocessor,
         'label_encoder': label_encoder,
         'metadata': metadata,
+        'wavelength_mapping_warning': legacy_shift,
         'cv_data': cv_data,
         'ad_data': ad_data,
         'pca_model': pca_model,
@@ -769,13 +1039,8 @@ def predict_with_model(
                     X_full_preprocessed = X_full
 
                 # Step 3: Find indices of subset wavelengths in full wavelengths
-                wavelength_indices = []
-                for wl in required_wl:
-                    idx = np.where(np.abs(np.array(full_wavelengths) - wl) < 0.01)[0]
-                    if len(idx) > 0:
-                        wavelength_indices.append(idx[0])
-                    else:
-                        raise ValueError(f"Required wavelength {wl} not found in full_wavelengths")
+                # (the shared exact-first contract the Tab 7 refit also uses).
+                wavelength_indices = _model_subset_indices(required_wl, full_wavelengths, metadata)
 
                 # Step 4: Subset the preprocessed data
                 X_processed = X_full_preprocessed[:, wavelength_indices]
@@ -799,11 +1064,7 @@ def predict_with_model(
                 X_full_preprocessed = (
                     preprocessor.transform(X_full) if preprocessor is not None else X_full
                 )
-                wavelength_indices = []
-                for wl in required_wl:
-                    idx = np.where(np.abs(np.array(full_wavelengths) - wl) < 0.01)[0]
-                    if len(idx) > 0:
-                        wavelength_indices.append(idx[0])
+                wavelength_indices = _model_subset_indices(required_wl, full_wavelengths, metadata)
                 X_processed = X_full_preprocessed[:, wavelength_indices]
             else:
                 X_selected = X_new.values
@@ -831,11 +1092,7 @@ def predict_with_model(
                 X_full_preprocessed = X_new
 
             # Find indices of subset wavelengths
-            wavelength_indices = []
-            for wl in required_wl:
-                idx = np.where(np.abs(np.array(full_wavelengths) - wl) < 0.01)[0]
-                if len(idx) > 0:
-                    wavelength_indices.append(idx[0])
+            wavelength_indices = _model_subset_indices(required_wl, full_wavelengths, metadata)
 
             X_processed = X_full_preprocessed[:, wavelength_indices]
         else:
@@ -902,16 +1159,20 @@ def predict_with_model(
     # Make predictions
     predictions = model.predict(X_processed)
 
-    # If label_encoder exists, convert predictions back to original text labels
-    if 'label_encoder' in model_dict and model_dict['label_encoder'] is not None:
-        label_encoder = model_dict['label_encoder']
-        # Check if predictions are already text labels (some models decode internally)
+    # If label_encoder exists, convert predictions back to original text labels.
+    # Only a classifier's predictions are codes, and only an encoder that belongs to
+    # this model may decode them (R016). Legacy files without task_type are judged by
+    # the fitted estimator.
+    label_encoder = model_dict.get('label_encoder')
+    if label_encoder is not None and _effective_task_type(metadata, model) == 'classification':
         if pd.api.types.is_string_dtype(predictions.dtype):
-            # Already decoded text labels, return as-is
-            pass
+            pass  # already decoded text labels (some models decode internally)
         else:
-            # Numeric predictions that need decoding
-            predictions = label_encoder.inverse_transform(predictions.astype(int))
+            encoder, reason = _decoding_encoder(model, label_encoder, metadata)
+            if encoder is not None:
+                predictions = encoder.inverse_transform(predictions.astype(int))
+            else:
+                warnings.warn(f"predict_with_model: {reason}", UserWarning, stacklevel=2)
 
     # NOTE: Bias correction is applied after model.predict(), which returns
     # original-scale values even when TransformedTargetRegressor is used.
@@ -923,11 +1184,59 @@ def predict_with_model(
     return predictions
 
 
+def check_data_type_compatibility(
+    model_metadata: Dict[str, Any],
+    prediction_data_type: Optional[str],
+    prediction_source_data_type: Optional[str] = None,
+) -> Optional[str]:
+    """Warn when prediction data is not the ordinate type a model was trained on.
+
+    Compares the pipeline data types ('absorbance', 'reflectance', 'other'). When
+    they agree, it also compares the source types (what the files held, e.g.
+    'raman' vs 'kubelka_munk', both 'other'), but only when both are known: models
+    saved before source types were recorded, data whose source is unknown, and
+    data that was converted after loading (``data_type_converted_from`` set) are
+    compared on the pipeline type alone.
+
+    Args:
+        model_metadata: The model's saved metadata.
+        prediction_data_type: Pipeline type of the prediction data, or None.
+        prediction_source_data_type: Source type of the prediction data, or None.
+
+    Returns:
+        A warning message, or None when compatible or not checkable.
+    """
+    model_type = model_metadata.get('data_type')
+    if not prediction_data_type or not model_type:
+        return None
+    if prediction_data_type.lower() != model_type.lower():
+        return (
+            f"Model trained on {model_type.upper()} data, "
+            f"but prediction data is {prediction_data_type.upper()}."
+        )
+    from spectral_predict.io import canonical_source_data_type
+
+    # Readers name the same ordinate differently (OPUS 'log_reflectance', Omnic
+    # 'Log(1/R)'), so compare canonical names
+    model_source = canonical_source_data_type(model_metadata.get('source_data_type'))
+    if model_metadata.get('data_type_converted_from'):
+        model_source = None
+    prediction_source = canonical_source_data_type(prediction_source_data_type)
+    if model_source and prediction_source and model_source != prediction_source:
+        return (
+            f"Model trained on {model_source.replace('_', ' ').upper()} data, but "
+            f"prediction data is {prediction_source.replace('_', ' ').upper()} "
+            f"(both {model_type.lower()})."
+        )
+    return None
+
+
 def predict_with_uncertainty(
     model_dict: Dict[str, Any],
     X_new: Union[pd.DataFrame, np.ndarray],
     validate_wavelengths: bool = True,
-    prediction_data_type: Optional[str] = None
+    prediction_data_type: Optional[str] = None,
+    prediction_source_data_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Make predictions with a loaded model and compute uncertainty estimates.
@@ -946,8 +1255,11 @@ def predict_with_uncertainty(
     validate_wavelengths : bool, default=True
         Whether to validate wavelengths match model requirements
     prediction_data_type : str, optional
-        Type of prediction data ('absorbance' or 'reflectance'). If provided and differs
-        from model's training data type, a warning will be included in the result.
+        Type of prediction data ('absorbance', 'reflectance' or 'other'). If provided and
+        differs from model's training data type, a warning will be included in the result.
+    prediction_source_data_type : str, optional
+        What the prediction file held (e.g. 'raman', 'kubelka_munk'); see
+        ``check_data_type_compatibility``.
 
     Returns
     -------
@@ -990,18 +1302,12 @@ def predict_with_uncertainty(
 
     model = model_dict['model']
     metadata = model_dict['metadata']
-    task_type = metadata.get('task_type', 'regression')
+    task_type = _effective_task_type(metadata, model)
 
     # Check for data type mismatch
-    data_type_warning = None
-    model_data_type = metadata.get('data_type')
-
-    if prediction_data_type and model_data_type:
-        if prediction_data_type.lower() != model_data_type.lower():
-            data_type_warning = (
-                f"Model trained on {model_data_type.upper()} data, "
-                f"but prediction data is {prediction_data_type.upper()}."
-            )
+    data_type_warning = check_data_type_compatibility(
+        metadata, prediction_data_type, prediction_source_data_type
+    )
 
     # Multi-class class-modeling (SIMCA): predict_with_model already returns the
     # per-sample decision schema (p-values + accept matrix + accepted class sets
@@ -1130,11 +1436,7 @@ def predict_with_uncertainty(
                     X_full_preprocessed = preprocessor.transform(X_full)
                 else:
                     X_full_preprocessed = X_full
-                wavelength_indices = []
-                for wl in required_wl:
-                    idx = np.where(np.abs(np.array(full_wavelengths) - wl) < 0.01)[0]
-                    if len(idx) > 0:
-                        wavelength_indices.append(idx[0])
+                wavelength_indices = _model_subset_indices(required_wl, full_wavelengths, metadata)
                 X_processed = X_full_preprocessed[:, wavelength_indices]
             else:
                 X_selected = _select_wavelengths_from_dataframe(X_new, required_wl)
@@ -1154,11 +1456,7 @@ def predict_with_uncertainty(
                 X_full_preprocessed = preprocessor.transform(X_new)
             else:
                 X_full_preprocessed = X_new
-            wavelength_indices = []
-            for wl in required_wl:
-                idx = np.where(np.abs(np.array(full_wavelengths) - wl) < 0.01)[0]
-                if len(idx) > 0:
-                    wavelength_indices.append(idx[0])
+            wavelength_indices = _model_subset_indices(required_wl, full_wavelengths, metadata)
             X_processed = X_full_preprocessed[:, wavelength_indices]
         else:
             if preprocessor is not None:
@@ -1178,13 +1476,15 @@ def predict_with_uncertainty(
                 uncertainty['confidence'] = confidence
                 has_uncertainty = True
 
-                # Add class names if label_encoder exists
-                if 'label_encoder' in model_dict and model_dict['label_encoder'] is not None:
-                    uncertainty['class_names'] = model_dict['label_encoder'].classes_.tolist()
-                else:
-                    # Try to get from model classes if available
-                    if hasattr(model, 'classes_'):
-                        uncertainty['class_names'] = model.classes_.tolist()
+                # Column names follow model.classes_ (one per probability column),
+                # decoded only through an encoder that may decode this model. Naming
+                # them from every encoder class mislabelled raw-label models and gave
+                # more names than columns (IndexError in the Tab 8 display).
+                names = _class_names(
+                    model, model_dict.get('label_encoder'), metadata, probabilities.shape[1]
+                )
+                if names is not None:
+                    uncertainty['class_names'] = names
             except Exception as e:
                 # Model doesn't support predict_proba or failed
                 uncertainty['error'] = f"Could not compute probabilities: {str(e)}"
@@ -1600,34 +1900,21 @@ def _select_wavelengths_from_dataframe(
     df_numeric = df[numeric_cols]
     available_wl = df_numeric.columns.astype(float).values
 
-    # Check for missing wavelengths
-    required_set = set(required_wavelengths)
-    available_set = set(available_wl)
-    missing_wl = required_set - available_set
+    # Shared exact-first contract: an exact column wins, else the single column
+    # within DEFAULT_TOLERANCE; missing or ambiguous wavelengths raise.
+    try:
+        indices = match_wavelengths(required_wavelengths, available_wl)
+    except WavelengthMatchError as exc:
+        if exc.missing:
+            raise WavelengthMatchError(
+                f"Missing {len(exc.missing)} required wavelengths. "
+                f"Examples: {exc.missing[:5]}",
+                missing=exc.missing,
+                ambiguous=exc.ambiguous,
+            ) from exc
+        raise
 
-    if missing_wl:
-        n_missing = len(missing_wl)
-        sample_missing = list(missing_wl)[:5]
-        raise ValueError(
-            f"Missing {n_missing} required wavelengths. "
-            f"Examples: {sample_missing}"
-        )
-
-    # Select wavelengths in correct order
-    # Use string matching to handle floating point comparison
-    selected_cols = []
-    for required_wl in required_wavelengths:
-        # Find matching column (allowing small floating point differences)
-        matching_cols = []
-        for col in df_numeric.columns:
-            col_float = float(col)  # Safe now - we filtered to numeric only
-            if abs(col_float - required_wl) < 0.01:
-                matching_cols.append(col)
-        if not matching_cols:
-            raise ValueError(f"Required wavelength {required_wl} not found")
-        selected_cols.append(matching_cols[0])
-
-    return df_numeric[selected_cols].values
+    return df_numeric.iloc[:, indices].values
 
 
 def _json_serializer(obj):
@@ -1671,6 +1958,9 @@ def _convert_to_serializable(obj):
     return _json_serializer(obj)
 
 
+_ORDINATE_METADATA_KEYS = ('data_type', 'source_data_type', 'data_type_converted_from')
+
+
 def save_ensemble(ensemble: Any, filepath: str, metadata: Dict[str, Any]) -> None:
     """
     Save an ensemble model to a .dasp file.
@@ -1693,6 +1983,8 @@ def save_ensemble(ensemble: Any, filepath: str, metadata: Dict[str, Any]) -> Non
         - 'use_full_spectrum_preprocessing': Boolean for derivative+subset case
         - 'full_wavelengths': Full wavelength list if using derivative+subset
         - 'window': Savgol window size (if applicable)
+        - 'data_type', 'source_data_type', 'data_type_converted_from': ordinate type of
+          the training data (optional; copied into every base model's metadata)
         - 'X_train': Training data for applicability domain (optional)
         - 'cv_residuals', 'cv_predictions', 'cv_actuals': CV data for uncertainty (optional)
 
@@ -1742,6 +2034,8 @@ def save_ensemble(ensemble: Any, filepath: str, metadata: Dict[str, Any]) -> Non
     cv_actuals = metadata.pop('cv_actuals', None)
     preprocessor = metadata.pop('preprocessor', None)
     label_encoder = metadata.pop('label_encoder', None)
+    # Same stamp save_model writes: this ensemble stores exact axis values.
+    metadata['wavelength_matching'] = WAVELENGTH_MATCHING_VERSION
 
     # Create temporary directory for base model files
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -1770,6 +2064,11 @@ def save_ensemble(ensemble: Any, filepath: str, metadata: Dict[str, Any]) -> Non
                 'n_samples': metadata.get('n_training_samples', 0),
                 'ensemble_parent': True,  # Flag to indicate this is from an ensemble
             }
+            # The ordinate type the ensemble was trained on, so each base model file
+            # also identifies the data it expects
+            for key in _ORDINATE_METADATA_KEYS:
+                if key in metadata:
+                    base_metadata[key] = metadata[key]
 
             # Save individual model with all metadata and optional training data
             save_model(

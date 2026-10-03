@@ -92,6 +92,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   continues only on exactly the interrupted run's calibration samples (same IDs, order,
   spectra, targets and selection); otherwise it offers to start fresh or keep the run.
 
+- **Model Development trains, saves and predicts on the same wavelength columns
+  (R009/R026/R112).** The Tab 7 refit (regression, classification and one-class) mapped
+  each selected wavelength to the *first* column within ±0.5 units, while prediction
+  read the column within ±0.01. On axes finer than 0.5 units (0.25 nm NIR/Raman, 0.48 or
+  0.24 cm⁻¹ FTIR) the model was trained on the neighbouring channel, so its CV and
+  validation numbers described a model the `.dasp` file does not reproduce. Training,
+  prediction and validation now share one contract (`spectral_predict.wavelength_matching`,
+  on the declared composition surface): an exact axis value wins, otherwise the single
+  value within 0.01, and a missing or two-channel match is an error instead of a dropped
+  column. The refit stores the axis values it actually used. **Retrain affected models:**
+  a model saved from Model Development before this fix on an axis finer than 0.5 units
+  was trained on shifted channels. That holds for wavelength subsets and, one channel
+  over with the first column duplicated, for full-spectrum models too. Loading one now
+  prints a warning naming how many features were shifted; models on 0.5 nm (or coarser)
+  grids are unaffected and load silently.
+- **Validation scores the wavelengths a results row was trained on (R031/R078).**
+  `all_vars`/`top_vars` were written with `%g` (6 significant digits), and the validation
+  rebuild looked them up by exact float equality. On axes with more significant digits
+  (nm→cm⁻¹ conversions such as 1e7/1350 = 7407.407…, OPUS wavenumbers, anything above
+  9999.99) a subset row was silently validated on the full spectrum, a partial match on
+  fewer columns, and one-class rows returned all-NaN `val_*`. Lists are now written
+  round-trip-exactly (each token ends in a `0` after the decimal point, e.g. `10000.10`,
+  a spelling `%g` never produces); already-saved rows (including Bayesian SQLite
+  studies) still resolve when exactly one column prints as the stored `%g` text. A row
+  that cannot be mapped, or a wavelength-subset row with no `all_vars` at all, is left
+  without validation values (earlier one-class values on it are cleared) and is listed
+  in the run log instead of "Validation metrics computed for top N"; Optuna study
+  names are unchanged. Old Model Development models whose saved wavelengths were
+  `%g`-rounded are matched the same way at prediction; where that is ambiguous, loading
+  warns and prediction stops with "retrain".
+- **Saving a classifier trained on numeric labels (R016).** After a Bayesian or NSGA-II
+  classification search, Tab 7 saved the search's label encoder with a model trained on
+  raw numeric labels: integer classes crashed the save (`keys must be str`), float
+  classes saved and then decoded every prediction to the wrong class. The save now
+  keeps only the encoder the refined model was trained with, `save_model` refuses an
+  encoder that cannot match the model's classes and records ownership of the one it
+  keeps (`label_encoder_owned`), and `label_mapping` keys are strings. Older `.dasp`
+  files are decoded only when their encoder provably belongs to the model (its classes
+  are exactly the encoder's codes); otherwise they predict their raw labels with a
+  warning. Probability columns in prediction uncertainty are named after the model's own
+  classes, which also fixes an error in the Prediction tab's uncertainty table when the
+  encoder knew more classes than the model saw. Model Development no longer turns a results row without its wavelength list
+  into a full-spectrum refit: it shows an error unless the row is tagged full-spectrum
+  with a matching variable count, or its `top_vars` is the complete trained subset.
+
 - **Calibration transfer names and defaults (QW2, R085, R091, R128).** Transfer methods are
   labelled for what they do: 'ctai' is PC-DS (paired regression in satellite PCA space),
   'nspfce' is Iterative ridge DS (a dasp heuristic, not PFCE), 'tsr' is per-wavelength

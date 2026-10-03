@@ -20,7 +20,7 @@ N_FEATURES = 120
 # Selected variables sit at the LOW end, so any padding (highest-index zeros) is visible.
 SELECTED = np.arange(5, 20)  # 15 variables
 WAVELENGTHS = np.arange(1000, 1000 + N_FEATURES)
-SELECTED_WL = {f"{float(w):g}" for w in WAVELENGTHS[SELECTED]}
+SELECTED_WL = {float(w) for w in WAVELENGTHS[SELECTED]}
 
 
 def _sparse_importances(n_features: int) -> np.ndarray:
@@ -41,8 +41,9 @@ def _regression_data(seed: int = 0) -> tuple[pd.DataFrame, pd.Series]:
     return pd.DataFrame(X, columns=[str(w) for w in WAVELENGTHS]), pd.Series(y)
 
 
-def _vars(cell: str) -> set[str]:
-    return set(str(cell).split(","))
+def _vars(cell: str) -> set[float]:
+    # Compare values, not text: all_vars is written round-trip-exactly (repr), not %g.
+    return {float(t) for t in str(cell).split(",")}
 
 
 class TestCapTopN:
