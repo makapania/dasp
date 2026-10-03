@@ -23,8 +23,8 @@ demand a verdict even if a tool call is rejected. Merge rule: well-reviewed PR �
 - `fix/booster-early-stopping` — round 3 in progress (Codex r3 BLOCK: export metrics before truncation; CatBoost auto
   LR replaced by 0.1 in rebuild/export; sanitize None breaks clone; resume flag; ensemble rebuild via truncation).
   Reconcile with fix/ytransform-save: Tab 7 y-transform k read off transformed-y curve vs final fit on raw y (~41998).
-- `fix/ytransform-save` — round 6 in progress (freeze all worker inputs in `run_training`; guard Results double-click
-  during refit; plot click callback token; export header). Then one confirm + merge.
+- `fix/ytransform-save` — round 6 done (worker reads only frozen `run_inputs`, incl. the wavelength-spec helper;
+  plot callbacks bound to one `RefinedState`; GA inputs stored on the Tk thread); origin/main merged in. Ready to merge.
 - `fix/gui-dataset-state` 77063e1 — round in progress (Codex BLOCK: transactional reconcile, shared calibration-prep
   function for digest+worker, lossless int targets, object-y canonicalisation, framed digest + counts, strict
   record schema, dotted IDs → "can't verify", MultiIndex NaN dedupe). QW4 (holdout direction) waits for this.
