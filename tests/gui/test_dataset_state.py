@@ -1722,6 +1722,7 @@ def test_prepare_calibration_aligns_x_and_y_before_hashing():
         folds=3,
     )
     assert list(prepared.X.index) == list(prepared.y.index) == [f"S{i}" for i in range(2, 7)]
+    assert prepared.n_realigned == 5  # the worker reports this
 
 
 def test_rename_duplicate_ids_treats_nan_and_na_as_repeats():

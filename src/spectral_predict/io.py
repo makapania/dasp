@@ -374,7 +374,7 @@ def rename_duplicate_ids(index: pd.Index) -> tuple:
     """
     # Compare missing-aware keys: pandas' duplicated() treats NaN and pd.NA (or
     # None) as different, though neither can be told apart as a sample ID.
-    if len({_id_key(idx) for idx in index}) == len(index):
+    if not _has_repeated_ids(index):
         return index, 0, {}
 
     new_ids = []
@@ -432,6 +432,11 @@ def _id_key(value):
             _MISSING_ID if _is_missing_scalar(part) else part for part in value
         )
     return _MISSING_ID if _is_missing_scalar(value) else value
+
+
+def _has_repeated_ids(index) -> bool:
+    """True if two sample IDs are the same, counting every missing ID (NaN, pd.NA) as one."""
+    return len({_id_key(idx) for idx in index}) != len(index)
 
 
 def _is_missing_scalar(value) -> bool:
@@ -1672,7 +1677,7 @@ def read_combined_csv(filepath, specimen_id_col=None, y_col=None, drop_na_y=True
     # Use X.index since specimen_ids may be out of sync after NaN removal
     n_duplicates_renamed = 0
     duplicate_rename_mapping = {}
-    if not generated_ids and X.index.duplicated().any():
+    if not generated_ids and _has_repeated_ids(X.index):
         # Rename duplicates by adding .1, .2, etc. suffix instead of removing them
         new_index, n_duplicates_renamed, duplicate_rename_mapping = _rename_duplicate_ids(X.index)
 
@@ -3546,7 +3551,7 @@ def read_combined_excel(filepath, specimen_id_col=None, y_col=None, sheet_name=0
     # Use X.index since specimen_ids may be out of sync after NaN removal
     n_duplicates_renamed = 0
     duplicate_rename_mapping = {}
-    if not generated_ids and X.index.duplicated().any():
+    if not generated_ids and _has_repeated_ids(X.index):
         # Rename duplicates by adding .1, .2, etc. suffix instead of removing them
         new_index, n_duplicates_renamed, duplicate_rename_mapping = _rename_duplicate_ids(X.index)
 

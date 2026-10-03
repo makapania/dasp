@@ -176,3 +176,30 @@ def test_identity_keeps_unsigned_integers_above_int64_apart():
     small = pd.Series(np.array([3, 1], dtype=np.uint64), index=X.index)
     signed = pd.Series(np.array([3, 1], dtype=np.int64), index=X.index)
     assert calibration_identity(X, small, None, None) == calibration_identity(X, signed, None, None)
+
+
+def test_identity_object_and_uint64_containers_agree_above_int64():
+    X, _ = _frame(["a", "b"])
+    top = 2**64 - 1
+    as_object = pd.Series([top, 1], index=X.index, dtype=object)
+    as_uint = pd.Series(np.array([top, 1], dtype=np.uint64), index=X.index)
+    assert calibration_identity(X, as_object, None, None) == calibration_identity(
+        X, as_uint, None, None
+    )
+
+
+def test_combined_reader_renames_repeated_missing_ids(tmp_path):
+    from spectral_predict.io import read_combined_csv
+
+    rng = np.random.default_rng(0)
+    ids = ["A", "", "B", "", "C", "D", "E", "F"]
+    spectra = rng.normal(size=(len(ids), 120))
+    df = pd.DataFrame(spectra, columns=[str(1000 + 2 * i) for i in range(120)])
+    df.insert(0, "protein", rng.uniform(0, 10, len(ids)))
+    df.insert(0, "sample_id", ids)
+    path = tmp_path / "blank_ids.csv"
+    df.to_csv(path, index=False)
+
+    X, y, _, metadata = read_combined_csv(path, y_col="protein", specimen_id_col="sample_id")
+    assert X.index.is_unique and len(X) == len(ids)
+    assert y.index.equals(X.index)

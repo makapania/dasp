@@ -1396,3 +1396,11 @@ the same folds, as for PLS LV selection. Implemented on branch fix/booster-early
 - **Tooling gotcha.** The Bash tool's heredocs turned `\b` and `\n` inside Python string literals into real
   control characters (a backspace ended up in a regex). Write code containing backslashes with the Write/Edit
   tools, not via heredoc.
+
+## 2026-10-02 - GUI dataset state, round 7 follow-ups
+
+- The combined CSV/Excel readers decide "repeated IDs" with the same missing-aware check as
+  `rename_duplicate_ids` (`io._has_repeated_ids`), not `duplicated()`.
+- Object-dtype targets with non-negative ints above int64 hash like the uint64 column they equal.
+- The worker's X/y realignment after preparation is gone (it was dead after round 6);
+  `_prepare_calibration` records `n_realigned` and the worker logs the same warning from it.

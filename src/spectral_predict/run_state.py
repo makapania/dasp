@@ -379,9 +379,12 @@ def _put(h, tag: bytes, payload: bytes) -> None:
 def _target_bytes(y) -> tuple[bytes, bytes]:
     """``(tag, bytes)`` for a target column, lossless and container-independent.
 
-    Integers are hashed as int64 (float64 would merge values above 2**53), and an
-    object column whose values are all numbers is hashed like the numeric column
-    it equals, so the same targets in a different container give the same digest.
+    Integers are hashed as int64, or uint64 above the int64 range (float64 would
+    merge values above 2**53). An object column whose values are all numbers is
+    hashed like the numeric column it equals, so the same targets in a different
+    container give the same digest. Integer columns that fit neither int64 nor
+    uint64 (values beyond 2**64, or negatives mixed with values above the int64
+    range) fall back to a per-value repr encoding.
     """
     import pandas as pd
 
@@ -411,15 +414,17 @@ def _target_bytes(y) -> tuple[bytes, bytes]:
     if numbers and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in numbers):
         # Python numbers only (missing values as NaN): hash as the numeric column
         # they equal, provided the conversion loses nothing.
-        dtype = "float64" if any(isinstance(v, float) for v in items) else "int64"
-        try:
-            converted = pd.Series(items, dtype=dtype)
-        except (OverflowError, ValueError, TypeError):
-            converted = None  # e.g. an integer beyond int64: hashed by repr below
-        if converted is not None and all(
-            a == b or (a != a and b != b) for a, b in zip(items, converted.tolist())
-        ):
-            return _numeric(converted)
+        if any(isinstance(v, float) for v in items):
+            dtypes = ("float64",)
+        else:
+            dtypes = ("int64", "uint64")  # uint64 for non-negative ints above int64
+        for dtype in dtypes:
+            try:
+                converted = pd.Series(items, dtype=dtype)
+            except (OverflowError, ValueError, TypeError):
+                continue  # out of this dtype's range
+            if all(a == b or (a != a and b != b) for a, b in zip(items, converted.tolist())):
+                return _numeric(converted)
     parts = []
     for value in items:
         text = repr(value).encode("utf-8")

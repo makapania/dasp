@@ -2650,6 +2650,7 @@ class _PreparedCalibration:
     collapsed_labels: list | None = None
     rare_dropped: list | None = None
     n_before_rare: int = 0
+    n_realigned: int | None = None  # rows kept when X and y labels had to be aligned
 
 
 def _prepare_calibration(
@@ -2733,6 +2734,7 @@ def _prepare_calibration(
         common = prepared.X.index.intersection(prepared.y.index)
         prepared.X = prepared.X.loc[common]
         prepared.y = prepared.y.loc[common]
+        prepared.n_realigned = len(common)
     return prepared
 
 
@@ -30704,14 +30706,13 @@ class SpectralPredictApp:
                 # operation that can destabilise the main loop on Windows.
                 raise ValueError(error_msg)
 
-            # Ensure indices match
-            if not X_filtered.index.equals(y_filtered.index):
-                self._log_progress("[!] Warning: Realigning X and y indices to ensure consistency...")
-                # Realign by taking only common indices
-                common_idx = X_filtered.index.intersection(y_filtered.index)
-                X_filtered = X_filtered.loc[common_idx]
-                y_filtered = y_filtered.loc[common_idx]
-                self._log_progress(f"> Realigned to {len(common_idx)} common samples")
+            # X and y were aligned by label in _prepare_calibration, before the
+            # resume identity was computed; report it here.
+            if _prepared.n_realigned is not None:
+                self._log_progress(
+                    "[!] Warning: Realigning X and y indices to ensure consistency..."
+                )
+                self._log_progress(f"> Realigned to {_prepared.n_realigned} common samples")
 
             # Adjust max_n_components based on restricted wavelength count
             # PLS cannot use more components than min(n_features, n_samples)
