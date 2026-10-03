@@ -9,6 +9,18 @@ This module provides:
 - Custom pytest markers for test categorization
 """
 
+# Cap native thread pools BEFORE numpy/scipy/sklearn/matplotlib load: OpenMP and BLAS
+# read these once, when the library initialises, so setting them after the imports
+# below has no effect in this process (loky workers inherit them either way). Many
+# tests fit small models where pool start-up dominates; this keeps them from fanning
+# out to every core. setdefault: an explicit value from the shell or CI wins. This
+# does NOT cap an explicit n_jobs=-1 on LightGBM/XGBoost/RandomForest; that is
+# spectral_predict.parallel_policy's job.
+import os
+
+for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+    os.environ.setdefault(_var, "1")
+
 import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend — no plot windows during tests
 
@@ -31,6 +43,17 @@ from tests.fixtures.synthetic_data import (
 # =============================================================================
 # Pytest Configuration
 # =============================================================================
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Stop joblib's reusable loky worker pool so no worker outlives the test run."""
+    try:
+        from joblib.externals.loky import reusable_executor
+    except ImportError:
+        return
+    executor = getattr(reusable_executor, "_executor", None)
+    if executor is not None:
+        executor.shutdown(wait=True, kill_workers=True)
 
 
 def pytest_configure(config):
@@ -66,6 +89,11 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         "gui: Tests for GUI components (may require display)"
+    )
+    config.addinivalue_line(
+        "markers",
+        "comprehensive: long GUI-driven model comparisons (tests/gui/test_comprehensive.py); "
+        "deselected by default, run nightly"
     )
 
 

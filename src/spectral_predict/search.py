@@ -7,18 +7,17 @@ import logging
 from typing import Optional
 
 
+from spectral_predict import parallel_policy
+
+
 def _frozen_needs_threading_fallback() -> bool:
     """Whether the current frozen build needs the threading-backend workaround.
 
-    PyInstaller windowed bundles cannot safely use loky's spawn method
-    regardless of Python version.  The frozen runtime hook's
-    multiprocessing.freeze_support() crashes on argv parsing in child
-    processes ("ValueError: not enough values to unpack (expected 2, got
-    1)"), and the parent retries spawning → fork-bomb of GUI windows.
-    Falling back to the threading backend avoids the broken spawn entirely.
+    Kept under this name for its importers. The rule (PyInstaller bundles cannot
+    spawn loky workers) lives in
+    :func:`spectral_predict.parallel_policy.frozen_needs_threading_fallback`.
     """
-    is_frozen = getattr(sys, "frozen", False) or "__compiled__" in globals()
-    return is_frozen
+    return parallel_policy.frozen_needs_threading_fallback()
 
 
 import numpy as np
@@ -168,11 +167,8 @@ SCALE_SENSITIVE_MODELS = {
     "ElasticNet",
 }
 
-# Models that are slower with parallel CV due to threading conflicts or low overhead
-# SVM: internal multi-threading conflicts with sklearn's CV parallelization
-# PLS/PLS-DA: so fast that joblib overhead dominates (0.08s serial vs 0.29s parallel)
-# Ridge/Lasso/ElasticNet: linear solve is ~5ms, joblib spawn overhead is ~1s on Windows
-MODELS_PREFER_SERIAL_CV = {"SVM", "PLS", "PLS-DA", "Ridge", "Lasso", "ElasticNet"}
+# Models whose CV folds run serially. The rule lives in parallel_policy; re-exported here.
+MODELS_PREFER_SERIAL_CV = parallel_policy.MODELS_PREFER_SERIAL_CV
 
 # Backward compatibility: LINEAR_MODELS is union of PLS + Neural/SVM
 LINEAR_MODELS = PLS_MODELS | NEURAL_SVM_MODELS
@@ -4878,12 +4874,19 @@ def _run_single_config(
     # Generators get consumed; we need the test indices for repeated-CV pooling.
     splits = list(cv_splitter.split(X, y))
 
-    # Run CV (serial if n_jobs_cv=1 for reproducibility, parallel otherwise)
-    if n_jobs_cv == 1:
-        # Serial execution for reproducibility (deterministic fold ordering)
+    # Thread budget (parallel_policy): split the cores between the fold pool and the
+    # fits inside it. Only the fold copy is capped; `pipe` keeps its own n_jobs for the
+    # full-data refit below, so captured params are unchanged.
+    plan = parallel_policy.plan_cv(
+        len(splits), X.shape[0], X.shape[1], model_name=model_name, requested_n_jobs=n_jobs_cv
+    )
+    fold_pipe = parallel_policy.limit_estimator_threads(pipe, plan.model_threads)
+
+    if not plan.parallel:
+        # Serial: deterministic fold ordering, no pool overhead.
         cv_metrics = [
             _run_single_fold(
-                pipe,
+                fold_pipe,
                 X,
                 y,
                 train_idx,
@@ -4896,25 +4899,23 @@ def _run_single_config(
             for train_idx, test_idx in splits
         ]
     else:
-        # Parallel execution for speed.
-        # 3.11 frozen builds must use 'threading' — loky's process spawn is
-        # broken in PyInstaller 5.x bundles on 3.11. Dev mode and 3.12 frozen
-        # builds use 'loky' for real multiprocessing.
-        backend = "threading" if _frozen_needs_threading_fallback() else "loky"
-        cv_metrics = Parallel(n_jobs=n_jobs_cv, backend=backend)(
-            delayed(_run_single_fold)(
-                pipe,
-                X,
-                y,
-                train_idx,
-                test_idx,
-                task_type,
-                is_binary_classification,
-                use_sample_weight_for_classification,
-                early_stopping_rounds=early_stopping_rounds,
+        # Frozen bundles get the 'threading' backend (loky cannot spawn there); the
+        # plan's context then also caps the shared BLAS pool at the per-fit budget.
+        with plan.backend_context():
+            cv_metrics = Parallel(n_jobs=plan.n_jobs, backend=plan.backend)(
+                delayed(_run_single_fold)(
+                    fold_pipe,
+                    X,
+                    y,
+                    train_idx,
+                    test_idx,
+                    task_type,
+                    is_binary_classification,
+                    use_sample_weight_for_classification,
+                    early_stopping_rounds=early_stopping_rounds,
+                )
+                for train_idx, test_idx in splits
             )
-            for train_idx, test_idx in splits
-        )
 
     # Print summary if imbalance handling was used
     if imbalance_method is not None:
