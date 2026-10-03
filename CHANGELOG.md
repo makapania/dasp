@@ -80,6 +80,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Model Development Y-transform now refits, saves and predicts correctly** (review
+  R048, R001, R020, R014/R019). Selecting any Y-transform for a model without booster
+  early stopping crashed the refit, and 'Box-Cox' was rejected outright. The save path
+  behind the crash would have dropped the spectral preprocessing (derivatives, SNV,
+  baseline) from the .dasp file and saved the Ridge/SVR/MLP scaler twice. Now the saved
+  preprocessor is the fitted full-spectrum preprocessing, and the saved model is a
+  TransformedTargetRegressor around the same prediction model an untransformed save
+  would hold (including its per-subset scaler), so a loaded model reproduces the
+  in-app predictions. With booster early stopping, the final model used to be fitted on
+  raw y while CV, the reported metrics and the file's `y_transform` described the
+  transformed model. It is now fitted on the transformed full-calibration y and
+  inverse-transforms its predictions. `y_transform` in the file is the transform the
+  model was trained with (canonical name: `log`, `log1p`, `sqrt`, `boxcox`,
+  `yeo-johnson` or `none`), not the widget at save time. **Existing .dasp files saved
+  from an early-stopping booster with a Y-transform hold a raw-y model and must be
+  retrained**; no other Y-transform file could be produced before this fix.
+  Everything else that uses the model follows the transform. Python, notebook and R code
+  exports train on the transformed target in CV and in the final fit; exporting a
+  Y-transformed model with imbalance handling is refused, with a message. The Model
+  Complexity curve is computed on the transformed model. Random Forest per-sample tree
+  spread is reported in original units. SHAP for a tree model with a Y-transform uses
+  the slower KernelExplainer, as TreeExplainer cannot see inside the transform.
+- **A bias or nonlinear correction is saved only with the model it was computed for**
+  (review R010/R064). A correction left from an earlier Model Development run (for
+  example a polynomial fitted to another model, or a regression correction after
+  switching to classification) used to be embedded in the next saved model and applied
+  to all of its predictions. Each new fit now clears corrections, computing one after
+  the run and then saving still works, and classification/one-class models never get
+  one. Only one Model Development run can be active at a time (a second Run click is
+  refused even if the button was re-enabled by switching tabs), Save, Export Code and
+  the nonlinear Compute button wait for the run to finish, a save or export uses one
+  consistent snapshot of the model and its correction, a failed run leaves the
+  previous model exactly as it was (still savable), and a correction whose model
+  changed while it was being computed is discarded. Saved metadata and exported code
+  now take the model's hyperparameters, derivative/polynomial settings, imbalance,
+  early-stopping and autoscale settings from the run that trained it, not from
+  whichever Results row is selected when you click Save or Export. A run also reads
+  every setting once, when it starts: double-clicking another Results row (now refused
+  while a run is going) or changing widgets mid-run no longer leaks into the run, and
+  the saved data type, x unit and validation split are those of the run. Prediction
+  also ignores a correction stored with a non-regression model. **Already
+  saved regression files with a stale correction cannot be detected automatically**:
+  if a model was saved with "apply correction" ticked after more than one run in the
+  session, recompute the correction and re-save.
+- **Model Development trains, saves and predicts on the same wavelength columns
+  (R009/R026/R112).** The Tab 7 refit (regression, classification and one-class) mapped
+  each selected wavelength to the *first* column within ±0.5 units, while prediction
+  read the column within ±0.01. On axes finer than 0.5 units (0.25 nm NIR/Raman, 0.48 or
+  0.24 cm⁻¹ FTIR) the model was trained on the neighbouring channel, so its CV and
+  validation numbers described a model the `.dasp` file does not reproduce. Training,
+  prediction and validation now share one contract (`spectral_predict.wavelength_matching`,
+  on the declared composition surface): an exact axis value wins, otherwise the single
+  value within 0.01, and a missing or two-channel match is an error instead of a dropped
+  column. The refit stores the axis values it actually used. **Retrain affected models:**
+  a model saved from Model Development before this fix on an axis finer than 0.5 units
+  was trained on shifted channels. That holds for wavelength subsets and, one channel
+  over with the first column duplicated, for full-spectrum models too. Loading one now
+  prints a warning naming how many features were shifted; models on 0.5 nm (or coarser)
+  grids are unaffected and load silently.
+- **Validation scores the wavelengths a results row was trained on (R031/R078).**
+  `all_vars`/`top_vars` were written with `%g` (6 significant digits), and the validation
+  rebuild looked them up by exact float equality. On axes with more significant digits
+  (nm→cm⁻¹ conversions such as 1e7/1350 = 7407.407…, OPUS wavenumbers, anything above
+  9999.99) a subset row was silently validated on the full spectrum, a partial match on
+  fewer columns, and one-class rows returned all-NaN `val_*`. Lists are now written
+  round-trip-exactly (each token ends in a `0` after the decimal point, e.g. `10000.10`,
+  a spelling `%g` never produces); already-saved rows (including Bayesian SQLite
+  studies) still resolve when exactly one column prints as the stored `%g` text. A row
+  that cannot be mapped, or a wavelength-subset row with no `all_vars` at all, is left
+  without validation values (earlier one-class values on it are cleared) and is listed
+  in the run log instead of "Validation metrics computed for top N"; Optuna study
+  names are unchanged. Old Model Development models whose saved wavelengths were
+  `%g`-rounded are matched the same way at prediction; where that is ambiguous, loading
+  warns and prediction stops with "retrain".
+- **Saving a classifier trained on numeric labels (R016).** After a Bayesian or NSGA-II
+  classification search, Tab 7 saved the search's label encoder with a model trained on
+  raw numeric labels: integer classes crashed the save (`keys must be str`), float
+  classes saved and then decoded every prediction to the wrong class. The save now
+  keeps only the encoder the refined model was trained with, `save_model` refuses an
+  encoder that cannot match the model's classes and records ownership of the one it
+  keeps (`label_encoder_owned`), and `label_mapping` keys are strings. Older `.dasp`
+  files are decoded only when their encoder provably belongs to the model (its classes
+  are exactly the encoder's codes); otherwise they predict their raw labels with a
+  warning. Probability columns in prediction uncertainty are named after the model's own
+  classes, which also fixes an error in the Prediction tab's uncertainty table when the
+  encoder knew more classes than the model saw. Model Development no longer turns a results row without its wavelength list
+  into a full-spectrum refit: it shows an error unless the row is tagged full-spectrum
+  with a matching variable count, or its `top_vars` is the complete trained subset.
+
 - **Calibration transfer names and defaults (QW2, R085, R091, R128).** Transfer methods are
   labelled for what they do: 'ctai' is PC-DS (paired regression in satellite PCA space),
   'nspfce' is Iterative ridge DS (a dasp heuristic, not PFCE), 'tsr' is per-wavelength

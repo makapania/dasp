@@ -743,6 +743,198 @@ producing that fold's score (booster early stopping on the test fold R028/R003/R
 the scored fold R002/R021). Rule now in CLAUDE.md. Also: the 2026-09-28 reviews were Claude-only; Codex gpt-6-astra
 and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before any fix starts.
 
+## 2026-10-02 - Tab 7 Y-transform save contract (R048/R001/R020/R014/R010), branch fix/ytransform-save
+- **R048 was masking R001/R020.** Every TTR refit crashed on `pipe.steps` before reaching the TTR save branch, so no
+  .dasp with a TTR could exist; a bare `hasattr` guard would have shipped silent corruption (lost prep_pipeline,
+  scaler saved twice). Fix both together.
+- **Save contract:** Tab 7 always runs Path A, so spectral preprocessing (`prep_pipeline`) is fitted OUTSIDE the TTR on
+  the full spectrum; the TTR wraps only the post-subset `[imbalance?, scaler?, model]`. Save a TTR exactly like the
+  untransformed case (preprocessor = prep_pipeline; model = scaler+model or bare model) and re-wrap that prediction
+  model with `y_transform.replace_fitted_regressor` (copies the fitted TTR, swaps `regressor_`). Never split the
+  TTR's inner steps out as the preprocessor.
+- **'Box-Cox'.** `.lower().replace('-', '-')` was a no-op, so the combobox value never matched 'boxcox'; also
+  `validate()` skipped the y>0 check for it. All entry points now go through `normalize_y_transform_method`.
+- **Early stopping + transform:** CV transforms fold y by hand; the final fit is now TTR-wrapped (no ES on the final
+  fit either way). If the booster ES agent changes the final fit (e.g. `set_params(model__n_estimators=...)`), the
+  TTR needs `regressor__` prefixes.
+- **Corrections:** each new `refined_model` gets a fresh `_refined_model_token`; corrections record the token they
+  were computed under and `_correction_to_save()` only returns a matching one, regression only. `model_io` drops a
+  correction for non-regression at save and ignores one at predict (legacy files).
+- **Pre-existing, not fixed:** `_plot_wavelength_importance` applies `refined_preprocessor` (full-spectrum prep) to
+  `refined_X_train` (already preprocessed + subset), so the residual-correlation overlay double-preprocesses.
+- **Review round 1 (Codex + GLM, MERGE-WITH-FIXES):**
+  - Token race: Compute runs on the Tk thread while the refit worker can swap the model. Capture the token BEFORE
+    reading `refined_y_*`, keep the result only if the token is unchanged; the worker sets the token to None before
+    the model swap and issues the new one only after the CV predictions are stored. Save/Compute are also disabled
+    while a refit runs (GA abort paths now re-enable them).
+  - Every consumer that rebuilds or inspects the model must handle a TTR: code export (now `YTransformRegressor` in
+    the generated script; `_fit_fold` re-enters with transformed train/eval y for early stopping; export refuses
+    Y-transform + imbalance), RF tree variance in `predict_with_uncertainty` (inverse-transform each tree), complexity
+    curve (clones of `final_pipe`, params `regressor__model__<p>`). SHAP has no TreeExplainer for a TTR and falls
+    back to KernelExplainer (works, slower, original units).
+  - **Tree-count hook for fix/booster-early-stopping:** set any final-fit parameter on `final_pipe` at the
+    "FINAL-FIT PARAMETER HOOK" comment (just after the Y-transform wrap); `_final_param_prefix` is `'regressor__'`
+    when it is a TTR, so the booster tree count is `regressor__model__n_estimators`.
+  - Saved `y_transform` is now the canonical name (`log`, `boxcox`, `none`); files from before this fix hold display
+    names ('Log', 'None'), so readers must normalize.
+  - Export parity gotcha: a Tab 7 XGBoost refit fills params missing from `Params` with GUI defaults (subsample 0.8,
+    colsample_bytree 0.6, ...) that the code export does not know, so export CV differs unless the row is complete.
+    Pre-existing, not Y-transform specific; test rows carry full params.
+- **Review round 2 (Codex BLOCK, GLM MERGE):**
+  - Disabled Run buttons are NOT a refit guard: the Model Development tab handler treats a disabled Run as
+    "uninitialised" and re-enables it, and loading defaults or a Results row re-enables it too. `_run_refined_model`
+    now refuses while `_refit_active`; the flag is cleared by `_end_refit(generation)`, queued in the worker's
+    `finally` AFTER the run's own result callbacks. Save refuses while a refit is active, reads everything once via
+    `_refined_state_snapshot()`, and aborts if the model token changed during the file dialog.
+  - Error path: Save/Export stay enabled when the previous model is still complete (`refined_model` set AND token
+    set); a failure mid-swap (token None) disables them.
+  - Exported `YTransformRegressor` must be `(RegressorMixin, BaseEstimator)` (mixin first) or `is_regressor` is
+    False and VotingRegressor rejects it; it also mirrors TTR's (n,)/(n,1) output shape.
+  - Complexity grids must contain the fitted value (8-point grids around a base usually miss it).
+- **Review round 3 (Codex BLOCK, GLM MERGE-WITH-FIXES):**
+  - The refit worker must not write ANY `refined_*` field before success: the one-class path wrote
+    `refined_full_wavelengths` before its no-inlier / too-few-folds exits, so a failed run left Save enabled with
+    model A plus run B's axis. Both paths now build their fitted state locally and call
+    `_publish_refined_state(dict)` once (token None during the setattr loop, fresh token after). `refined_ga_*`
+    are run inputs (set by Results-row loading / GA), frozen into `refined_config`, so they stay as they are.
+  - If `threading.Thread(...)`/`start()` raises after `_refit_active=True`, nothing ever clears it: the launch is
+    wrapped and releases its generation on failure.
+  - Export Code joins Save/Compute: disabled during a run, refused at method level, config + data from one snapshot.
+    `_update_bias_correction_ui(from_run_completion=True)` is the only call allowed during a run (the completion
+    callback runs before `_end_refit` clears the flag).
+- **Review round 4 (Codex + GLM MERGE-WITH-FIXES):**
+  - The refit result is now ONE frozen `RefinedState` (module level in the GUI) held in `app._refined_state` and
+    replaced by a single assignment; `app.refined_<field>` and `app._refined_model_token` are properties onto it
+    (assigning one replaces the whole object via `dataclasses.replace`). Unset fields raise AttributeError so the
+    many `hasattr(self, 'refined_...')` checks still work. The worker queues publication on the Tk thread
+    (`_publish_refined_state_on_tk_thread`), so Tk callbacks never straddle a swap; off-Tk or update()-calling
+    consumers (learning-curve worker, SHAP) capture `self._refined_state` once.
+  - `RefinedState.training` = the Results row (shallow copy) + autoscale flag captured at worker START; Save
+    metadata and Export read params/Deriv/Poly/imbalance/early stopping/autoscale from it, never from the live
+    selection. GA genes/config/model type are frozen per run (locals), not re-read at publish.
+  - `_refined_state_snapshot()` returns None without a token/model; Save, Export entry and the open dialog's
+    `do_export` refuse then. Loading a Results row is refused while a refit runs.
+  - Tooling gotcha: passing `\\n` through the agent's Bash heredoc arrived as `\n` (escape collapsed), so string
+    anchors containing backslashes silently failed to match; anchor on backslash-free text.
+- **Review round 5 (Codex + GLM MERGE-WITH-FIXES):**
+  - The refit worker read the live Results row (~24 sites: Params/Preprocess/Window/Deriv, hyperparams,
+    one-class, imbalance, early stopping, `optuna_params` at publish) and live Tk vars/data. Now
+    `_capture_refit_inputs()` freezes ALL of it on the Tk thread in `_run_refined_model` (or at the top of a
+    direct `_run_refined_model_thread()` call) and the worker reads only `run_inputs`; grep confirms no
+    `self.selected_model_config` / `self.<tkvar>.get()` / `self.X|y|validation_*` read remains in the worker.
+    `_collect_refine_hyperparams` is pre-collected for the widget model and 'PLS' (the only remap target).
+  - `_on_result_double_click` assigned `selected_model_config` before the guarded loader refused: guard at the
+    very top now (both branches).
+  - Save metadata data_type / x_unit / validation_* / inlier fallback come from `snap['training']`.
+  - Plot click callbacks (regression scatter, residual, leverage) captured y_true/y_pred but read the CURRENT
+    cv_indices/specimen_ids, so a click on A's plot after B published offered B's specimen. Each plot binds
+    `plot_state = self._refined_state` for itself and its callbacks.
+  - The Export dialog shows and exports the snapshot taken when it opened; `do_export` refuses if the current
+    token is no longer that snapshot's.
+- **Review round 6 (DeepSeek MERGE-WITH-FIXES):** helpers called FROM the worker count too:
+  `_parse_wavelength_spec` read the live `_original_wavelength_order`; it now takes `original_order` (worker passes
+  its frozen copy; None or [] = available order). Plot callbacks no longer fall back to the live `self.y.index`
+  (no specimen IDs in the run = nothing offered). GA inputs are stored via `root.after` (`_store_ga_inputs`),
+  not from the worker. Captured frames are `copy(deep=False)`: shares data under pandas CoW, freezes the object.
+- **Merge / follow-up items (not fixed here):**
+  - R015: the bundle export ships already-preprocessed `refined_X_train` but its script preprocesses again
+    (pre-existing; still true with the Y-transform wrapper).
+  - fix/booster-early-stopping: its export round/tree-count selector must look inside `YTransformRegressor`
+    (`model.regressor`) in generated code, and inside the TTR (`regressor__model__...`) in the app.
+
+## 2026-10-02 - Wavelength mapping contract (R009/R026/R112, R031/R078) and label encoder (R016), branch fix/wavelength-mapping
+- **One contract:** `spectral_predict/wavelength_matching.py` (`match_wavelengths`, `resolve_wavelength_list`,
+  `format_wavelength_list`, `WavelengthMatchError`; on the declared surface). Exact axis value first, else the single
+  value within 0.01; missing, two-candidate or two-values-one-column all raise. Tab 7 (both mapping sites), model_io
+  (every former `< 0.01` first-hit loop and `_select_wavelengths_from_dataframe`) and both validation rebuilds use it.
+- **The GUI rounds axes to integers on load** (`_apply_wavelength_filter`, ~19670, refuses sub-integer data with a
+  dialog). So the fine-grid R009 bug is reachable in the GUI only when that filter is skipped (X_original kept, e.g.
+  after its error dialog) and from Python; R031/R078 are reachable in the GUI after nm<->cm-1 conversion (1e7/x
+  columns are not rounded). Do not "simplify" the contract on the assumption that GUI axes are integers.
+- **Legacy %g handling (revised after review round 1, Codex BLOCK):** a numeric window around the rounded value is
+  wrong below powers of ten (`"10000"` would match 9999.97, which %g prints as `"9999.97"`) and for negatives. Match a
+  legacy token to the axis columns whose OWN `f"{a:g}"` equals the token, and require exactly one. Telling new rows
+  from old ones per row also failed: repr writes `10000.1`, which %g also writes. The writer now appends a `0` to any
+  mantissa that lacks a trailing zero after the decimal point (`10000.10`, `1.0e-05`, `7407.4074074074080`); %g
+  strips trailing zeros, so it never writes such a token, and classification is per token. Rows written by
+  `1f3c671` (plain repr) never shipped.
+- **Old models with %g-rounded metadata wavelengths:** the pre-fix refit stored the parsed `all_vars` floats. On a
+  0.012 grid ~45% of them have both neighbours within ±0.01, so unstamped models are mapped with
+  `match_wavelengths(..., legacy_g=True)` (the same %g-text rule) at predict time and in the load-time replay; if even
+  that is ambiguous, load warns and predict raises "Retrain".
+- **Ensembles are excluded from the retrain replay:** the GUI ensemble save stores `wavelengths == full_wavelengths`
+  (the whole exact axis) for every member, so replaying the Tab 7 first-hit rule would flag every fine-grid ensemble
+  falsely. Members carry `ensemble_parent`/`is_base_model`.
+- **Old saved models:** `save_model` now stamps `metadata['wavelength_matching'] = 1`. On load, an unstamped Path A model
+  (`use_full_spectrum_preprocessing` + `full_wavelengths`) replays the old first-hit-within-0.5 mapping against
+  `full_wavelengths` (= the Tab 7 training axis) and warns if any feature differs (Tab 8 load shows a dialog).
+  Prediction already read the named column before the fix, so old models predict exactly as before; only the warning
+  is new. Not auto-remapped to the neighbour on purpose (brief: warn + retrain).
+- **GUI `wavelength_indices` must be a list:** the one-class validation block tests `if wavelength_indices:`; a numpy
+  array there raises "truth value of an array is ambiguous". The refit sites call `.tolist()`.
+- **R016:** refinement trains on raw numeric labels (it encodes only text labels), so `self.label_encoder` (fitted on
+  every Bayesian/NSGA classification search) never belongs to a refined model; the save fallback is gone.
+  `save_model` also drops an encoder whose model `classes_` are not codes 0..n-1 (warning), and `predict_with_model`
+  skips decoding for such legacy artifacts. Display-only fallbacks (`refined_label_encoder or self.label_encoder` at
+  ~21176/21198/37715/38596) still mis-label numeric classes in tooltips/plots: not fixed here.
+- **Validation failures are surfaced via `df.attrs["validation_failures"]`** (`{row index: reason}`) and
+  `df.attrs["validation_attempted"]` from both `compute_validation_metrics_for_top_models` and the one-class twin;
+  the GUI logs "computed for only X of top N" plus reasons, counting only this run's non-failed attempted rows.
+  The one-class helper now clears val_* on attempted rows first (it used to keep an earlier run's numbers). A
+  supervised row with no usable `all_vars` is validated on the full spectrum only if it is tagged full AND its
+  `n_vars` equals the column count.
+- **Review round 2 (Codex BLOCK on 820c039):**
+  - The R016 class-count rule was wrong: an encoder fit on a,b,c with a model trained on codes for a,b only is a
+    valid pair. Only provable staleness (model classes not codes 0..n-1 of the encoder) is rejected; ownership is
+    enforced where the encoder is chosen (Tab 7 saves only `refined_label_encoder`).
+  - Legacy `%g` interpretation at predict is limited to `_is_legacy_tab7_model` metadata (unstamped Tab 7 Path A).
+    Ensembles/multiclass keep exact-first; `save_ensemble` stamps its top-level metadata too.
+  - Legacy tokens are classified by their TEXT (`_looks_like_g_token`: <=6 significant digits, no trailing zero
+    after the point, fixed notation only for 1e-4 <= |v| < 1e6), never by re-formatting the parsed value, which
+    fails for subnormals (`float('1e-318')` prints `9.99999e-319`).
+  - Success is recorded, not inferred: `attrs["validation_succeeded"]` from both helpers (try/else). One-class
+    `val_BalancedAcc` is NaN by design on an inlier-only validation set.
+  - The missing-`all_vars` fallback needs an affirmative `"full"` tag (`SubsetTag`, or `Subset` when SubsetTag is
+    null) and matching `n_vars`; the rule is `wavelength_matching._full_spectrum_fallback_refusal`, shared by
+    search validation, GUI ensemble rebuild and `ensemble.extract_preprocessor_config`.
+  - Ensemble paths converted: GUI `_reconstruct_models_from_results` (`parse_wavelength_subset` now takes the row;
+    failures raise and the row is excluded with "[!] Failed to reconstruct"), `preprocessing_wrapper.
+    PreprocessorConfig` and `ensemble.extract_preprocessor_config`. The wrapper-level
+    `_match_wavelengths_normalized` (WavelengthSubsetWrapper predict path) was converted at the merge of main
+    (PR #84) in its new home `src/spectral_predict/model_wrappers.py`; no copy remains in the GUI or model_io. Test fixtures that rebuilt full rows without `all_vars` now carry
+    `SubsetTag="full"` + `n_vars`, as real search rows do.
+  - `compute_composite_score` re-keys validation attrs after `reset_index` (`scoring._remap_validation_attrs`).
+- **Review round 3 (Codex BLOCK on dae6654):**
+  - Encoder ownership is now RECORDED, not inferred: `save_model` writes `metadata['label_encoder_owned']=True`
+    whenever it keeps an encoder (dropping only provably stale ones: bool or non-code classes). Prediction decodes
+    only classification models, and only (a) stamped encoders whose codes are valid, or (b) for unstamped legacy
+    files, encoders that provably fit (model classes == codes 0..n-1, same count). Everything else returns raw
+    predictions with a warning. No class-count rule on new files (subset-class models stay valid); the count rule
+    survives only as the legacy proof. Raw {0,1} next to a stale x,y,z is indistinguishable from a subset-trained
+    model without the stamp, hence no decoding.
+  - Model Development loading (`_load_model_for_refinement`) applies `_full_spectrum_fallback_refusal`; with no
+    `all_vars`, `top_vars` is used only if it maps and its count equals `n_vars` (it keeps at most the top 30).
+    Otherwise "# ERROR" in the wavelength box.
+  - `_looks_like_g_token` now checks the exponent grammar exactly as %g writes it: two-digit padded exponent, more
+    digits only when needed, and exponent form only for exp < -4 or >= 6. `1e+00`, `1e+03`, `1e+006`, `1.5e+05`
+    are matched exactly.
+  - Multi-class holdout val_* need no pre-clear: the supervised helper re-initialises every val column to NaN for
+    ALL rows on entry (whole-column assignment). Pinned by a test instead of new code.
+- **Review round 4 (Codex MERGE-WITH-FIXES):** files with absent/null `task_type` are classifiers when the fitted
+  estimator is (`model_io._effective_task_type`: sklearn `is_classifier` or `classes_`), so an owned encoder still
+  decodes them; explicit regression/one_class/multiclass_simca dispatch is unchanged. The decoding decision is one
+  helper (`_decoding_encoder`) shared by prediction and `predict_with_uncertainty`, whose probability column names
+  now follow `model.classes_` (decoded only through a qualifying encoder, never more names than columns). That
+  fixes the Tab 8 `_display_uncertainty` IndexError with a superset encoder.
+- **Review round 5:** `model_wrappers._match_wavelengths_normalized` partitions PER ITEM (numeric requests via
+  `match_wavelengths`, non-numeric ones such as an ID column must be present literally, order restored); an
+  all-or-nothing numeric parse broke legacy wrappers with `[1000.0, "id"]`. Tab 8 `_display_uncertainty` uses the
+  union of all loaded models' class labels as headers and places each model's probabilities under its own labels
+  (blank where absent); headers used to come from the first model only.
+- **Follow-ups not done (review round 2, deliberately out of scope):** `scoring.py` ~112 substitutes the CV gap
+  when validation is missing; `save_model` stamps `wavelength_matching` on any save, so an old fitted model
+  merely re-saved without retraining would lose its retrain warning.
+
 ## 2026-10-02 - fix/contaminant-maths (QW3, QW6, R024, R025, R075, R113, R114): gotchas
 - **EPO must not centre the nuisance library.** `EstimatedEPO`, `MultiGroupEPO` and `interference.EPO` all
   column-centred D before the SVD. When the rows share one contaminant shift (mean diff + noise copies,
