@@ -1418,6 +1418,14 @@ Gotchas worth knowing:
   on `fold_pipe` (thread-capped copy of the sanitized pipe) with `y_fit` (XGBoost codes); the final refit keeps
   `pipe`. Bayesian round selection uses the capped `cv_model`; the plan goes sequential whenever round selection or
   per-fold balanced weights (`_cv_balanced_param`, which replaces #94's `_cv_fit_params`) force the manual loop.
+- **Exported helper sources are user-visible text.** The export copies cv_utils functions with
+  `inspect.getsource`, docstrings included: `_final_estimator`'s docstring named `YTransformRegressor`, so every
+  export "contained" a Y-transform (`test_y_transform_consumers::test_export_without_transform_is_unchanged`).
+  Keep export-only class names out of copied helpers' docstrings.
+- **Tab 7 XGBoost on {1,2,5} crashed** (also on main since #91: integer labels fitted as given, XGBoost refuses
+  them; the refit ends with no model). Tab 7 now label-encodes when `classification_fit_labels(y, model_name)`
+  says `xgb_codes`; the codes equal the grid's, and the existing encoder plumbing decodes CV predictions,
+  probability columns (sorted-label order) and the saved model's predictions. GUI test pins accuracy = grid row's.
 - **Merge of main 6f63216 (PR #90 export helpers, PR #91 label policy / pooled metrics):** study names put
   `|labels=raw1` AFTER `|boost_rounds=`; the booster old-scoring notice matches the previous base both with and
   without the `|labels=` segment (a post-#91, pre-fix LightGBM/CatBoost study on raw labels would otherwise

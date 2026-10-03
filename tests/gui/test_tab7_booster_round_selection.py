@@ -263,3 +263,85 @@ def test_tab7_log_transform_booster_saves_the_cv_model_in_original_units(gui_app
     loaded = load_model(path)
     pred = np.asarray(predict_with_model(loaded, X_df), dtype=float).ravel()
     np.testing.assert_allclose(pred, np.exp(on_log_scale), rtol=1e-6, atol=1e-6)
+
+
+def test_tab7_xgboost_refit_on_integer_labels_decodes_codes(gui_app, tmp_path):
+    """XGBoost only accepts 0..K-1. Tab 7 fits {1, 2, 5} as codes (as the grid does)
+    and decodes CV predictions, probabilities and the saved model's predictions."""
+    from unittest.mock import patch
+
+    from spectral_predict.model_io import load_model, predict_with_model
+    from spectral_predict.search import run_search
+
+    labels = np.array([1, 2, 5])
+    X_df, y_cont = _data()
+    codes = np.digitize(y_cont.to_numpy(), np.quantile(y_cont.to_numpy(), [1 / 3, 2 / 3]))
+    y = pd.Series(labels[codes], index=X_df.index)
+    df, _ = run_search(
+        X_df,
+        y,
+        "classification",
+        folds=3,
+        tier="quick",
+        models_to_test=["XGBoost"],
+        enabled_models=["XGBoost"],
+        preprocessing_methods={"raw": True},
+        enable_variable_subsets=False,
+        enable_region_subsets=False,
+        xgb_n_estimators_list=[40],
+        xgb_learning_rates=[0.2],
+        xgb_max_depths=[3],
+        early_stopping_rounds=10,
+    )
+    row = df.iloc[0].to_dict()
+    k = int(row["n_estimators_selected"])
+
+    app = gui_app
+    app.X_original = X_df
+    app.X = X_df
+    app.y = y
+    app.active_indices = None
+    app.excluded_spectra = set()
+    app.validation_enabled.set(False)
+    app.validation_indices = []
+    app.use_autoscale.set(False)
+    app.selected_model_config = dict(row)
+    app._original_wavelength_order = [float(c) for c in X_df.columns]
+    app.refine_task_type.set("classification")
+    app.refine_model_type.set("XGBoost")
+    app.refine_preprocess.set("raw")
+    app.refine_folds.set(3)
+    app.refine_cv_strategy.set("kfold")
+    app.model_loaded_from_results = True
+    app.refine_hyperparams_modified = False
+    app.refined_model = None
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        app._run_refined_model_thread()
+    app.root.update()
+    assert app.refined_model is not None, buf.getvalue()[-4000:]
+
+    encoder = app.refined_label_encoder
+    assert encoder is not None and list(encoder.classes_) == [1, 2, 5]
+    model = app.refined_model
+    booster = model.steps[-1][1] if hasattr(model, "steps") else model
+    assert list(booster.classes_) == [0, 1, 2]  # codes = sorted labels' positions
+    assert booster.get_booster().num_boosted_rounds() == k
+    # Same CV as the grid row (which also fits codes and decodes them).
+    assert app.refined_performance["accuracy_mean"] == pytest.approx(row["Accuracycv"])
+    # CV predictions decode to the user's labels; probability columns follow them.
+    assert set(encoder.inverse_transform(np.asarray(app.refined_y_pred, dtype=int))) <= {1, 2, 5}
+    proba = np.asarray(app.refined_y_proba)
+    assert proba.shape == (len(y), 3)
+    np.testing.assert_allclose(proba.sum(axis=1), 1.0, atol=1e-5)
+
+    path = tmp_path / "xgb_int_labels.dasp"
+    with (
+        patch("tkinter.filedialog.asksaveasfilename", return_value=str(path)),
+        contextlib.redirect_stdout(io.StringIO()),
+    ):
+        app._save_refined_model()
+    loaded = load_model(path)
+    pred = np.asarray(predict_with_model(loaded, X_df)).ravel()
+    expected = labels[np.asarray(model.predict(X_df.to_numpy()), dtype=int)]
+    np.testing.assert_array_equal(pred, expected)

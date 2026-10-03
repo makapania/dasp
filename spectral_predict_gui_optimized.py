@@ -42387,11 +42387,21 @@ F1 Score:  {f1:.4f}
                 # Encode text labels ("Clean", "Contaminated", ...) and non-integer
                 # numeric labels ({0.1, 0.2}: sklearn reads them as continuous);
                 # integer-valued labels are fitted as given, as in every search
-                # (scoring.classification_fit_labels).
-                from spectral_predict.scoring import labels_are_integer_valued
+                # (scoring.classification_fit_labels). XGBoost only accepts 0..K-1, so
+                # its integer labels ({1, 2, 5}) are encoded too: the codes are the
+                # sorted labels' positions (the grid's "xgb_codes"), and the encoder
+                # decodes CV predictions, probability columns and the saved model's
+                # predictions back to the user's labels, as for text labels.
+                from spectral_predict.scoring import (
+                    classification_fit_labels,
+                    labels_are_integer_valued,
+                )
                 if (
                     not pd.api.types.is_numeric_dtype(y_series.dtype)
                     or not labels_are_integer_valued(y_series.to_numpy())
+                    or classification_fit_labels(
+                        y_series.to_numpy(), model_name=model_name
+                    ).policy == "xgb_codes"
                 ):
                     from sklearn.preprocessing import LabelEncoder
                     local_label_encoder = LabelEncoder()
@@ -42406,7 +42416,10 @@ F1 Score:  {f1:.4f}
                     print(f"\n{'='*70}")
                     print(f"CATEGORICAL LABEL ENCODING (Model Development)")
                     print(f"{'='*70}")
-                    print(f"Detected non-numeric classification labels.")
+                    print(
+                        "Detected text, non-integer, or (for XGBoost) non-0..K-1 "
+                        "classification labels."
+                    )
                     print(f"Encoding mapping:")
                     for label, code in sorted(label_mapping.items(), key=lambda x: x[1]):
                         print(f"  '{label}' -> {code}")

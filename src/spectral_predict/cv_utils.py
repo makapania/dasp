@@ -782,9 +782,12 @@ def set_booster_rounds(model, n_rounds: int) -> None:
 
 
 def _final_estimator(model):
-    """Innermost estimator: unwraps a target-transform wrapper (sklearn's
-    TransformedTargetRegressor or the export's YTransformRegressor; fitted or not) and
-    a Pipeline's final step."""
+    """Innermost estimator: unwraps any target-transform wrapper exposing
+    ``regressor_`` / ``regressor`` (fitted or not) and a Pipeline's final step.
+
+    The exported scripts copy this function's source, so its text must not name
+    export-only classes (a script without a Y-transform must not mention one).
+    """
     inner = model
     for _ in range(4):
         if hasattr(inner, "regressor_"):
