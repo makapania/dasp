@@ -389,6 +389,11 @@ def gui_app(session_app, request):
     app, root = session_app
 
     unsettled = app._test_baseline.restore(app)
+    # Worker handles: a test that patches threading.Thread can leave a fake (or a
+    # finished) worker here, and the next _run_analysis / refit launch checks it.
+    # Set explicitly: the snapshot skips values from the threading module as wiring.
+    app.analysis_thread = None
+    app._refit_active = False
     if not request.config.getoption("--visible"):
         _withdraw_all(root)
     if unsettled:

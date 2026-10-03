@@ -58,7 +58,14 @@ from pymoo.termination import get_termination
 from .preprocess import SNV, SavgolDerivative
 from .models import CATBOOST_RUNTIME_PARAMS, get_feature_importances, strip_runtime_params
 from .variable_selection import cars_selection
-from .scoring import compute_specificity, lins_ccc
+from .scoring import (
+    align_proba_to_classes,
+    classification_fit_labels,
+    classification_metrics,
+    compute_specificity,
+    lins_ccc,
+    regression_figures_of_merit,
+)
 from .bayesian_utils import _extract_fitted_n_components
 
 # Imbalance handling imports
@@ -1172,16 +1179,22 @@ class SpectralOptimizationProblem(Problem):
         # Use user-specified models or defaults
         self.model_types = models if models is not None else MODEL_TYPES
 
-        # Encode labels for classification
-        # ALWAYS encode classification labels to ensure consistent 0..n-1 range
-        # even for numeric labels (e.g., [1,2,3] -> [0,1,2])
+        # Classification labels follow scoring.classification_fit_labels, as in
+        # the grid search: integer-valued numeric labels are fitted as given
+        # (PLS-DA regresses on the label values, so re-coding {1, 2, 100} would
+        # fit a model Model Development cannot reproduce); text and non-integer
+        # numeric labels are label-encoded and the encoder is returned. XGBoost
+        # only accepts 0..K-1, so it is fitted on self.y_xgb codes and decoded
+        # back before scoring.
         self.label_encoder = None
+        self.y_xgb = self.y
         if task_type == 'classification':
-            self.label_encoder = LabelEncoder()
-            y_arr = np.asarray(y)
-            if y_arr.dtype == object:
-                y_arr = y_arr.astype(str)
-            self.y = self.label_encoder.fit_transform(y_arr)
+            from .scoring import classification_fit_labels
+
+            _fit = classification_fit_labels(y)
+            self.y = _fit.y_fit
+            self.label_encoder = _fit.encoder
+            self.y_xgb = classification_fit_labels(y, model_name='XGBoost').y_fit
 
         # Fitness cache
         self.cache_enabled = cache_enabled
@@ -1510,6 +1523,9 @@ class SpectralOptimizationProblem(Problem):
                 rmse = float(np.mean(rmse_per_fold))
                 return rmse
             else:
+                # XGBoost only accepts 0..K-1 codes; accuracy and the stratified
+                # splits are identical under that monotone re-coding.
+                y_cls = self.y_xgb if model_type == 'XGBoost' else self.y
                 cv = StratifiedKFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state)
                 # Per-fold balanced sample_weight for sample_weight-only classifiers
                 # (XGBoost-like). The early-stopping helper slices it per train_idx;
@@ -1517,12 +1533,12 @@ class SpectralOptimizationProblem(Problem):
                 _balanced_sw = None
                 if use_sample_weight_for_classification:
                     from sklearn.utils.class_weight import compute_sample_weight
-                    _balanced_sw = compute_sample_weight('balanced', self.y)
+                    _balanced_sw = compute_sample_weight('balanced', y_cls)
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
                     if use_early_stopping:
                         scores = cross_val_score_with_early_stopping(
-                            pipeline_model, X_subset, self.y, cv=cv,
+                            pipeline_model, X_subset, y_cls, cv=cv,
                             scoring='accuracy',
                             early_stopping_rounds=self.early_stopping_rounds,
                             sample_weight=_balanced_sw,
@@ -1545,17 +1561,23 @@ class SpectralOptimizationProblem(Problem):
                                 _inner.set_fit_request(sample_weight=True)
                             with sklearn.config_context(enable_metadata_routing=True):
                                 scores = cross_val_score(
-                                    _routed_model, X_subset, self.y, cv=cv,
+                                    _routed_model, X_subset, y_cls, cv=cv,
                                     scoring='accuracy',
                                     params={'sample_weight': _balanced_sw},
                                 )
                         else:
                             scores = cross_val_score(
-                                pipeline_model, X_subset, self.y, cv=cv,
+                                pipeline_model, X_subset, y_cls, cv=cv,
                                 scoring='accuracy',
                             )
-                # Return 1 - accuracy (to minimize)
-                return 1.0 - np.mean(scores)
+                # Return 1 - pooled accuracy (to minimize). Weighting each fold's
+                # accuracy by its test size gives exactly the accuracy of the
+                # pooled out-of-fold predictions (total correct / n), the
+                # definition used by the grid search and the displayed CV
+                # metrics; a plain fold mean favours configs that do well on
+                # the smaller folds.
+                fold_sizes = [len(test_idx) for _, test_idx in cv.split(X_subset, y_cls)]
+                return 1.0 - float(np.average(scores, weights=fold_sizes))
 
         except Exception as e:
             # Track and log model failures for debugging
@@ -1910,13 +1932,8 @@ def run_nsga2_search(
     # Validate imbalance configuration for classification
     if task_type == 'classification' and imbalance_method is not None:
         # Need to encode y first for validation
-        y_for_validation = y
-        if not pd.api.types.is_numeric_dtype(y.dtype):
-            from sklearn.preprocessing import LabelEncoder as LE
-            y_arr = np.asarray(y)
-            if y_arr.dtype == object:
-                y_arr = y_arr.astype(str)
-            y_for_validation = LE().fit_transform(y_arr)
+        # (same label policy as the fits: non-integer labels are encoded)
+        y_for_validation = classification_fit_labels(y).y_fit
         validate_classification_config(
             y=y_for_validation,
             imbalance_method=imbalance_method,
@@ -1942,12 +1959,7 @@ def run_nsga2_search(
     # (CARS-Tree uses numeric targets internally)
     y_for_importance = y
     if task_type == 'classification':
-        if not pd.api.types.is_numeric_dtype(y.dtype):
-            label_encoder_for_importance = LabelEncoder()
-            y_arr = np.asarray(y)
-            if y_arr.dtype == object:
-                y_arr = y_arr.astype(str)
-            y_for_importance = label_encoder_for_importance.fit_transform(y_arr)
+        y_for_importance = problem.y  # the labels the models are fitted on
 
     # Compute CARS-Tree importance for principled wavelength guidance (if use_guidance=True)
     # CARS-Tree uses hybrid split+gain importance (denser than plain CARS)
@@ -2886,7 +2898,10 @@ def _compute_nir_metrics(
         Dictionary with NIR metrics: {'MAEcv', 'Bias', 'RPD', 'RER'}
         Values are np.nan if computation failed.
     """
-    default_metrics = {'MAEcv': np.nan, 'Bias': np.nan, 'RPD': np.nan, 'RER': np.nan, 'CCCcv': np.nan}
+    default_metrics = {
+        'MAEcv': np.nan, 'Bias': np.nan, 'RPD': np.nan, 'RER': np.nan, 'CCCcv': np.nan,
+        'SECV': np.nan, 'RPIQ': np.nan,
+    }
 
     if task_type != 'regression':
         return default_metrics
@@ -2973,26 +2988,19 @@ def _compute_nir_metrics(
             warnings.simplefilter('ignore')
             y_pred_cv = cross_val_predict(model, X_subset, y, cv=cv)
 
-        # Compute NIR metrics from CV predictions
-        # MAEcv: Mean Absolute Error
-        mae_cv = mean_absolute_error(y, y_pred_cv)
-        # Bias: Mean prediction error (positive = systematic overprediction)
-        bias_cv = float(np.mean(y_pred_cv - y))
-        # RPD and RER need RMSE (compute from predictions for consistency)
-        rmse_cv = np.sqrt(np.mean((y - y_pred_cv) ** 2))
-        # RPD: Ratio of Performance to Deviation
-        y_std = float(np.std(y))
-        rpd = y_std / rmse_cv if rmse_cv > 0 else 0.0
-        # RER: Range Error Ratio
-        y_range = float(np.ptp(y))
-        rer = y_range / rmse_cv if rmse_cv > 0 else 0.0
+        # NIR figures of merit from the pooled CV predictions, same function and
+        # definitions as the grid search (scoring.regression_figures_of_merit;
+        # a perfect model gives RPD/RER inf, not 0.0).
+        fom_cv = regression_figures_of_merit(y, np.ravel(y_pred_cv), context="cv")
 
         return {
-            'MAEcv': float(mae_cv),
-            'Bias': bias_cv,
-            'RPD': rpd,
-            'RER': rer,
-            'CCCcv': float(lins_ccc(y, y_pred_cv.ravel())),
+            'MAEcv': fom_cv['MAE'],
+            'Bias': fom_cv['Bias'],
+            'RPD': fom_cv['RPD'],
+            'RER': fom_cv['RER'],
+            'CCCcv': fom_cv['CCC'],
+            'SECV': fom_cv['SEP'],
+            'RPIQ': fom_cv['RPIQ'],
         }
 
     except Exception:
@@ -3050,12 +3058,9 @@ def _compute_classification_cv_metrics(
     logger = logging.getLogger(__name__)
 
     try:
-        # Encode labels for classification (PLS-DA requires numeric y)
-        le = LabelEncoder()
-        y_arr = np.asarray(y)
-        if y_arr.dtype == object:
-            y_arr = y_arr.astype(str)
-        y = le.fit_transform(y_arr)
+        # Label policy (scoring.classification_fit_labels): integer-valued
+        # numeric labels fitted as given, text / non-integer labels encoded.
+        y = classification_fit_labels(y).y_fit
 
         # Decode solution
         preproc_idx = int(solution[0])
@@ -3102,6 +3107,14 @@ def _compute_classification_cv_metrics(
         # Get model type
         model_type = model_types[min(model_idx, len(model_types) - 1)]
 
+        # XGBoost only accepts 0..K-1: fit it on codes, decode before scoring.
+        user_classes = None
+        if model_type == 'XGBoost' and not np.array_equal(
+            np.unique(y), np.arange(len(np.unique(y)))
+        ):
+            user_classes = np.unique(y)
+            y = np.searchsorted(user_classes, y)
+
         # Detect binary vs multiclass
         n_classes = len(np.unique(y))
         is_binary = n_classes == 2
@@ -3124,16 +3137,13 @@ def _compute_classification_cv_metrics(
         # Manual cross-validation to compute all metrics
         cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
 
-        f1_scores = []
-        roc_auc_scores = []
-        precision_scores = []
-        recall_scores = []
-        specificity_scores = []
-        kappa_scores = []
-        mcc_scores = []
-        balanced_acc_scores = []
-        ber_scores = []
-        logloss_scores = []
+        # Out-of-fold predictions are pooled and scored once (same as the grid
+        # search, R030): per-fold metric means are biased for small folds.
+        all_classes = np.unique(y)
+        pooled_true: List[np.ndarray] = []
+        pooled_pred: List[np.ndarray] = []
+        pooled_proba: List[np.ndarray] = []
+        proba_ok = True
 
         for train_idx, test_idx in cv.split(X_subset, y):
             X_train, X_test = X_subset[train_idx], X_subset[test_idx]
@@ -3216,67 +3226,53 @@ def _compute_classification_cv_metrics(
                     model.fit(X_train_resampled, y_train_resampled)
                 y_pred = model.predict(X_test)
 
-            # Compute F1, Precision, Recall
-            try:
-                f1_scores.append(f1_score(y_test, y_pred, average=average, zero_division=0))
-                precision_scores.append(precision_score(y_test, y_pred, average=average, zero_division=0))
-                recall_scores.append(recall_score(y_test, y_pred, average=average, zero_division=0))
-            except Exception as e:
-                logger.warning(f"F1/Precision/Recall failed in fold: {type(e).__name__}: {e}")
+            # Collect out-of-fold labels and probabilities (aligned to the
+            # dataset's class order) for one pooled score after the loop.
+            pooled_true.append(np.asarray(y_test))
+            pooled_pred.append(np.ravel(y_pred))
+            if proba_ok and hasattr(model, 'predict_proba'):
+                try:
+                    pooled_proba.append(
+                        align_proba_to_classes(
+                            model.predict_proba(X_test),
+                            getattr(model, 'classes_', None),
+                            all_classes,
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(f"predict_proba failed in fold: {type(e).__name__}: {e}")
+                    proba_ok = False
+            else:
+                proba_ok = False
 
-            # Compute ROC_AUC and Log Loss if model has predict_proba
-            try:
-                if hasattr(model, 'predict_proba'):
-                    y_proba = model.predict_proba(X_test)
-                    if is_binary:
-                        roc_auc_scores.append(roc_auc_score(y_test, y_proba[:, 1]))
-                    else:
-                        # Multi-class: use ovr average
-                        roc_auc_scores.append(roc_auc_score(y_test, y_proba, multi_class='ovr', average='macro'))
-
-                    # Log Loss
-                    try:
-                        logloss_scores.append(log_loss(y_test, y_proba))
-                    except Exception:
-                        pass
-            except Exception as e:
-                logger.warning(f"ROC_AUC failed in fold: {type(e).__name__}: {e}")
-
-            # Compute additional classification metrics
-            try:
-                specificity_scores.append(compute_specificity(y_test, y_pred, average='macro'))
-            except Exception:
-                pass
-
-            try:
-                kappa_scores.append(cohen_kappa_score(y_test, y_pred))
-            except Exception:
-                pass
-
-            try:
-                mcc_scores.append(matthews_corrcoef(y_test, y_pred))
-            except Exception:
-                pass
-
-            try:
-                balanced_acc = balanced_accuracy_score(y_test, y_pred)
-                balanced_acc_scores.append(balanced_acc)
-                ber_scores.append(1.0 - balanced_acc)
-            except Exception:
-                pass
-
-        # Return mean values
+        if not pooled_true:
+            raise ValueError("no CV fold produced predictions")
+        # Same definitions as the grid search (scoring.classification_metrics):
+        # binary positive = second sorted class, multiclass macro; scored in the
+        # user's labels (XGBoost codes decoded; proba columns already sorted).
+        _true = np.concatenate(pooled_true)
+        _pred = np.concatenate(pooled_pred)
+        if user_classes is not None:
+            _true = user_classes[_true.astype(int)]
+            _pred = user_classes[_pred.astype(int)]
+            all_classes = user_classes
+        pooled = classification_metrics(
+            _true,
+            _pred,
+            classes=all_classes,
+            y_proba=np.vstack(pooled_proba) if proba_ok and pooled_proba else None,
+        )
         return {
-            'F1cv': float(np.mean(f1_scores)) if f1_scores else np.nan,
-            'ROC_AUCcv': float(np.mean(roc_auc_scores)) if roc_auc_scores else np.nan,
-            'Precisioncv': float(np.mean(precision_scores)) if precision_scores else np.nan,
-            'Recallcv': float(np.mean(recall_scores)) if recall_scores else np.nan,
-            'Specificitycv': float(np.mean(specificity_scores)) if specificity_scores else np.nan,
-            'Kappacv': float(np.mean(kappa_scores)) if kappa_scores else np.nan,
-            'MCCcv': float(np.mean(mcc_scores)) if mcc_scores else np.nan,
-            'BalancedAcccv': float(np.mean(balanced_acc_scores)) if balanced_acc_scores else np.nan,
-            'BERcv': float(np.mean(ber_scores)) if ber_scores else np.nan,
-            'LogLosscv': float(np.mean(logloss_scores)) if logloss_scores else np.nan,
+            'F1cv': pooled['F1'],
+            'ROC_AUCcv': pooled['ROC_AUC'],
+            'Precisioncv': pooled['Precision'],
+            'Recallcv': pooled['Recall'],
+            'Specificitycv': pooled['Specificity'],
+            'Kappacv': pooled['Kappa'],
+            'MCCcv': pooled['MCC'],
+            'BalancedAcccv': pooled['BalancedAcc'],
+            'BERcv': pooled['BER'],
+            'LogLosscv': pooled['LogLoss'],
         }
 
     except Exception as e:
@@ -3425,7 +3421,14 @@ def _compute_top_variables(
                 capped = max(1, n_features_subset - 1)
                 model.set_params(n_components=capped)
 
-        model.fit(X_subset, y)
+        # Same label policy as the search (XGBoost needs 0..K-1 codes; without
+        # this it failed and top_vars silently fell back to index order).
+        y_fit = (
+            classification_fit_labels(y, model_name=model_type).y_fit
+            if task_type == 'classification'
+            else y
+        )
+        model.fit(X_subset, y_fit)
 
         # Get feature importances using the same function as Grid Search
         importances = get_feature_importances(model, model_type)
@@ -3496,13 +3499,12 @@ def _compute_calibration_metrics(
     )
 
     try:
-        # Encode labels for classification (PLS-DA requires numeric y)
+        # Label policy (scoring.classification_fit_labels): integer-valued
+        # numeric labels fitted as given, text / non-integer labels encoded.
+        # XGBoost (0..K-1 only) is re-coded further below.
+        user_classes = None
         if task_type == 'classification':
-            le = LabelEncoder()
-            y_arr = np.asarray(y)
-            if y_arr.dtype == object:
-                y_arr = y_arr.astype(str)
-            y = le.fit_transform(y_arr)
+            y = classification_fit_labels(y).y_fit
 
         # Decode solution directly (same pattern as _compute_display_rmse)
         preproc_idx = int(solution[0])
@@ -3556,6 +3558,14 @@ def _compute_calibration_metrics(
 
         # Get model type and build model (same as _compute_display_rmse)
         model_type = model_types[min(model_idx, len(model_types) - 1)]
+        if (
+            task_type == 'classification'
+            and model_type == 'XGBoost'
+            and not np.array_equal(np.unique(y), np.arange(len(np.unique(y))))
+        ):
+            # XGBoost only accepts 0..K-1: fit on codes, decode before scoring
+            user_classes = np.unique(y)
+            y = np.searchsorted(user_classes, y)
 
         # For PLS, limit n_components to valid range
         # Practical cap: 15 is rarely exceeded in chemometrics
@@ -3640,64 +3650,30 @@ def _compute_calibration_metrics(
             metrics['R2'] = r2_score(y, y_pred)
             metrics['CCC'] = lins_ccc(y, y_pred.ravel())
         else:
-            metrics['Accuracy'] = accuracy_score(y, y_pred)
-
-            # ROC AUC if probabilities available
-            try:
-                if hasattr(model, 'predict_proba'):
-                    y_proba = model.predict_proba(X_subset)
-                    n_classes = len(np.unique(y))
-                    if n_classes == 2:
-                        metrics['ROC_AUC'] = roc_auc_score(y, y_proba[:, 1])
-                    else:
-                        metrics['ROC_AUC'] = roc_auc_score(y, y_proba, multi_class='ovr', average='macro')
-                else:
-                    metrics['ROC_AUC'] = np.nan
-            except Exception:
-                metrics['ROC_AUC'] = np.nan
-
-            # F1, Precision, Recall
-            try:
-                metrics['F1'] = f1_score(y, y_pred, average='weighted', zero_division=0)
-                metrics['Precision'] = precision_score(y, y_pred, average='weighted', zero_division=0)
-                metrics['Recall'] = recall_score(y, y_pred, average='weighted', zero_division=0)
-            except Exception:
-                metrics['F1'] = np.nan
-                metrics['Precision'] = np.nan
-                metrics['Recall'] = np.nan
-
-            # Additional classification metrics
-            try:
-                metrics['Specificity'] = compute_specificity(y, y_pred, average='macro')
-            except Exception:
-                metrics['Specificity'] = np.nan
-
-            try:
-                metrics['Kappa'] = cohen_kappa_score(y, y_pred)
-            except Exception:
-                metrics['Kappa'] = np.nan
-
-            try:
-                metrics['MCC'] = matthews_corrcoef(y, y_pred)
-            except Exception:
-                metrics['MCC'] = np.nan
-
-            try:
-                metrics['BalancedAcc'] = balanced_accuracy_score(y, y_pred)
-                metrics['BER'] = 1.0 - metrics['BalancedAcc']
-            except Exception:
-                metrics['BalancedAcc'] = np.nan
-                metrics['BER'] = np.nan
-
-            # Log Loss
-            try:
-                if hasattr(model, 'predict_proba'):
-                    y_proba = model.predict_proba(X_subset)
-                    metrics['LogLoss'] = log_loss(y, y_proba)
-                else:
-                    metrics['LogLoss'] = np.nan
-            except Exception:
-                metrics['LogLoss'] = np.nan
+            # Same definitions as CV and the grid search (scoring.
+            # classification_metrics); calibration F1/Precision/Recall were
+            # support-weighted before 2026-10.
+            _cal_classes = np.unique(y)
+            _cal_proba = None
+            if hasattr(model, 'predict_proba'):
+                try:
+                    _cal_proba = align_proba_to_classes(
+                        model.predict_proba(X_subset),
+                        getattr(model, 'classes_', None),
+                        _cal_classes,
+                    )
+                except Exception as e:
+                    logger.debug(f"calibration predict_proba unavailable: {e}")
+            _y_score, _pred_score = y, y_pred
+            if user_classes is not None:  # XGBoost codes -> user labels
+                _y_score = user_classes[np.asarray(y, dtype=int)]
+                _pred_score = user_classes[np.asarray(y_pred, dtype=int).ravel()]
+                _cal_classes = user_classes
+            metrics.update(
+                classification_metrics(
+                    _y_score, _pred_score, classes=_cal_classes, y_proba=_cal_proba
+                )
+            )
 
         return metrics
 
@@ -3848,6 +3824,8 @@ def convert_nsga2_to_v1_format(
                 row['RPD'] = nir_metrics['RPD']
                 row['RER'] = nir_metrics['RER']
                 row['CCCcv'] = nir_metrics['CCCcv']
+                row['SECV'] = nir_metrics.get('SECV', np.nan)
+                row['RPIQ'] = nir_metrics.get('RPIQ', np.nan)
             else:
                 row['RMSEcv'] = objectives[0]  # Fallback to optimization RMSE
                 row['R2cv'] = None

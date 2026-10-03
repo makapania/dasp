@@ -4,38 +4,35 @@
 
 ## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-27)
 
-### 0. IN PROGRESS (2026-10-02): Wave 1 + Wave 2 fixes, 5 of 11 branches merged — HAND-OFF
+### 0. IN PROGRESS (2026-10-02): Wave 1 + Wave 2 fixes, 9 of 11 branches merged — HAND-OFF
 Every Wave 1/2 item was cross-checked by Codex gpt-6-astra and GLM 5.3 before fixing. User decisions: booster tree
 count = one value from the pooled CV curve; chemometrics validation conventions (CLAUDE.md).
 **Merged:** #83 fix/ct-honest-labels; #84 fix/ensemble-cv (wrappers now in `model_wrappers.py`); #85 feat/dpi-fonts; #86 fix/contaminant-maths (QW3, QW6; auto EPO count
 advisory, revertible `_CONTAM_AUTO_COUNT_ADVISORY`; DeepSeek LOWs left: GUI says ~7% vs docs 6.5%, skew hint checks
 only the first direction); #87 fix/readers (R017 OPUS background, R062 one ASCII parser, data type/scale
 carried through every tab; comma files dot-decimal + warning).
-**Reviewers:** Codex is OUT OF QUOTA until 2026-10-09 15:10, so GLM 5.3 + DeepSeek (deepseek-flash; Pro only if the
+#88 fix/wavelength-mapping (R009/R031/R016: tolerant wavelength matching everywhere incl. model_wrappers;
+encoders decode only when owned); #89 fix/ytransform-save (Tab 7 saves/exports the trained model: Y-transform,
+bias correction bound by token, frozen refit inputs, atomic RefinedState); #90 fix/preexisting-test-export (multiclass GUI test fake Thread;
+code export without CV / imbalance / plot fixes; PLS + regression imbalance sample_weight still open); #91 fix/classification-metrics (one label rule
+`scoring.classification_fit_labels` in every engine; pooled CV metrics; regression FoM).
+**Reviewers:** Codex is reset but reserved for MAJOR checks only (user, 2026-10-03); routine confirms use GLM 5.3 + DeepSeek (deepseek-flash; Pro only if the
 user says "pro") stand in. opencode prompts must forbid shell redirection, writes, and reads outside the repo, and
 demand a verdict even if a tool call is rejected. Merge rule: well-reviewed PR → merge origin/main into branch, test,
 `gh pr create`, `gh pr merge N --merge --match-head-commit <full sha>`.
 **Open branches** (pushed to origin as backup; worktrees under `.claude/worktrees/agent-*`), state at hand-off:
-- `fix/wavelength-mapping` — final fixes in progress (matcher per-item numeric/text partition in
-  `model_wrappers._match_wavelengths_normalized`; Tab 8 multi-model probability column alignment) + merge main → merge.
-- `fix/classification-metrics` e5e012e — round 4 done (`scoring.classification_fit_labels`); GLM + DeepSeek pending.
-  At merge with booster branch keep `|labels=` after `|boost_rounds=`; on "resume declined" KEEP the run record.
 - `fix/booster-early-stopping` — round 3 in progress (Codex r3 BLOCK: export metrics before truncation; CatBoost auto
   LR replaced by 0.1 in rebuild/export; sanitize None breaks clone; resume flag; ensemble rebuild via truncation).
   Reconcile with fix/ytransform-save: Tab 7 y-transform k read off transformed-y curve vs final fit on raw y (~41998).
-- `fix/ytransform-save` — round 6 done (worker reads only frozen `run_inputs`, incl. the wavelength-spec helper;
-  plot callbacks bound to one `RefinedState`; GA inputs stored on the Tk thread); origin/main merged in. Ready to merge.
 - `fix/gui-dataset-state` 77063e1 — round in progress (Codex BLOCK: transactional reconcile, shared calibration-prep
   function for digest+worker, lossless int targets, object-y canonicalisation, framed digest + counts, strict
   record schema, dotted IDs → "can't verify", MultiIndex NaN dedupe). QW4 (holdout direction) waits for this.
-- `perf/thread-budget` — round-2 fixes (GLM + DeepSeek MWF) in `866f0d3`: per-API select() limits with a multiset
-  of open caps, `task_pool_plan` for GA pools (CatBoost serial when threaded), SPA seed pool capped; origin/main
-  (through PR #87) merged in. Also fixes the multiclass GUI test fake Thread (overlaps fix/preexisting-test-export).
-- `fix/preexisting-test-export` d4f608a — fixes multiclass GUI test fake Thread + export NameErrors without CV; GLM
-  MWF; one_class+imbalance export still NameErrors `_lins_ccc` (fix in progress) → review → merge, then delete the
-  "known pre-existing" lines below.
-Known pre-existing on main until that merges: `test_multiclass_gui.py::test_run_analysis_accepts_multiclass_engine_selection`
-fails; regression/one-class code export without CV raises NameError.
+- `perf/thread-budget` c53c6f2 — GLM r2 MWF (GA candidate pool lacks CatBoost-serial rule; `native_thread_limit`
+  cross-API restore via `restore_original_limits()` clobbers other APIs; stricter nested exit never re-loosens);
+  DeepSeek r2 pending; then fix round + merge main.
+Known on main: `tests/gui/test_tab7_correction_binding.py::test_double_click_during_refit_keeps_selection_and_run_uses_a`
+(from #89) fails after test_multiclass_gui (Results tree rows left over) and hangs alone (real validation curve);
+fix in progress on `fix/tab7-test-isolation`.
 **Open questions for the user:** Import rounds wavelengths to integers and refuses sub-unit spacing (FTIR?); comma
 ASCII files default to dot-decimal with a warning (my call); advisory EPO count (my call); delete stray GLM temp files
 in %TEMP% (diff.txt, gui_f359708.py, opencodeepo_*).
@@ -54,12 +51,8 @@ and deploy.
    and ensemble CV/weights fitted in-sample (R002 critical, R021, R018, R105). Reported scores will drop.
 2. **Saved model ≠ validated model:** Y-transform save paths (R001 critical, R020, R014/R019, R048), stale bias
    correction (R010), Tab 7 wavelength matching (R009, R112), `all_vars` %g (R031, R078), numeric label encoder (R016).
-3. **QW1 + QW10, thread budget and test split — on branch `perf/thread-budget`.** `parallel_policy.py` owns the
-   rule (pool = min(folds, physical cores), each fit cores // pool threads, tiny jobs serial, OpenMP cap for
-   one-class/SIMCA, frozen = threading with BLAS capped). Measured under heavy load: LightGBM ~1.7-1.8x, LOF grid
-   ~2.6-2.9x, iPLS ~1.9x, XGBoost/RF ~1.0-1.2x, identical metrics (the 60x/50x figures did not reproduce). addopts
-   deselects comprehensive+slow; nightly `long-tests` (Windows) + `long-tests-linux` run them. Non-GUI suite
-   21.0 -> 16.7 min on a loaded box; details in SESSION_LOG 2026-10-02.
+3. **QW1 + QW10, thread budget and test split.** Measured 60x per booster config and 50x for LOF; the test suite
+   should drop from ~38 min to under 10. Can go first, since it speeds up testing every later PR.
 4. **Data in:** OPUS reader returns the background, not absorbance (R017); duplicate `read_ascii_spectra` (R062);
    GUI exclusion and dataset-switch bugs (R004-R007, R037).
 Wave 2 stops the app misleading:
@@ -530,7 +523,7 @@ assert "wt-" in spectral_predict.__file__, spectral_predict.__file__
 
 **Decision:** the PyInstaller 3.12 bundle is now the only supported distribution path. Nobody is expected to clone and `pip install -e .`; the source-install scaffolding (`install.bat` / `install.sh` / `INSTALL.md`) stays in-repo as a developer convenience but is no longer marketed to end users. Beta version `0.5.0b1` ships exclusively as the bundled installer.
 
-**Implication for parallelism:** the 3.12 bundle still uses the threading-backend fallback (rule in `src/spectral_predict/parallel_policy.py:frozen_needs_threading_fallback`; `search._frozen_needs_threading_fallback` delegates to it — frozen-state-only, NOT version-gated; the original 3.12 plan to recover loky was wrong). Practical impact: numpy/sklearn/lightgbm/xgboost get thread-parallel speedup (those C extensions release the GIL), but pure-Python parallel loops (pymoo NSGA-II, GA-PLS evaluation) are single-core in the bundle. There is no longer a "use the source install for full multiprocessing" escape hatch for users — what the bundle does is what they get.
+**Implication for parallelism:** the 3.12 bundle still uses the threading-backend fallback (see `src/spectral_predict/search.py:_frozen_needs_threading_fallback` — frozen-state-only, NOT version-gated; the original 3.12 plan to recover loky was wrong). Practical impact: numpy/sklearn/lightgbm/xgboost get thread-parallel speedup (those C extensions release the GIL), but pure-Python parallel loops (pymoo NSGA-II, GA-PLS evaluation) are single-core in the bundle. There is no longer a "use the source install for full multiprocessing" escape hatch for users — what the bundle does is what they get.
 
 **Still in-repo from the source-install era (kept, not deleted):**
 - `install.bat` / `install.sh`: detects Python 3.14, creates `.venv314`, installs `requirements-lock.txt` then `pip install -e . --no-deps`. Idempotent. Useful for developer setup.

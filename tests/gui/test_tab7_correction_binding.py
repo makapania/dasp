@@ -137,13 +137,29 @@ def deferred_refits(gui_app, monkeypatch):
     import threading
 
     launched: list = []
+    real_thread = threading.Thread
 
-    class _DeferredThread:
-        def __init__(self, target=None, args=(), daemon=None, **_kw):
-            launched.append((target, args))
+    class _DeferredThread(real_thread):
+        """Defers only threads the app launches (targets bound to ``gui_app``).
+
+        ``threading.Thread`` is patched process-wide. A non-starting fake for every
+        thread also caught multiprocessing's queue feeder thread when a refit inside
+        the test fitted a validation curve on a loky pool: the tasks never reached the
+        workers, which sat idle, and the test hung forever. Library threads therefore
+        start normally.
+        """
+
+        def __init__(self, group=None, target=None, name=None, args=(), kwargs=None, *,
+                     daemon=None):
+            self._deferred = getattr(target, "__self__", None) is gui_app
+            super().__init__(group, target, name, args, kwargs, daemon=daemon)
+            if self._deferred:
+                launched.append((target, args))
 
         def start(self):
-            pass  # the run is "in progress" until the test runs the worker
+            if self._deferred:
+                return  # the run is "in progress" until the test runs the worker
+            super().start()
 
     monkeypatch.setattr(threading, "Thread", _DeferredThread)
     # Widget-level parameter validation is not under test here.
@@ -558,11 +574,33 @@ def test_loading_results_row_refused_while_refit_runs(gui_app):
 # --- Round 5: the worker and Save/Export never read the live selection or widgets -----
 
 
+@pytest.fixture
+def clean_results_tree(gui_app):
+    """An empty Results tree for the test, whatever earlier tests left in it.
+
+    Earlier tests on the shared app (e.g. the multiclass leaderboard) leave rows with
+    iids such as "0"; inserting a fixed iid then raises ``TclError: Item 0 already
+    exists``. The tree is emptied before and after, and the results frames restored.
+    """
+    tree = gui_app.results_tree
+    saved = {name: getattr(gui_app, name, None) for name in ("results_df", "results_display_df")}
+    tree.delete(*tree.get_children())
+    try:
+        yield tree
+    finally:
+        tree.delete(*tree.get_children())
+        for name, value in saved.items():
+            setattr(gui_app, name, value)
+
+
 def test_double_click_during_refit_keeps_selection_and_run_uses_a(
-    correction_on, deferred_refits, tmp_path
+    correction_on, deferred_refits, clean_results_tree, monkeypatch, tmp_path
 ):
     """Real Results double-click path while A runs: refused; A's row is what trains/saves."""
     app = correction_on
+    # The validation curve is not under test; skipping it keeps the refits free of a
+    # process pool.
+    monkeypatch.setattr(app, "_compute_validation_curve", lambda *a, **k: None)
     _refit(app, "Ridge", "None", subset=True)  # loads data / widgets
     row_a = _row("Ridge", early_stopping=False)
     row_a.update(Params=str({"alpha": 0.01}), optuna_params={"alpha": 0.01}, is_coupled=False)
