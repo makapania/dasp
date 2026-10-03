@@ -4,7 +4,7 @@
 
 ## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-27)
 
-### 0. IN PROGRESS (2026-10-02): Wave 1 + Wave 2 fixes, 10 of 11 branches merged + QW4 in review — HAND-OFF
+### 0. IN PROGRESS (2026-10-02): Wave 1 + Wave 2 fixes, 10 of 11 branches merged + QW4 merged — HAND-OFF
 Every Wave 1/2 item was cross-checked by Codex gpt-6-astra and GLM 5.3 before fixing. User decisions: booster tree
 count = one value from the pooled CV curve; chemometrics validation conventions (CLAUDE.md).
 **Merged:** #83 fix/ct-honest-labels; #84 fix/ensemble-cv (wrappers now in `model_wrappers.py`); #85 feat/dpi-fonts; #86 fix/contaminant-maths (QW3, QW6; auto EPO count
@@ -19,8 +19,8 @@ code export without CV / imbalance / plot fixes; PLS + regression imbalance samp
 gate, transactional reconcile, missing-aware duplicate IDs). #93 test isolation (#89/#90 GUI tests); #94 perf/thread-budget (QW1 one
 thread-budget rule in `parallel_policy`; frozen builds fall back to the threading backend with BLAS/OpenMP caps and
 CatBoost serial; QW10 slow/comprehensive tests deselected by default, run nightly incl. Linux job).
-**QW4 (holdout direction):** `fix/holdout-direction` 8ca30bc — KS/SPXY/DUPLEX now pick the CALIBRATION set; saved
-holdouts unchanged; in review.
+**#95 QW4 (holdout direction):** KS/SPXY/DUPLEX pick the CALIBRATION set (`sample_selection.split_calibration_holdout`);
+SPXY per Galvão (normalised distance matrices); DUPLEX per Snee; saved holdouts unchanged. Example RMSEP KS 3.57→1.30.
 **Reviewers:** Codex is reset but reserved for MAJOR checks only (user, 2026-10-03); routine confirms use GLM 5.3 + DeepSeek (deepseek-flash; Pro only if the
 user says "pro") stand in. opencode prompts must forbid shell redirection, writes, and reads outside the repo, and
 demand a verdict even if a tool call is rejected. Merge rule: well-reviewed PR → merge origin/main into branch, test,
