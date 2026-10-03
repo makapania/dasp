@@ -105,104 +105,54 @@ def _build_transform_from_config(config: dict):
 
 
 def _match_wavelengths_normalized(requested_cols, available_columns, precision=1):
-    """
-    Match wavelengths using exact precision matching after normalization.
+    """Columns of ``available_columns`` for the requested wavelength columns, in order.
 
-    This function solves the CARS wavelength matching bug where tolerance-based
-    matching (±0.5nm) could match wrong wavelengths or fail silently.
-
-    Instead of tolerance-based matching, this:
-    1. Rounds both requested and available wavelengths to the same precision
-    2. Matches on the normalized string representation
-    3. Tries multiple precision levels if initial match fails
-
-    Args:
-        requested_cols: List of wavelength column names (can be strings or floats)
-        available_columns: Column names from the new DataFrame
-        precision: Decimal places to round to (default 1)
-
-    Returns:
-        List of matched column names from available_columns
+    Uses the shared exact-first contract (``wavelength_matching.match_wavelengths``): an
+    exact value wins, else the single column within 0.01. The old rounding to
+    ``precision`` decimals took the first of several colliding columns on fine grids
+    (``1000.02`` became ``1000.01``). ``precision`` is accepted for backward
+    compatibility and ignored.
 
     Raises:
-        KeyError: If any wavelength cannot be matched
+        KeyError: If any wavelength is missing or matches more than one column.
     """
-    # Build lookup dict: normalized wavelength string -> original column name
-    col_lookup = {}
-    col_names = list(available_columns)
+    from .wavelength_matching import WavelengthMatchError, match_wavelengths
 
-    for col in col_names:
+    col_names = list(available_columns)
+    numeric_pos, numeric_vals = [], []
+    for pos, col in enumerate(col_names):
         try:
-            col_float = float(col)
-            normalized_key = f"{round(col_float, precision):.{precision}f}"
-            if normalized_key not in col_lookup:
-                col_lookup[normalized_key] = col
+            numeric_vals.append(float(col))
+            numeric_pos.append(pos)
         except (ValueError, TypeError):
             continue
 
-    # Match each requested wavelength
-    matched_by_index = {}  # index -> matched column
-    missing_by_index = {}  # index -> wavelength
-
-    for idx, req_col in enumerate(requested_cols):
+    # Partition per item: numeric requests go through the shared matcher, others (e.g.
+    # an ID column a legacy wrapper kept) must be present literally. Order is restored.
+    requested = list(requested_cols)
+    result: list = [None] * len(requested)
+    numeric_slots, numeric_req, missing = [], [], []
+    for k, col in enumerate(requested):
         try:
-            req_float = float(req_col)
-            normalized_key = f"{round(req_float, precision):.{precision}f}"
-            if normalized_key in col_lookup:
-                matched_by_index[idx] = col_lookup[normalized_key]
-            else:
-                missing_by_index[idx] = req_col
+            value = float(col)
         except (ValueError, TypeError):
-            # Non-numeric column - try direct string match
-            if req_col in col_names:
-                matched_by_index[idx] = req_col
+            if col in col_names:
+                result[k] = col
             else:
-                missing_by_index[idx] = req_col
-
-    # Try different precision levels for missing wavelengths
-    if missing_by_index:
-        for alt_precision in [0, 2, 3]:
-            if alt_precision == precision:
-                continue
-
-            # Rebuild lookup at alternative precision
-            col_lookup_alt = {}
-            for col in col_names:
-                try:
-                    col_float = float(col)
-                    normalized_key = f"{round(col_float, alt_precision):.{alt_precision}f}"
-                    if normalized_key not in col_lookup_alt:
-                        col_lookup_alt[normalized_key] = col
-                except (ValueError, TypeError):
-                    continue
-
-            # Try matching still-missing wavelengths
-            still_missing = {}
-            for idx, wl in missing_by_index.items():
-                try:
-                    wl_float = float(wl)
-                    normalized_key = f"{round(wl_float, alt_precision):.{alt_precision}f}"
-                    if normalized_key in col_lookup_alt:
-                        matched_by_index[idx] = col_lookup_alt[normalized_key]
-                    else:
-                        still_missing[idx] = wl
-                except (ValueError, TypeError):
-                    still_missing[idx] = wl
-
-            missing_by_index = still_missing
-            if not missing_by_index:
-                break
-
-    # Report any still-missing wavelengths
-    if missing_by_index:
-        missing_wls = list(missing_by_index.values())
-        raise KeyError(
-            f"Could not match all wavelength columns. "
-            f"Missing {len(missing_wls)} wavelengths: {missing_wls[:5]}{'...' if len(missing_wls) > 5 else ''}"
-        )
-
-    # Return matched columns in original order
-    return [matched_by_index[i] for i in range(len(requested_cols))]
+                missing.append(col)
+            continue
+        numeric_slots.append(k)
+        numeric_req.append(value)
+    if missing:
+        raise KeyError(f"Could not match wavelength columns: {missing[:5]}")
+    if numeric_req:
+        try:
+            idx = match_wavelengths(numeric_req, numeric_vals)
+        except WavelengthMatchError as e:
+            raise KeyError(f"Could not match all wavelength columns: {e}") from e
+        for k, i in zip(numeric_slots, idx):
+            result[k] = col_names[numeric_pos[i]]
+    return result
 
 
 def _subset_wavelength_columns(X, wavelength_cols, all_columns=None):

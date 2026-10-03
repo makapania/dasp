@@ -93,7 +93,6 @@ CAPTURABLE_SETTINGS: tuple[str, ...] = (
     "use_sg4",
     "use_deriv_snv",
     "use_autoscale",
-    "use_msc",
     "use_osc",
     "osc_n_components",
     # --- wavelength exclusion / analysis-window restriction ---
@@ -472,7 +471,6 @@ def summarize_gui_settings(settings: dict[str, Any] | None) -> str:
             "use_sg3",
             "use_sg4",
             "use_deriv_snv",
-            "use_msc",
             "use_osc",
         )
         if _bool(name)

@@ -77,7 +77,6 @@ def populated_gui():
         use_sg1=False,
         use_sg2=True,
         use_autoscale=True,
-        use_msc=False,
         # baseline
         enable_baseline=True,
         baseline_method="airpls",
@@ -222,6 +221,27 @@ def test_restore_skips_unknown_keys_without_crashing(fresh_state):
     assert "pca_color_var" in report.skipped_unknown
     assert report.errors == []
     assert gui.use_snv.get() is True
+
+
+def test_old_snapshot_with_retired_use_msc_still_restores(fresh_state):
+    """`use_msc` was a dead Tk var (never read) and left the whitelist (QW6).
+
+    Snapshots saved before that still carry it. Full restore must apply every
+    other key, report `use_msc` as unknown rather than as an error, and the
+    resume comparison must not flag it as a changed setting.
+    """
+    _, _, rgs, _ = fresh_state
+    assert "use_msc" not in rgs.CAPTURABLE_SETTINGS
+    gui = _FakeGUI(use_snv=False, use_sg1=True)
+    old_snapshot = {"use_snv": True, "use_sg1": False, "use_msc": True}
+
+    report = rgs.restore_gui_settings(gui, rgs.normalize_saved_settings(old_snapshot))
+
+    assert set(report.restored) >= {"use_snv", "use_sg1"}
+    assert "use_msc" in report.skipped_unknown
+    assert report.errors == []
+    assert report.fully_succeeded
+    assert rgs.diff_gui_settings(old_snapshot, {"use_snv": True, "use_sg1": False}) == []
 
 
 def test_restore_skips_whitelisted_but_missing_var(fresh_state):
