@@ -1555,3 +1555,7 @@ the same folds, as for PLS LV selection. Implemented on branch fix/booster-early
   random-split mean: an interior holdout is the easy case, which the UserGuide now says.
 - **Not done (optional per the cross-check):** distances on preprocessed spectra / PCA scores (still raw X as
   loaded), stratified KS, and group-aware selection (F1).
+- **GLM 5.3 review LOWs (fixed).** A one-sample DUPLEX set has no seed pair: a one-sample holdout now takes the
+  sample farthest from the calibration seed (was: the lower end of the farthest remaining pair). KS tie rule
+  (lowest row index) is pinned by a duplicated-rows test and a randomized check against a slow literal max-min
+  reference in `tests/test_holdout_direction.py`.

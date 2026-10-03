@@ -165,6 +165,11 @@ def duplex(
     Each set runs its own max-min selection against its own members; this is
     not the same as alternating a single Kennard-Stone order.
 
+    A set of size one cannot start from a pair. A one-sample validation set
+    takes the sample farthest from the calibration seed pair (largest distance
+    to its nearest calibration sample); a one-sample calibration set takes the
+    lower-index end of the farthest pair. Ties go to the lowest row index.
+
     Parameters
     ----------
     X : np.ndarray, shape (n_samples, n_features)
@@ -220,10 +225,15 @@ def duplex(
     D = squareform(pdist(X, metric=metric))
     available = np.ones(n_total, dtype=bool)
 
-    def seed_pair(quota: int) -> list[int]:
+    def seed(quota: int, opposite: list[int]) -> list[int]:
         rows = np.flatnonzero(available)
+        if quota == 1 and opposite:
+            # A one-sample set has no pair: take the available sample farthest
+            # from the other set (largest distance to its nearest member).
+            near = D[np.ix_(rows, opposite)].min(axis=1)
+            return [int(rows[int(np.argmax(near))])]
         if len(rows) == 1:
-            return [int(rows[0])][:quota]
+            return [int(rows[0])]
         a, b = _farthest_pair(D[np.ix_(rows, rows)])
         return [int(rows[a]), int(rows[b])][:quota]
 
@@ -233,9 +243,9 @@ def duplex(
 
     cal: list[int] = []
     val: list[int] = []
-    for k in seed_pair(n_cal):
+    for k in seed(n_cal, val):
         take(cal, k)
-    for k in seed_pair(n_val):
+    for k in seed(n_val, cal):
         take(val, k)
 
     # Distance from every sample to its nearest member of each set.

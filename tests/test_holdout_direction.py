@@ -71,6 +71,51 @@ def test_kennard_stone_order_is_unchanged():
     np.testing.assert_array_equal(kennard_stone(X, 4), [0, 3, 4, 2])
 
 
+def test_kennard_stone_ties_go_to_the_lowest_row_index():
+    """Duplicated rows make every step after the seed a tie."""
+    X = np.array([[0.0], [0.0], [10.0], [10.0], [5.0], [5.0]])
+    # Seed: first farthest pair in row-major order (0, 2). Then 4 beats its
+    # duplicate 5, and the zero-distance duplicates follow in index order.
+    np.testing.assert_array_equal(kennard_stone(X, 6), [0, 2, 4, 1, 3, 5])
+
+
+def _slow_kennard_stone(X, n_select):
+    """Literal max-min definition: explicit loops, strict '>' keeps the lowest index."""
+    n = len(X)
+    D = [[float(np.linalg.norm(X[a] - X[b])) for b in range(n)] for a in range(n)]
+    best, pair = -1.0, (0, 1)
+    for a in range(n):
+        for b in range(a + 1, n):
+            if D[a][b] > best:
+                best, pair = D[a][b], (a, b)
+    selected = list(pair)
+    while len(selected) < n_select:
+        best_k, best_d = None, -1.0
+        for k in range(n):
+            if k in selected:
+                continue
+            d = min(D[k][s] for s in selected)
+            if d > best_d:
+                best_k, best_d = k, d
+        selected.append(best_k)
+    return selected
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_kennard_stone_matches_slow_reference(seed):
+    rng = np.random.default_rng(seed)
+    n = int(rng.integers(4, 25))
+    if seed % 3 == 0:  # small integer grid: many exact ties
+        X = rng.integers(0, 3, size=(n, 2)).astype(float)
+    elif seed % 3 == 1:  # duplicated rows
+        base = rng.normal(size=(n // 2 + 1, 3))
+        X = np.vstack([base, base])[:n]
+    else:
+        X = rng.normal(size=(n, 5))
+    k = int(rng.integers(2, n + 1))
+    np.testing.assert_array_equal(kennard_stone(X, k), _slow_kennard_stone(X, k))
+
+
 # --- SPXY: Galvão et al. 2005 normalisation ---------------------------------
 
 
@@ -184,6 +229,23 @@ def test_duplex_single_validation_sample():
     cal, val = duplex(X, n_cal=5)
     assert len(val) == 1 and len(cal) == 5
     assert {0, 5} <= set(cal)
+
+
+def test_duplex_single_holdout_is_farthest_from_calibration_seed():
+    """One holdout sample: no pair to seed with, so take the farthest from calibration.
+
+    1-D points 0..9: calibration seed (0, 9); 4 and 5 are both 4 away from it and
+    the tie goes to the lower index.
+    """
+    X = np.arange(10, dtype=float).reshape(-1, 1)
+    cal, hold = split_calibration_holdout(X, 1, method="duplex")
+    np.testing.assert_array_equal(hold, [4])
+    np.testing.assert_array_equal(cal, [0, 1, 2, 3, 5, 6, 7, 8, 9])
+
+    X2 = np.array([[0.0], [1.0], [2.0], [10.0], [8.5]])
+    _, hold2 = split_calibration_holdout(X2, 1, method="duplex")
+    # Seed (0, 10); nearest-seed distances: 1 -> 1, 2 -> 2, 8.5 -> 1.5.
+    np.testing.assert_array_equal(hold2, [2])
 
 
 def test_split_duplex_returns_the_duplex_calibration():
