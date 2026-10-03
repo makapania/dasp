@@ -368,7 +368,9 @@ def rename_duplicate_ids(index: pd.Index) -> tuple:
         - rename_mapping: dict mapping original IDs to list of new IDs
           e.g., {"SampleA": ["SampleA", "SampleA.1", "SampleA.2"]}
     """
-    if not index.duplicated().any():
+    # Compare missing-aware keys: pandas' duplicated() treats NaN and pd.NA (or
+    # None) as different, though neither can be told apart as a sample ID.
+    if len({_id_key(idx) for idx in index}) == len(index):
         return index, 0, {}
 
     new_ids = []

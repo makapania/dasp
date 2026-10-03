@@ -165,3 +165,14 @@ def test_strict_schema_and_version():
     assert identity["version"] == CALIBRATION_IDENTITY_VERSION
     assert not valid_calibration_identity(dict(identity, version=1))
     assert not valid_calibration_identity({k: v for k, v in identity.items() if k != "n_holdout"})
+
+
+def test_identity_keeps_unsigned_integers_above_int64_apart():
+    X, _ = _frame(["a", "b"])
+    top = np.uint64(2**64 - 1)
+    y_big = pd.Series(np.array([top, 1], dtype=np.uint64), index=X.index)
+    y_neg = pd.Series(np.array([-1, 1], dtype=np.int64), index=X.index)
+    assert calibration_identity(X, y_big, None, None) != calibration_identity(X, y_neg, None, None)
+    small = pd.Series(np.array([3, 1], dtype=np.uint64), index=X.index)
+    signed = pd.Series(np.array([3, 1], dtype=np.int64), index=X.index)
+    assert calibration_identity(X, small, None, None) == calibration_identity(X, signed, None, None)

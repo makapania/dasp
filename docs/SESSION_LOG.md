@@ -1011,3 +1011,14 @@ the same folds, as for PLS LV selection. Implemented on branch fix/booster-early
 - **Screenshot capture:** in a DPI-unaware process, `ImageGrab.grab(window=hwnd)` returns the pre-stretch logical
   bitmap, which hides the blur. Grab the full screen, which comes back in physical pixels, and crop it by
   `full.width / winfo_screenwidth()`.
+
+## 2026-10-02 - GUI dataset state, review round 5 follow-ups
+
+- Resume reconciliation restores the click-time selection in a `finally`, so an exception part-way (e.g. in
+  the identity digest) also leaves exclusions, holdout and the validation status text as they were.
+- `_prepare_calibration` aligns X and y by label (equal lengths only; unequal lengths stay a worker error)
+  before the digest; the worker's own realignment after it is now a no-op.
+- uint64 targets above the int64 range are hashed as uint64 (an int64 cast wrapped them onto negatives);
+  smaller unsigned columns still hash like signed ones.
+- `rename_duplicate_ids` and the install step decide "repeated" with missing-aware keys: pandas'
+  `duplicated()` treats NaN and pd.NA as different IDs.

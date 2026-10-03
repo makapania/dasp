@@ -1573,11 +1573,14 @@ def test_mixed_type_classification_identity_matches_worker(
 def test_record_missing_active_key_asks_without_crashing(resumable):
     app, rs, save = resumable
     X, y = _spectra([f"A{i}" for i in range(1, 21)], seed=1)
-    meta = save(X, y, calibration_rows={"version": 1, "excluded": [], "holdout": []})
-    assert meta.calibration_rows == {"version": 1, "excluded": [], "holdout": []} or True
+    save(X, y)
+    meta = rs.get_resumed_run()
+    # A record read back with "active" missing (start_run itself would not write it).
+    meta.calibration_rows = {"version": 1, "excluded": [], "holdout": []}
     with patch("tkinter.messagebox.askyesnocancel", return_value=None) as ask:
         assert app._confirm_resume_before_launch(["PLS"], "quick") is False
     assert ask.call_args[0][0] == "Can't verify the calibration samples"
+    assert rs.find_incomplete_run().run_id == meta.run_id
 
 
 def test_malformed_holdout_resume_anyway_uses_current_selection(resumable):
@@ -1629,3 +1632,100 @@ def test_rename_duplicate_ids_with_missing_tuple_parts_is_unique():
     new, n, _ = rename_duplicate_ids(index)
     assert n == 1 and len(new) == 3
     assert len({repr(v) for v in new}) == 3
+
+
+# ---------------------------------------------------------------------------
+# Review round 5
+# ---------------------------------------------------------------------------
+
+
+def test_exception_during_reconciliation_restores_selection(resumable, monkeypatch):
+    import spectral_predict.run_state as run_state
+
+    app, rs, save = resumable
+    X, y = _spectra([f"A{i}" for i in range(1, 21)], seed=1)
+    _reinstall(app, X, y)
+    _split(app, ["A1", "A2"])
+    save(X, y, excluded=["A3"])
+    _reinstall(app, X, y)  # reload: exclusions and holdout cleared
+    app.validation_enabled.set(True)
+    status_before = app.validation_status_label.cget("text")
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("digest failed")
+
+    monkeypatch.setattr(run_state, "calibration_identity", broken)
+    # _run_analysis reports such an error and launches nothing.
+    with (
+        patch("tkinter.messagebox.askyesnocancel", return_value=True),
+        patch("tkinter.messagebox.askyesno", return_value=False),
+        pytest.raises(RuntimeError),
+    ):
+        app._confirm_resume_before_launch(["PLS"], "quick")
+    assert app.excluded_spectra == set() and app.validation_indices == set()
+    assert app.validation_X is None
+    assert app.validation_status_label.cget("text") == status_before
+
+
+def test_one_class_identity_matches_what_the_worker_trains_on(clean_state, worker_env, monkeypatch):
+    from spectral_predict.run_state import calibration_identity
+
+    class _Stop(BaseException):
+        pass
+
+    app, rs = clean_state, worker_env
+    X, _ = _spectra([f"S{i}" for i in range(1, 31)], seed=7)
+    y = pd.Series(["a"] * 22 + ["b"] * 8, index=X.index)
+    _reinstall(app, X, y)
+    app.excluded_spectra = {"S4", "S25"}
+    app.task_type.set("one_class")
+    recorded, calls = [], []
+    real_start_run = rs.start_run
+    monkeypatch.setattr(
+        rs,
+        "start_run",
+        lambda *a, **k: recorded.append(k.get("calibration_identity")) or real_start_run(*a, **k),
+    )
+
+    def fake(X, y, wavelengths, model_name, **kwargs):
+        calls.append((np.array(X, copy=True), np.array(y, copy=True)))
+        raise _Stop
+
+    monkeypatch.setattr(gui_module, "run_unified_bayesian", fake)
+    app._pending_analysis_settings = None
+    with patch("tkinter.messagebox.showerror"), patch("tkinter.messagebox.showwarning"):
+        try:
+            app._run_analysis_thread(["PCA-SIMCA"], "quick", resolved_inlier_label="a")
+        except _Stop:
+            pass
+    assert calls, "the one-class search was reached"
+    X_cal = _labelled(app.X, calls[0][0])
+    assert "S4" not in X_cal.index and len(X_cal) == 28
+    y_cal = pd.Series(calls[0][1], index=X_cal.index)
+    assert (
+        recorded[0]["calibration"] == calibration_identity(X_cal, y_cal, None, None)["calibration"]
+    )
+
+
+def test_prepare_calibration_aligns_x_and_y_before_hashing():
+    X, y = _spectra([f"S{i}" for i in range(1, 7)], seed=8)
+    shifted = y.set_axis([f"S{i}" for i in range(2, 8)])  # same length, labels shifted
+    prepared = gui_module._prepare_calibration(
+        X,
+        shifted,
+        active=None,
+        excluded=(),
+        holdout=(),
+        validation_on=False,
+        task_type="regression",
+        cv_strategy="kfold",
+        folds=3,
+    )
+    assert list(prepared.X.index) == list(prepared.y.index) == [f"S{i}" for i in range(2, 7)]
+
+
+def test_rename_duplicate_ids_treats_nan_and_na_as_repeats():
+    from spectral_predict.io import rename_duplicate_ids
+
+    new, n, _ = rename_duplicate_ids(pd.Index([np.nan, pd.NA], dtype=object))
+    assert n == 2 and list(new) == ["nan", "nan.1"]

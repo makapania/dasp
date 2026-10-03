@@ -388,6 +388,15 @@ def _target_bytes(y) -> tuple[bytes, bytes]:
     def _numeric(values) -> tuple[bytes, bytes] | None:
         if pd.api.types.is_bool_dtype(values):
             return b"yb", np.ascontiguousarray(values.to_numpy(dtype=np.uint8)).tobytes()
+        if (
+            pd.api.types.is_unsigned_integer_dtype(values)
+            and not values.isna().any()
+            and len(values)
+            and int(values.max()) > np.iinfo(np.int64).max
+        ):
+            # Only values beyond int64 need their own encoding: casting them to
+            # int64 would wrap them onto negatives.
+            return b"yu", np.ascontiguousarray(values.to_numpy(dtype=np.uint64)).tobytes()
         if pd.api.types.is_integer_dtype(values) and not values.isna().any():
             return b"yi", np.ascontiguousarray(values.to_numpy(dtype=np.int64)).tobytes()
         if pd.api.types.is_numeric_dtype(values):

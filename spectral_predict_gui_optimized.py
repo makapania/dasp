@@ -2583,6 +2583,19 @@ def _prepare_calibration(
             prepared.n_before_rare = len(y_cal)
             prepared.X = prepared.X[keep]
             prepared.y = y_cal[keep]
+
+    # Same rows in X and y, by label. Unequal lengths are left for the worker to
+    # report as a data-alignment error; equal lengths with different labels keep
+    # the common samples (the worker used to do this after preparation, which
+    # trained on fewer rows than the resume identity covered).
+    if (
+        prepared.y is not None
+        and len(prepared.X) == len(prepared.y)
+        and not prepared.X.index.equals(prepared.y.index)
+    ):
+        common = prepared.X.index.intersection(prepared.y.index)
+        prepared.X = prepared.X.loc[common]
+        prepared.y = prepared.y.loc[common]
     return prepared
 
 
@@ -18997,12 +19010,14 @@ class SpectralPredictApp:
         ``ref`` and ``metadata_df`` are relabelled when they are indexed exactly
         like ``X_original``.
         """
-        index = X_original.index
-        if not index.has_duplicates:
-            return X_original, y, ref, metadata_df
         from spectral_predict.io import rename_duplicate_ids
 
+        index = X_original.index
+        # Missing-aware: NaN and pd.NA labels count as repeats although pandas'
+        # has_duplicates says otherwise.
         new_index, n_renamed, mapping = rename_duplicate_ids(index)
+        if n_renamed == 0:
+            return X_original, y, ref, metadata_df
 
         def _relabel(frame):
             if frame is not None and frame.index.equals(index):
@@ -27096,7 +27111,17 @@ class SpectralPredictApp:
             "validation_X": self.validation_X,
             "validation_y": self.validation_y,
             "_pending_validation_indices": getattr(self, "_pending_validation_indices", None),
+            "_validation_status_text": self._validation_status_text(),
         }
+
+    def _validation_status_text(self) -> str | None:
+        label = getattr(self, "validation_status_label", None)
+        if label is None:
+            return None
+        try:
+            return str(label.cget("text"))
+        except Exception:
+            return None
 
     def _restore_calibration_selection(self, saved: dict) -> None:
         """Undo a reconciliation that did not end in a resume (nothing was run)."""
@@ -27104,8 +27129,15 @@ class SpectralPredictApp:
             saved["excluded_spectra"] != set(self.excluded_spectra or ())
             or saved["validation_indices"] != set(self.validation_indices or ())
         )
+        status_text = saved.get("_validation_status_text")
         for name, value in saved.items():
-            setattr(self, name, value)
+            if name != "_validation_status_text":
+                setattr(self, name, value)
+        if status_text is not None and hasattr(self, "validation_status_label"):
+            try:
+                self.validation_status_label.config(text=status_text)
+            except Exception:
+                pass
         if changed:
             self._log_progress(
                 "[RUN] The excluded and validation samples are back as they were "
@@ -28030,9 +28062,14 @@ class SpectralPredictApp:
                     # Restores offered below are proposals: unless the resume goes
                     # ahead, the selection goes back to what it was at the click.
                     selection_before = self._capture_calibration_selection()
-                    outcome = self._reconcile_resume_selection(meta)
-                    if outcome != "ok":
-                        self._restore_calibration_selection(selection_before)
+                    outcome = None
+                    try:
+                        outcome = self._reconcile_resume_selection(meta)
+                    finally:
+                        # Exceptions included: an error part-way must not leave
+                        # the run's proposed exclusions or holdout applied.
+                        if outcome != "ok":
+                            self._restore_calibration_selection(selection_before)
                     if outcome == "fresh":
                         return _delete_resumed_run_and_start_fresh(meta)
                     if outcome is None:
