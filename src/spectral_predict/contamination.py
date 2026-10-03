@@ -1032,6 +1032,10 @@ def compute_validation_metrics_for_top_one_class_models(
     if df_results is None or len(df_results) == 0:
         return df_results
 
+    from spectral_predict.search import check_validation_axes
+
+    check_validation_axes(X_train, X_val, wavelengths)
+
     # Drop training samples with NaN raw labels (safety net — upstream should
     # already filter, but matches classification helper behavior).
     try:

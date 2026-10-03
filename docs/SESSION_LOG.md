@@ -743,6 +743,116 @@ producing that fold's score (booster early stopping on the test fold R028/R003/R
 the scored fold R002/R021). Rule now in CLAUDE.md. Also: the 2026-09-28 reviews were Claude-only; Codex gpt-6-astra
 and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before any fix starts.
 
+## 2026-10-02 - GUI dataset state (R004-R007, R037, R038): one install path, validation from the run's own data
+
+Branch `fix/gui-dataset-state`. Gotchas worth knowing before touching data loading:
+- **Every loader goes through `_install_dataset(X_original, y, ref, metadata_df, mode=...)`.** Import
+  (`_load_and_plot_data`), Data Management Use/Merge & Use/filter/trim and calibration-transfer replace.
+  `mode="replace"` clears `excluded_spectra`, the validation split and the Quality Check report;
+  `"append"`/`"update"` keep exclusions and the holdout (pruned to labels still present). Assigning
+  `self.X`/`self.y` directly anywhere else re-opens R037: `_update_wavelengths` rebuilds X from
+  `X_original`, and `_on_target_column_changed` reindexes y to `X_original` from `combined_metadata_df`.
+- **Replace keeps the Validation checkbox while a crash-resume is pending** (`_pending_validation_indices`
+  or `run_state.is_resuming()`). Startup "Resume" restores `validation_enabled=True`; unticking it on the
+  data reload would make the launch gate's settings diff fire a restore dialog the user never caused.
+  The split itself is still cleared; the gate restores the run's own split.
+- **`_load_and_plot_data`'s readers assign `self.X_original/y/ref` piecemeal.** It now snapshots the
+  previous dataset first (`_capture_dataset_state`) and restores it on any stop before the install
+  (sub-integer axis, X/y misalignment, append failure, exception). Before, a sub-integer rejection left
+  new y next to old X (R038).
+- **`_wavelength_filtered` no longer rounds `X_original.columns` in place**; it returns a new frame.
+  Callers that relied on the reader's frame being mutated would now see unrounded columns.
+- **The worker builds its own validation set** (`_validation_snapshot(X_run, y_run, frozen validation
+  rows, frozen exclusions)`) and all five metric call sites (grid/Bayesian/NSGA-II/one-class/multiclass)
+  use it, never `self.validation_X`. `self.validation_X` is still refreshed (launch, wavelength filter,
+  baseline replace, target switch) for Tab 7/ensembles, but it is a convenience copy, not the source.
+  Samples excluded after the split are not scored. `search.check_validation_axes` makes the backend
+  raise on train/val width mismatch; equal-width axis identity can only be checked in the GUI (labels).
+- **Click exclusion:** plotted lines carry `_dasp_sample_label`/`_dasp_sample_pos` (`_tag_sample_artist`).
+  Never parse the gid back to an int: combined-file IDs are strings ('5', '007', '-3').
+- **Quality Check:** `generate_outlier_report` gets an array, so `Sample_Index` is a POSITION. The GUI
+  adds `Sample_Label`, keys tree rows by `outlier_row_<pos>` and maps iid -> label. Mark/unmark refuse a
+  report whose sample index differs from the current X.
+- `tests/gui/test_multiclass_gui.py::test_run_analysis_accepts_multiclass_engine_selection` fails on main
+  too (its fake Thread doesn't accept the `kwargs=` the launch has passed since #79). Not caused here.
+## 2026-10-02 - GUI dataset state, review round 1 (Codex BLOCK / GLM merge-with-fixes) follow-ups
+
+- **A crash-resume must check exclusions, not just the data fingerprint.** The fingerprint covers X/y,
+  and reloading the same file (replace) clears exclusions, so the gate accepted a resume on a different
+  calibration set. The run record now stores `calibration_rows` (`{"excluded": [...], "active": [...]|None}`,
+  via `run_state.calibration_rows_record`); `_reconcile_resume_calibration_rows` runs before the split
+  reconcile and asks (restore / start fresh / cancel). Records without the field resume with a log line.
+- **Data Management and calibration-transfer data keep their exact wavelength axis** (`exact_axis=True`),
+  preserving their behaviour before the install helper: Import's integer rounding would reject 0.48 cm^-1
+  FTIR axes and change resume fingerprints. `_exact_wavelength_axis` remembers the rule for later wavelength
+  Updates, appends and edits. Whether Import should keep rounding is still open.
+- **Rejected loads restore units/data type too** (`_DATASET_STATE_ATTRS/VARS`), and browse-time combined-file
+  detection writes `_combined_metadata_df_preview`, never `combined_metadata_df` (it ran before the snapshot).
+- **Target switch and Analysis Subset columns merge metadata stores by sample** (`_metadata_column`):
+  after Data Management data gets an appended combined file, `ref` and `combined_metadata_df` each hold
+  their own samples' values. Use `.infer_objects()`: a NaN-padded store makes numeric targets object dtype.
+- **Between-run validation consumers:** manual ensemble retrain uses the run's frozen holdout
+  (`training_data_cache["validation"]`, `_last_run_validation`); Tab 7 refit builds its own snapshot from the
+  same data as its calibration rows. Prediction-tab data loaded from the validation set keeps its own targets
+  (`prediction_actuals`). `_check_validation_axis` is called where it can fire (it was tautological in the
+  worker).
+- **Duplicate IDs:** `io.rename_duplicate_ids` now never produces a duplicate (`["A","A.1","A"]` gave two
+  "A.1"); `_install_dataset` also gives repeated labels a unique suffix. QC staleness uses a data
+  fingerprint (index, columns, values), so a baseline replace or wavelength change also refuses a stale report.
+## 2026-10-02 - GUI dataset state, review round 2 follow-ups
+
+- **Resume gate: check every saved label is present BEFORE comparing.** Intersecting saved exclusions/subset
+  with the loaded labels made a renamed sample vanish from both sides and the gate returned "ok". Now any
+  missing saved label refuses (record kept).
+- **`calibration_rows` stores `run_state.canonical_label` keys** (type-tagged strings: `i:5`, `f:5.0`,
+  `s:5`, `t:[...]`), so float/tuple IDs are recorded and compare equal after the JSON round trip. A new
+  record without rows asks (resume anyway / fresh / cancel) instead of resuming silently.
+- **GUI records carry `label_normalization` (`run_state.LABEL_NORMALIZATION` = 1; `start_run` defaults to None, so headless and test records count as legacy).** Legacy records (None) were
+  saved before repeated IDs got collision-free suffixes (old reader: `["A","A.1","A"]` -> "A.1" twice), so
+  the same saved label can name other rows. `_labels_differ_from_legacy` is set at install when the reader's
+  `duplicate_rename_mapping` differs from the old scheme or the install had to suffix repeats; the gate
+  then refuses a legacy resume (keep/fresh). An exact migration would need the old row order, not stored.
+- QC staleness fingerprint includes the targets; the Analysis Subset dialog and `_metadata_stores` use only
+  the installed dataset's stores (the uninstalled DM merge never had `metadata_df` anyway); Comparison's
+  validation load refreshes the snapshot; repeated NaN IDs become "nan", "nan.1".
+## 2026-10-02 - GUI dataset state, review round 3: one identity check for crash-resume
+
+- **`calibration_identity` is the final authority on resume.** At launch the GUI records a blake2b digest of
+  the exact calibration rows the worker trains on (after subset, exclusions and holdout removal, in order:
+  canonical labels, wavelength labels, float64 spectra, targets) and of the holdout rows
+  (`run_state.calibration_identity`, built by `_calibration_identity_now`, which mirrors the worker's
+  filtering). The gate recomputes it after any user-approved restore and resumes only on a match; otherwise
+  one dialog: start fresh / keep (default keep). This replaces chasing label edge cases (swaps, order,
+  normalization drift, provenance). The coarse `dataset_fingerprint` (shape + 3 cells) is still checked first.
+- `calibration_rows` (versioned keys of excluded / active / holdout) only drives the restore offers;
+  the holdout keys also fix float/tuple holdout labels that `validation_indices` drops.
+- `canonical_label` supports int/float/str/bool (numpy too) and tuples of these, nothing else
+  (`UnsupportedLabelError`): no repr fallback, which could collide or change across sessions.
+- Record classes: legacy (all three new fields None) resumes with a log, unless the loaded labels look renamed
+  (`_labels_look_renamed`: `"<id>.<k>"` next to `"<id>"`), computed from the loaded labels at the gate so it
+  can't go stale after Data Management, merges, viewer edits or Revert. Anything else not exactly current
+  (unknown `label_normalization`, malformed rows/identity, unsupported labels) asks: resume anyway / fresh /
+  keep. `from_dict` no longer coerces malformed `calibration_rows` to None (that made it look legacy).
+- `rename_duplicate_ids` tests missingness per label (`pd.isna` on a MultiIndex raises).
+## 2026-10-02 - GUI dataset state, review round 4: transactional resume checks, worker-parity identity
+
+- **Resume reconciliation is transactional.** `_reconcile_resume_selection` runs rows -> holdout -> identity;
+  the gate snapshots the selection first (`_capture_calibration_selection`) and puts it back on any outcome
+  but "ok" (`_restore_calibration_selection`), so an approved exclusion/holdout restore followed by "keep"
+  at a mismatch leaves the GUI as it was at the click.
+- **`_prepare_calibration` is the one definition of the rows a run trains on** (subset -> exclusions ->
+  holdout -> mixed-type label normalisation -> rare-class drop). The worker and `_calibration_identity_now`
+  both call it, so the digest never includes rows the worker later drops. Tests capture the X/y the worker
+  actually passes to `run_unified_bayesian` and rebuild the identity independently, for both start_run sites.
+- **Identity v2** (`CALIBRATION_IDENTITY_VERSION`): every label/section length-prefixed (NUL-joined labels
+  collided), row counts hashed, integer targets as int64 (float64 merged ints above 2**53), object targets
+  that are all Python/numpy numbers hashed like the numeric column they equal. Unknown versions ask.
+- `valid_calibration_rows/identity` require every schema key and element type; "resume anyway" on an
+  unverifiable record keeps the current selection and never decodes its holdout keys.
+- Legacy record + labels that look renamed ("S1" and "S1.2") now asks resume anyway / fresh / keep: that
+  spelling also occurs naturally. `rename_duplicate_ids` uses missing-aware keys (tuple IDs with NaN parts).
+
+
 ## 2026-10-02 - Tab 7 Y-transform save contract (R048/R001/R020/R014/R010), branch fix/ytransform-save
 - **R048 was masking R001/R020.** Every TTR refit crashed on `pipe.steps` before reaching the TTR save branch, so no
   .dasp with a TTR could exist; a bare `hasattr` guard would have shipped silent corruption (lost prep_pipeline,
@@ -1199,6 +1309,17 @@ the same folds, as for PLS LV selection. Implemented on branch fix/booster-early
   bitmap, which hides the blur. Grab the full screen, which comes back in physical pixels, and crop it by
   `full.width / winfo_screenwidth()`.
 
+## 2026-10-02 - GUI dataset state, review round 5 follow-ups
+
+- Resume reconciliation restores the click-time selection in a `finally`, so an exception part-way (e.g. in
+  the identity digest) also leaves exclusions, holdout and the validation status text as they were.
+- `_prepare_calibration` aligns X and y by label (equal lengths only; unequal lengths stay a worker error)
+  before the digest; the worker's own realignment after it is now a no-op.
+- uint64 targets above the int64 range are hashed as uint64 (an int64 cast wrapped them onto negatives);
+  smaller unsigned columns still hash like signed ones.
+- `rename_duplicate_ids` and the install step decide "repeated" with missing-aware keys: pandas'
+  `duplicated()` treats NaN and pd.NA as different IDs.
+
 ## 2026-10-02 - fix/readers: OPUS block priority (R017) and one ASCII reader (R062)
 - **brukeropus gotchas.** `OPUSFile.__getattr__` returns None (not AttributeError) for any absent name, so
   `hasattr(opus_file, 'a')` is always True; trust `data_keys` (1-D blocks only; `series_keys` are 2-D). A non-OPUS file
@@ -1275,6 +1396,14 @@ the same folds, as for PLS LV selection. Implemented on branch fix/booster-early
 - **Tooling gotcha.** The Bash tool's heredocs turned `\b` and `\n` inside Python string literals into real
   control characters (a backspace ended up in a regex). Write code containing backslashes with the Write/Edit
   tools, not via heredoc.
+
+## 2026-10-02 - GUI dataset state, round 7 follow-ups
+
+- The combined CSV/Excel readers decide "repeated IDs" with the same missing-aware check as
+  `rename_duplicate_ids` (`io._has_repeated_ids`), not `duplicated()`.
+- Object-dtype targets with non-negative ints above int64 hash like the uint64 column they equal.
+- The worker's X/y realignment after preparation is gone (it was dead after round 6);
+  `_prepare_calibration` records `n_realigned` and the worker logs the same warning from it.
 
 ## 2026-10-02 - Classification label convention + pooled CV metrics + regression FoM (R029/R030/QW5, branch fix/classification-metrics)
 - **Label convention lives in the METRICS, not the fitted labels.** `scoring.classification_metrics` scores against the

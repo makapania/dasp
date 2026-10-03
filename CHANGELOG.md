@@ -97,6 +97,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default (`-o addopts=""` runs everything); nightly CI jobs run them on Windows and,
   for the non-GUI ones, on Linux. The shared GUI test app is restored to its launch
   state before every test and stays hidden while tests run.
+- **Loading data no longer carries the previous dataset's exclusions, validation set or
+  Quality Check report into the new one** (review R004-R007, R037, R038). Every loader
+  (Import, Data Management, calibration transfer) installs data the same way. Loading
+  a file in replace mode, **including reloading the same file, clears the excluded
+  spectra and the validation set**; append keeps them. A load that fails puts the
+  previous dataset back whole, with its units and data type. Validation metrics are
+  computed on the run's own current spectra and wavelengths, without samples excluded
+  after the split. Clicking a spectrum and Quality Check "Mark for exclusion" now
+  exclude the right sample for numeric-looking and repeated IDs. A crash-resume now
+  continues only on exactly the interrupted run's calibration samples (same IDs, order,
+  spectra, targets and selection); otherwise it offers to start fresh or keep the run.
+
+
 - **Model Development Y-transform now refits, saves and predicts correctly** (review
   R048, R001, R020, R014/R019). Selecting any Y-transform for a model without booster
   early stopping crashed the refit, and 'Box-Cox' was rejected outright. The save path
