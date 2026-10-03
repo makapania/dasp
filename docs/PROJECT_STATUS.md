@@ -4,7 +4,7 @@
 
 ## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-27)
 
-### 0. IN PROGRESS (2026-10-02): Wave 1 + Wave 2 fixes, 10 of 11 branches merged + QW4 merged — HAND-OFF
+### 0. DONE (2026-10-03): Wave 1 + Wave 2 fixes all merged (PRs #83-#96) — next: pick Wave 3 / roadmap items
 Every Wave 1/2 item was cross-checked by Codex gpt-6-astra and GLM 5.3 before fixing. User decisions: booster tree
 count = one value from the pooled CV curve; chemometrics validation conventions (CLAUDE.md).
 **Merged:** #83 fix/ct-honest-labels; #84 fix/ensemble-cv (wrappers now in `model_wrappers.py`); #85 feat/dpi-fonts; #86 fix/contaminant-maths (QW3, QW6; auto EPO count
@@ -21,14 +21,16 @@ thread-budget rule in `parallel_policy`; frozen builds fall back to the threadin
 CatBoost serial; QW10 slow/comprehensive tests deselected by default, run nightly incl. Linux job).
 **#95 QW4 (holdout direction):** KS/SPXY/DUPLEX pick the CALIBRATION set (`sample_selection.split_calibration_holdout`);
 SPXY per Galvão (normalised distance matrices); DUPLEX per Snee; saved holdouts unchanged. Example RMSEP KS 3.57→1.30.
+#96 fix/booster-early-stopping (R028: no test-fold early stopping; one round count from the pooled CV curve; final
+fit at R truncated to k in grid/Bayesian/NSGA-II/Tab 7/export/ensembles; grid+Tab 7 XGBoost on non-0..K-1 integer
+labels fixed; grid final refit uses balanced weights). Example RMSEcv LightGBM 3.900→3.949, XGBoost 3.960→4.062.
 **Reviewers:** Codex is reset but reserved for MAJOR checks only (user, 2026-10-03); routine confirms use GLM 5.3 + DeepSeek (deepseek-flash; Pro only if the
 user says "pro") stand in. opencode prompts must forbid shell redirection, writes, and reads outside the repo, and
 demand a verdict even if a tool call is rejected. Merge rule: well-reviewed PR → merge origin/main into branch, test,
 `gh pr create`, `gh pr merge N --merge --match-head-commit <full sha>`.
-**Open branches** (pushed to origin as backup; worktrees under `.claude/worktrees/agent-*`), state at hand-off:
-- `fix/booster-early-stopping` — final review (Codex BLOCK / DeepSeek MWF on 5ec39e5) fixed in 60ed8c9 (grid
-  final-fit class weights, grid XGBoost integer labels, TTR train scores, transform-before-resample); main
-  1ca2de3 (#92-#95) merged. Ready to merge.
+**Open branches:** none. Follow-ups: see SESSION_LOG 2026-10-03 "Wave 1/2 review workflow" (decimal-comma CSV/ASD
+readers; PLS + regression imbalance sample_weight; regression sample weighters not applied to the final refit;
+QW4 distances on preprocessed/PCA spectra; #86 LOWs).
 **Open questions for the user:** Import rounds wavelengths to integers and refuses sub-unit spacing (FTIR?); comma
 ASCII files default to dot-decimal with a warning (my call); advisory EPO count (my call); delete stray GLM temp files
 in %TEMP% (diff.txt, gui_f359708.py, opencode\repo_*).
