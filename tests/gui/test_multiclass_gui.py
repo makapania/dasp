@@ -164,14 +164,25 @@ def test_run_analysis_accepts_multiclass_engine_selection(gui_app):
         def start(self):
             self._t(*self._a, **self._k)
 
+        # _run_analysis stores the thread on app.analysis_thread and the next run
+        # checks is_alive(); a finished fake must answer like a finished thread.
+        def is_alive(self):
+            return False
+
+        def join(self, timeout=None):
+            pass
+
     def _stub_worker(*_a, **_k):
         started["v"] = True
 
-    with patch("tkinter.messagebox.showwarning",
-               side_effect=lambda title, msg: warned.setdefault("m", (title, msg))), \
-         patch.object(app, "_run_analysis_thread", _stub_worker), \
-         patch("threading.Thread", _FakeThread):
-        app._run_analysis()
+    try:
+        with patch("tkinter.messagebox.showwarning",
+                   side_effect=lambda title, msg: warned.setdefault("m", (title, msg))), \
+             patch.object(app, "_run_analysis_thread", _stub_worker), \
+             patch("threading.Thread", _FakeThread):
+            app._run_analysis()
+    finally:
+        app.analysis_thread = None  # never leave a fake worker on the shared app
 
     assert warned.get("m") is None, f"unexpected warning: {warned.get('m')}"
     assert started["v"] is True
@@ -251,6 +262,12 @@ class _SyncThread:
     def start(self):
         if self._t is not None:
             self._t(*self._a, **self._k)
+
+    def is_alive(self):
+        return False  # it ran synchronously in start()
+
+    def join(self, timeout=None):
+        pass
 
 
 def test_double_click_multiclass_routes_to_selected_result(gui_app):

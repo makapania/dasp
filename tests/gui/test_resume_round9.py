@@ -61,7 +61,10 @@ def _click(gui_app):
 
 
 def _select_models(gui_app, names):
-    for attr in ("use_pls", "use_ridge"):
+    # Untick every supervised model, not just these two: the launch tier also ticks
+    # others (ElasticNet ...), and these tests used to pass only when an earlier test
+    # had left those unticked (found by the QW10 full-state reset).
+    for attr in gui_app._STANDARD_MODEL_VARS.values():
         getattr(gui_app, attr).set(False)
     for name in names:
         getattr(gui_app, {"PLS": "use_pls", "Ridge": "use_ridge"}[name]).set(True)

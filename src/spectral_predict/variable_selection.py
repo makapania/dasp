@@ -5,8 +5,6 @@ This module implements various variable selection algorithms to identify
 the most informative spectral variables for prediction.
 """
 
-import os
-
 import numpy as np
 from joblib import Parallel, delayed
 from sklearn.cross_decomposition import PLSRegression
@@ -40,23 +38,24 @@ def _cap_top_n(importances: np.ndarray, n_requested: int, method: str) -> int:
     return int(min(n_requested, np.count_nonzero(importances)))
 
 
-def _get_cv_n_jobs():
-    """Get n_jobs for CV, respecting frozen app constraints."""
-    from spectral_predict.search import _frozen_needs_threading_fallback
-    return 1 if _frozen_needs_threading_fallback() else -1
-
-
-def _spa_seed_n_jobs():
-    """Worker count for the SPA seed loop.
+def _spa_seed_plan():
+    """Thread plan for the SPA seed loop (a threading pool, in every build).
 
     Threading backend is used (numpy/sklearn release the GIL on the heavy
     matmul + PLS CV work, and threading is PyInstaller-bundle-safe — loky
     has known argv-parse issues in the frozen runtime per
-    `search._frozen_needs_threading_fallback`). Returns the cpu count
-    capped at 8 to avoid pathological oversubscription on 32-core dev boxes
-    (each thread fights for the same numpy BLAS pool).
+    `search._frozen_needs_threading_fallback`). Workers are physical cores
+    (``parallel_policy.pool_workers``), capped at 8 as before; the threads share
+    one BLAS pool, so the plan's ``backend_context()`` caps it at cores // workers.
     """
-    return min(os.cpu_count() or 1, 8)
+    from spectral_predict.parallel_policy import CVPlan, physical_cores, pool_workers
+
+    workers = min(pool_workers(-1), 8)
+    if workers <= 1:
+        return CVPlan(n_jobs=1, backend="sequential", model_threads=None)
+    return CVPlan(
+        n_jobs=workers, backend="threading", model_threads=max(1, physical_cores() // workers)
+    )
 
 
 def uve_selection(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5, random_state=42):
@@ -468,21 +467,23 @@ def spa_selection(X, y, n_features, cv_folds=5):
     # criterion. The pre-T-06 implementation seeded only at
     # argmax(|corr(X[:, j], y)|) (which required y normalization); canon does not.
 
+    seed_plan = _spa_seed_plan()
     print(
         f"Running canonical SPA over {n_vars} candidate seeds "
-        f"(threading n_jobs={_spa_seed_n_jobs()})..."
+        f"(threading n_jobs={seed_plan.n_jobs})..."
     )
 
     # Step 2: Evaluate every variable as a candidate first variable (Araújo 2001).
     # Each seed's chain is independent — read-only access to X, X_norm, y.
     # Parallelize via joblib with threading backend (GIL-free for numpy/sklearn
     # work, PyInstaller-bundle-safe; loky has frozen-runtime argv-parse issues).
-    results = Parallel(n_jobs=_spa_seed_n_jobs(), backend="threading")(
-        delayed(_evaluate_spa_seed)(
-            first_var, X, X_norm, y, n_samples, n_vars, n_features, cv_folds
+    with seed_plan.backend_context():
+        results = Parallel(n_jobs=seed_plan.n_jobs, backend="threading")(
+            delayed(_evaluate_spa_seed)(
+                first_var, X, X_norm, y, n_samples, n_vars, n_features, cv_folds
+            )
+            for first_var in range(n_vars)
         )
-        for first_var in range(n_vars)
-    )
 
     # Sequentially pick the best chain across all seeds.
     best_score = -np.inf
@@ -653,12 +654,14 @@ def ipls_selection(X, y, n_intervals=20, n_components=None, cv_folds=5, random_s
         try:
             pls = PLSRegression(n_components=interval_n_components, scale=False)
 
-            # Cross-validation R² score
+            # Cross-validation R² score. Serial: PLS folds take milliseconds, and PLS is
+            # in parallel_policy.MODELS_PREFER_SERIAL_CV (a process pool per interval
+            # cost more than the fits).
             cv_scores = cross_val_score(
                 pls, X_interval, y,
                 cv=cv_folds,
                 scoring='r2',
-                n_jobs=_get_cv_n_jobs()
+                n_jobs=1,
             )
 
             # Use mean R² as interval score

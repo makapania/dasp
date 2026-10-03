@@ -25,6 +25,7 @@ def _mc_app():
         pytest.skip("no display")
     root.withdraw()
     a = SpectralPredictApp(root)
+    root.withdraw()  # the app re-shows the root at startup (zoomed); keep it hidden
     yield a
     try:
         root.destroy()
