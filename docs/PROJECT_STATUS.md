@@ -26,12 +26,12 @@ user says "pro") stand in. opencode prompts must forbid shell redirection, write
 demand a verdict even if a tool call is rejected. Merge rule: well-reviewed PR → merge origin/main into branch, test,
 `gh pr create`, `gh pr merge N --merge --match-head-commit <full sha>`.
 **Open branches** (pushed to origin as backup; worktrees under `.claude/worktrees/agent-*`), state at hand-off:
-- `fix/booster-early-stopping` — round 3 in progress (Codex r3 BLOCK: export metrics before truncation; CatBoost auto
-  LR replaced by 0.1 in rebuild/export; sanitize None breaks clone; resume flag; ensemble rebuild via truncation).
-  Reconcile with fix/ytransform-save: Tab 7 y-transform k read off transformed-y curve vs final fit on raw y (~41998).
+- `fix/booster-early-stopping` 5ec39e5 — rounds 3-4 done (export truncates after final fit; CatBoost auto-LR kept;
+  RoundTruncated* ensembles; Tab 7 Y-transform final fit via TTR then truncate); main 6f63216 merged; final review
+  (Codex major + DeepSeek) running.
 **Open questions for the user:** Import rounds wavelengths to integers and refuses sub-unit spacing (FTIR?); comma
 ASCII files default to dot-decimal with a warning (my call); advisory EPO count (my call); delete stray GLM temp files
-in %TEMP% (diff.txt, gui_f359708.py, opencodeepo_*).
+in %TEMP% (diff.txt, gui_f359708.py, opencode\repo_*).
 
 ### 0a. The 2026-09-28 review results and the combined order
 Two whole-codebase reviews ran on `main` `449dfb1` (PR D merged as `85790dd`):
