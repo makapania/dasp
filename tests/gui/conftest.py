@@ -123,6 +123,10 @@ def gui_app(session_app):
     app.X_original = None
     app.y = None
     app.results_df = None
+    # Worker handles: a test that patches threading.Thread can leave a fake (or a
+    # finished) worker here, and the next _run_analysis / refit launch checks it.
+    app.analysis_thread = None
+    app._refit_active = False
 
     yield app
 
