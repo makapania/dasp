@@ -128,7 +128,10 @@ ONE_CLASS_SCORE_DISTRIBUTION_TEMPLATE = '''
 # =============================================================================
 
 # cv_scores: out-of-fold decision_function (or score_samples) values from the
-# CV block, aligned with all_y_true_arr.
+# CV block, aligned with all_y_true_arr. Under Repeated K-Fold they are
+# per-sample means across repeats, whereas the reported labels (y_pred_cv) are
+# majority votes, so the score = 0 line need not split samples exactly as the
+# reported predictions do.
 if cv_scores is None:
     print("No out-of-fold scores available; score histogram skipped.")
 else:

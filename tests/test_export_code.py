@@ -1040,6 +1040,70 @@ _REG_IMB_CFG = {**_REG_CFG, 'model_name': 'Ridge', 'params': {'alpha': 1.0},
 _OC_IMB_CFG = {**_OC_CFG, 'imbalance_method': 'binning'}
 
 
+def _export_data(y_kind):
+    """Small seeded dataset shared by the executed-export tests."""
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(40, 30))
+    y = {
+        'reg': rng.normal(size=40),
+        'cls': np.array([0, 1] * 20),
+        'oc': np.array([1] * 34 + [-1] * 6),
+    }[y_kind]
+    return X, y
+
+
+# Appended after the plots (Agg keeps figures open after show()): dumps every
+# figure title and, for one-class CV, the shape and sign agreement of cv_scores.
+_PLOT_PROBE = """
+import matplotlib.pyplot as _plt
+for _n in _plt.get_fignums():
+    for _ax in _plt.figure(_n).axes:
+        print('PLOT_TITLE', repr(_ax.get_title()))
+if 'cv_scores' in globals() and cv_scores is not None:
+    _s = np.asarray(cv_scores, dtype=float)
+    _p = np.asarray(y_pred_cv)
+    # Unambiguous margin: drop the quarter of samples nearest the threshold.
+    _conf = np.abs(_s) > np.quantile(np.abs(_s), 0.25)
+    print('CV_SCORE_CHECK', len(_s), len(all_y_true_arr), len(_p),
+          len(np.unique(np.round(_s, 12))),
+          int(np.sum(((_s >= 0) != (_p == 1)) & _conf)), int(cv_scores_are_decision))
+"""
+
+
+def _run_export(config, y_kind, fmt, include_cv, viz, temp_dir):
+    """Generate an export with embedded data, run it, and return its stdout."""
+    X, y = _export_data(y_kind)
+    options = ExportOptions(
+        include_visualization=viz,
+        include_prediction_template=False,
+        format=fmt,
+        include_data=True,
+        data_X=X,
+        data_y=y,
+        wavelengths=np.linspace(1000, 2500, 30),
+        include_cross_validation=include_cv,
+    )
+    generator = CodeGenerator(config, options)
+    if fmt == 'notebook':
+        # Run the notebook's code cells in order, skipping the pip-install cell.
+        cells = [''.join(c['source']) for c in generator.generate_notebook()['cells']
+                 if c['cell_type'] == 'code']
+        cells = [src for src in cells if 'pip' not in src or 'subprocess' not in src]
+        script_text = '\n\n'.join(cells)
+    else:
+        script_text = generator.generate_script()
+    if viz:
+        script_text += _PLOT_PROBE
+    script_path = Path(temp_dir) / 'export_metric_helpers.py'
+    script_path.write_text(script_text, encoding='utf-8')
+
+    env = {**os.environ, 'MPLBACKEND': 'Agg', 'PYTHONIOENCODING': 'utf-8'}
+    result = subprocess.run([sys.executable, str(script_path)], capture_output=True,
+                            text=True, encoding='utf-8', timeout=120, cwd=temp_dir, env=env)
+    assert result.returncode == 0, f"Script execution failed:\n{result.stderr}"
+    return result.stdout
+
+
 @pytest.mark.parametrize('config, y_kind, fmt, include_cv, viz, expect', [
     # Final-model block prints calibration CCC via _lins_ccc, which used to be
     # defined only inside the CV block -> NameError with CV disabled.
@@ -1050,8 +1114,12 @@ _OC_IMB_CFG = {**_OC_CFG, 'imbalance_method': 'binning'}
     # Imbalance-aware regression CV never computed `ccc`, which the shared
     # metrics block prints.
     (_REG_IMB_CFG, 'reg', 'script', True, False, 'CCC:'),
+    (_REG_IMB_CFG, 'reg', 'notebook', True, False, 'CCC:'),
     # Imbalance regression final model now prints calibration metrics too.
     (_REG_IMB_CFG, 'reg', 'script', False, False, 'Calibration CCC'),
+    # Imbalance classification used to print its CV results twice.
+    ({**_CLS_CFG, 'imbalance_method': 'class_weight'}, 'cls', 'script', True, False,
+     'Accuracy:'),
     (_OC_IMB_CFG, 'oc', 'script', True, False, 'Calibration Balanced Accuracy'),
     (_OC_IMB_CFG, 'oc', 'script', False, False, 'Calibration Balanced Accuracy'),
     (_OC_IMB_CFG, 'oc', 'notebook', True, False, 'Calibration Balanced Accuracy'),
@@ -1068,76 +1136,85 @@ _OC_IMB_CFG = {**_OC_CFG, 'imbalance_method': 'binning'}
     (_OC_CFG, 'oc', 'notebook', True, True, 'Calibration Balanced Accuracy'),
     ({**_OC_CFG, 'cv_strategy': 'repeated_kfold', 'cv_n_repeats': 2}, 'oc', 'script', True,
      True, 'Calibration Balanced Accuracy'),
+    # Scaling branch of the one-class CV / final-model blocks.
+    ({**_OC_CFG, 'model_name': 'OneClassSVM', 'params': {'nu': 0.1}}, 'oc', 'script', True,
+     True, 'Calibration Balanced Accuracy'),
 ], ids=['regression-no-cv', 'one-class-no-cv', 'classification-no-cv',
-        'regression-imbalance-cv', 'regression-imbalance-no-cv',
+        'regression-imbalance-cv', 'regression-imbalance-notebook-cv',
+        'regression-imbalance-no-cv', 'classification-imbalance-cv',
         'one-class-imbalance-script-cv', 'one-class-imbalance-script-no-cv',
         'one-class-imbalance-notebook-cv', 'one-class-imbalance-notebook-no-cv',
         'regression-viz-script-no-cv', 'regression-viz-notebook-no-cv',
         'regression-viz-script-cv', 'classification-viz-script-cv',
         'one-class-viz-script-cv', 'one-class-viz-notebook-cv',
-        'one-class-viz-script-repeated-cv'])
+        'one-class-viz-script-repeated-cv', 'one-class-svm-viz-script-cv'])
 def test_exported_script_runs_with_metric_helpers(config, y_kind, fmt, include_cv, viz, expect,
                                                   temp_dir):
     """Exported scripts and notebooks must define every name they use, with or
-    without the CV section, and their plots must show real values."""
-    rng = np.random.default_rng(0)
-    X = rng.normal(size=(40, 30))
-    y = {
-        'reg': rng.normal(size=40),
-        'cls': np.array([0, 1] * 20),
-        'oc': np.array([1] * 34 + [-1] * 6),
-    }[y_kind]
-    options = ExportOptions(
-        include_visualization=viz,
-        include_prediction_template=False,
-        format=fmt,
-        include_data=True,
-        data_X=X,
-        data_y=y,
-        wavelengths=np.linspace(1000, 2500, 30),
-        include_cross_validation=include_cv,
-    )
-    generator = CodeGenerator(config, options)
-    script_path = Path(temp_dir) / 'export_metric_helpers.py'
-    if fmt == 'notebook':
-        # Run the notebook's code cells in order, skipping the pip-install cell.
-        cells = [''.join(c['source']) for c in generator.generate_notebook()['cells']
-                 if c['cell_type'] == 'code']
-        cells = [src for src in cells if 'pip' not in src or 'subprocess' not in src]
-        script_text = '\n\n'.join(cells)
-    else:
-        script_text = generator.generate_script()
-    if viz:
-        # Probe appended after the plots (Agg keeps figures open after show()).
-        script_text += (
-            "\nimport matplotlib.pyplot as _plt\n"
-            "for _n in _plt.get_fignums():\n"
-            "    for _ax in _plt.figure(_n).axes:\n"
-            "        print('PLOT_TITLE', repr(_ax.get_title()))\n"
-            "if 'cv_scores' in globals() and cv_scores is not None:\n"
-            "    print('CV_SCORE_VALUES', sorted(set(np.round(cv_scores, 12)))[:5],\n"
-            "          len(set(np.round(cv_scores, 12))))\n"
-        )
-    script_path.write_text(script_text, encoding='utf-8')
-
-    env = {**os.environ, 'MPLBACKEND': 'Agg'}
-    result = subprocess.run([sys.executable, str(script_path)], capture_output=True,
-                            text=True, timeout=120, cwd=temp_dir, env=env)
-    assert result.returncode == 0, f"Script execution failed:\n{result.stderr}"
-    assert expect in result.stdout
+    without the CV section, print CV results once, and plot real values."""
+    stdout = _run_export(config, y_kind, fmt, include_cv, viz, temp_dir)
+    assert expect in stdout
+    assert stdout.count('Cross-validation Results') == (1 if include_cv else 0), stdout
 
     if viz:
-        titles = [line for line in result.stdout.splitlines() if line.startswith('PLOT_TITLE')]
+        titles = [line for line in stdout.splitlines() if line.startswith('PLOT_TITLE')]
         assert titles, "visualization produced no figures"
         bad = [t for t in titles if '{' in t or '}' in t]
         assert not bad, f"unformatted placeholders in plot titles: {bad}"
         if y_kind == 'oc' and include_cv:
-            score_lines = [line for line in result.stdout.splitlines()
-                           if line.startswith('CV_SCORE_VALUES')]
-            assert score_lines, "one-class CV did not define cv_scores for the histogram"
-            n_unique = int(score_lines[0].rsplit(' ', 1)[1])
-            assert n_unique > 2, f"histogram data is just labels: {score_lines[0]}"
+            check = [line for line in stdout.splitlines() if line.startswith('CV_SCORE_CHECK')]
+            assert check, "one-class CV did not define cv_scores for the histogram"
+            n_scores, n_truth, n_pred, n_unique, n_mismatch, is_decision = (
+                int(v) for v in check[0].split()[1:]
+            )
+            assert n_scores == n_truth == n_pred, check[0]
+            assert n_unique > 2, f"histogram data is just labels: {check[0]}"
+            assert is_decision == 1, check[0]
+            # Outside the margin, score >= 0 must match the reported inlier label.
+            assert n_mismatch == 0, check[0]
             assert any('Decision Score Distribution' in t for t in titles)
+
+
+def test_exported_regression_metrics_match_independent_computation(temp_dir):
+    """Printed CV and calibration metrics must equal values computed here on the
+    same data and splits, independently of the generated helpers."""
+    import re
+
+    from sklearn.cross_decomposition import PLSRegression
+    from sklearn.model_selection import KFold
+
+    from spectral_predict.scoring import lins_ccc
+
+    stdout = _run_export(_REG_CFG, 'reg', 'script', True, False, temp_dir)
+
+    def printed(label):
+        match = re.search(rf'^\s*{re.escape(label)}\s+(-?\d+\.\d+)', stdout, re.MULTILINE)
+        assert match, f"{label!r} not printed:\n{stdout}"
+        return float(match.group(1))
+
+    # Embedded data is used as-is (already preprocessed); the export fits
+    # PLSRegression(n_components=3, scale=False) under KFold(3, shuffle, 42).
+    X, y = _export_data('reg')
+    y_cv = np.empty_like(y)
+    for train_idx, test_idx in KFold(n_splits=3, shuffle=True, random_state=42).split(X):
+        fold = PLSRegression(n_components=3, scale=False).fit(X[train_idx], y[train_idx])
+        y_cv[test_idx] = fold.predict(X[test_idx]).ravel()
+    resid = y - y_cv
+    final = PLSRegression(n_components=3, scale=False).fit(X, y)
+    y_cal = final.predict(X).ravel()
+    ss_tot = np.sum((y - y.mean()) ** 2)
+
+    expected = {
+        'RMSE:': np.sqrt(np.mean(resid ** 2)),
+        'R²:': 1 - np.sum(resid ** 2) / ss_tot,
+        'MAE:': np.mean(np.abs(resid)),
+        'CCC:': lins_ccc(y, y_cv),
+        'Calibration RMSE:': np.sqrt(np.mean((y - y_cal) ** 2)),
+        'Calibration R²:': 1 - np.sum((y - y_cal) ** 2) / ss_tot,
+        'Calibration CCC:': lins_ccc(y, y_cal),
+    }
+    for label, value in expected.items():
+        assert printed(label) == pytest.approx(value, abs=2e-4), label
 
 
 if __name__ == '__main__':

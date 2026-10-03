@@ -366,7 +366,11 @@ y_pred_cv = pooled_preds
 
 # Out-of-fold scores aligned with all_y_true_arr (for the score histogram).
 # decision_function: >= 0 means inlier (the rule used for y_pred above).
-# Under Repeated K-Fold each sample's scores are averaged across repeats.
+# Under Repeated K-Fold each sample's scores are averaged across repeats,
+# while y_pred_cv is a majority vote of the per-repeat labels, so near the
+# threshold a sample's mean score and its reported label can disagree.
+# Under plain K-Fold every outlier is scored in every fold (as in
+# run_one_class_cv), so outliers appear cv_folds times.
 cv_scores_are_decision = hasattr(model, 'decision_function')
 cv_scores = None
 if all_scores and len(all_scores) == len(all_test_idx):

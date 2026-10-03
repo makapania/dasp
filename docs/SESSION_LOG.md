@@ -936,3 +936,12 @@ the same folds, as for PLS LV selection. Implemented on branch fix/booster-early
   those and marks the threshold at score = 0, the same rule the CV block uses to predict. The executed-export test
   reads every figure title back through matplotlib and fails on any `{`/`}`, and checks the one-class scores have
   more than two distinct values.
+- **Round 4 (DeepSeek review): tests now check what they claim.** Every executed-export case asserts
+  `Cross-validation Results` appears once with CV on and never with CV off (a classification+imbalance case fails on
+  d4f608a, which printed it twice). `test_exported_regression_metrics_match_independent_computation` recomputes CV
+  and calibration RMSE/R2/MAE/CCC with sklearn + `scoring.lins_ccc` on the same data and KFold splits and matches
+  the printed values to 2e-4 (also true on d4f608a, so CV numbers are unchanged). The one-class probe asserts
+  `len(cv_scores) == len(all_y_true_arr) == len(y_pred_cv)` and that score >= 0 agrees with the reported label
+  outside the 25% of samples nearest the threshold. Added OneClassSVM (scaling branch) and regression-imbalance
+  notebook cases. Gotcha: under Repeated K-Fold `cv_scores` are per-sample means, `y_pred_cv` a majority vote, so
+  they can disagree near 0 (now said in the template comments).
