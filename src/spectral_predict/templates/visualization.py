@@ -23,7 +23,7 @@ ax.plot(lims, lims, 'r--', lw=2, label='1:1 line')
 # Labels and title
 ax.set_xlabel('Actual Values', fontsize=12)
 ax.set_ylabel('Predicted Values', fontsize=12)
-ax.set_title(f'Predicted vs Actual\\nRMSE={{rmse:.4f}}, R²={{r2:.4f}}', fontsize=14)
+ax.set_title(f'Predicted vs Actual\\nRMSE={rmse:.4f}, R²={r2:.4f}', fontsize=14)
 ax.legend()
 
 # Equal aspect ratio
@@ -127,21 +127,33 @@ ONE_CLASS_SCORE_DISTRIBUTION_TEMPLATE = '''
 # VISUALIZATION: Decision Score Distribution (One-Class)
 # =============================================================================
 
-fig, ax = plt.subplots(figsize=(10, 6))
-ax.hist(y_pred_cv[all_y_true_arr == 1],
-        bins=30, alpha=0.6, label='Inlier', color='steelblue', edgecolor='k')
-ax.hist(y_pred_cv[all_y_true_arr == -1],
-        bins=30, alpha=0.6, label='Outlier', color='coral', edgecolor='k')
-ax.axvline(x=0, color='red', linestyle='--', lw=2, label='Decision boundary')
-ax.set_xlabel('Decision Score', fontsize=12)
-ax.set_ylabel('Frequency', fontsize=12)
-ax.set_title('One-Class Decision Score Distribution', fontsize=14)
-ax.legend()
-ax.grid(True, alpha=0.3)
+# cv_scores: out-of-fold decision_function (or score_samples) values from the
+# CV block, aligned with all_y_true_arr. Under Repeated K-Fold they are
+# per-sample means across repeats, whereas the reported labels (y_pred_cv) are
+# majority votes, so the score = 0 line need not split samples exactly as the
+# reported predictions do.
+if cv_scores is None:
+    print("No out-of-fold scores available; score histogram skipped.")
+else:
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.hist(cv_scores[all_y_true_arr == 1],
+            bins=30, alpha=0.6, label='Inlier (true)', color='steelblue', edgecolor='k')
+    ax.hist(cv_scores[all_y_true_arr == -1],
+            bins=30, alpha=0.6, label='Outlier (true)', color='coral', edgecolor='k')
+    if cv_scores_are_decision:
+        ax.axvline(x=0, color='red', linestyle='--', lw=2,
+                   label='Threshold: score = 0 (>= 0 accepted as inlier)')
+        ax.set_xlabel('Out-of-fold decision score', fontsize=12)
+    else:
+        ax.set_xlabel('Out-of-fold score_samples value (higher = more inlier-like)', fontsize=12)
+    ax.set_ylabel('Frequency', fontsize=12)
+    ax.set_title('One-Class Decision Score Distribution (cross-validated)', fontsize=14)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
 
-plt.tight_layout()
-plt.savefig('one_class_score_distribution.png', dpi=150, bbox_inches='tight')
-plt.show()
+    plt.tight_layout()
+    plt.savefig('one_class_score_distribution.png', dpi=150, bbox_inches='tight')
+    plt.show()
 '''
 
 ONE_CLASS_CONFUSION_TEMPLATE = '''
@@ -164,7 +176,8 @@ plt.show()
 
 
 def get_visualization_code(task_type: str, include_spectra: bool = False,
-                          include_variable_importance: bool = False) -> str:
+                          include_variable_importance: bool = False,
+                          include_cv_plots: bool = True) -> str:
     """
     Get visualization code based on options.
 
@@ -176,6 +189,10 @@ def get_visualization_code(task_type: str, include_spectra: bool = False,
         Include spectra plot
     include_variable_importance : bool
         Include variable importance plot
+    include_cv_plots : bool
+        Include the plots of cross-validated predictions. They read
+        ``y_pred_cv`` / ``all_y_true_arr``, which only the CV block defines, so
+        pass False when the script has no CV section.
 
     Returns
     -------
@@ -184,7 +201,11 @@ def get_visualization_code(task_type: str, include_spectra: bool = False,
     """
     code_parts = [VISUALIZATION_IMPORTS]
 
-    if task_type == 'regression':
+    if not include_cv_plots:
+        code_parts.append(
+            '\n# Cross-validated prediction plots omitted: this script has no CV section.\n'
+        )
+    elif task_type == 'regression':
         code_parts.append(PRED_VS_ACTUAL_TEMPLATE)
         code_parts.append(RESIDUALS_TEMPLATE)
     elif task_type == 'one_class':
