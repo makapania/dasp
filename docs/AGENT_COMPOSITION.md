@@ -232,7 +232,13 @@ print(f"grouped 4-fold RMSE = {np.mean(rmses):.3f}")
 
 Use `StratifiedGroupKFold` for classification to keep class balance across folds.
 For a locked holdout, split **by group** once, set the holdout aside, and never let
-it influence preprocessing choice, selection, or ranking. Aggregating replicates
+it influence preprocessing choice, selection, or ranking. To choose the holdout by
+Kennard-Stone, SPXY or DUPLEX, use
+`sample_selection.split_calibration_holdout(X, n_holdout, method=..., y=...)`; it
+returns `(calibration_positions, holdout_positions)`. KS and SPXY pick the
+**calibration** set (the representative samples, extremes included) and the rest is
+the holdout, so validation samples are not extrapolations. Calling `kennard_stone(X,
+n_holdout)` directly and treating its output as the holdout gets this backwards. Aggregating replicates
 (e.g. one median spectrum per specimen) before fitting is often preferable to
 carrying them as separate rows.
 
@@ -570,6 +576,7 @@ listed is an internal implementation detail that may change without notice.
 | `contamination` | `PCASIMCA` |
 | `models` | `PLSTransformer`; results-row rebuild helpers `parse_row_params`, `estimator_params_from_row`, `plsda_head_kwargs` (and its `PLSDA_HEAD_DEFAULT_RANDOM_STATE` default) |
 | `model_io` | `save_model`, `load_model`, `predict_with_model` |
+| `sample_selection` | `split_calibration_holdout` |
 | `wavelength_matching` | `match_wavelengths`, `resolve_wavelength_list`, `format_wavelength_list`, `WavelengthMatchError` |
 | `search` | `run_search`, `run_one_class_search`, `run_multiclass_simca_search`, `multiclass_varsel_mask`, `build_multiclass_decision_view`, `compute_validation_metrics_for_top_models`, `MulticlassVarselUnsupported` |
 

@@ -41,6 +41,7 @@ from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.decomposition import PCA
 
 from spectral_predict.cv_utils import build_cv_splitter, _is_repeated_cv
+from spectral_predict.parallel_policy import openmp_single_threaded_call
 from spectral_predict.wavelength_matching import (
     WavelengthMatchError,
     resolve_wavelength_list,
@@ -553,6 +554,10 @@ def one_class_metrics(y_true, y_pred, scores=None):
     return metrics
 
 
+# Thread budget (parallel_policy): the folds are serial and the one-class fits are
+# small, so OpenMP start-up in sklearn's distance/neighbour kernels (LOF especially)
+# costs more than the arithmetic it parallelises.
+@openmp_single_threaded_call
 def run_one_class_cv(
     X: np.ndarray,
     y_oc: np.ndarray,
@@ -1026,6 +1031,10 @@ def compute_validation_metrics_for_top_one_class_models(
 
     if df_results is None or len(df_results) == 0:
         return df_results
+
+    from spectral_predict.search import check_validation_axes
+
+    check_validation_axes(X_train, X_val, wavelengths)
 
     # Drop training samples with NaN raw labels (safety net — upstream should
     # already filter, but matches classification helper behavior).

@@ -743,6 +743,116 @@ producing that fold's score (booster early stopping on the test fold R028/R003/R
 the scored fold R002/R021). Rule now in CLAUDE.md. Also: the 2026-09-28 reviews were Claude-only; Codex gpt-6-astra
 and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before any fix starts.
 
+## 2026-10-02 - GUI dataset state (R004-R007, R037, R038): one install path, validation from the run's own data
+
+Branch `fix/gui-dataset-state`. Gotchas worth knowing before touching data loading:
+- **Every loader goes through `_install_dataset(X_original, y, ref, metadata_df, mode=...)`.** Import
+  (`_load_and_plot_data`), Data Management Use/Merge & Use/filter/trim and calibration-transfer replace.
+  `mode="replace"` clears `excluded_spectra`, the validation split and the Quality Check report;
+  `"append"`/`"update"` keep exclusions and the holdout (pruned to labels still present). Assigning
+  `self.X`/`self.y` directly anywhere else re-opens R037: `_update_wavelengths` rebuilds X from
+  `X_original`, and `_on_target_column_changed` reindexes y to `X_original` from `combined_metadata_df`.
+- **Replace keeps the Validation checkbox while a crash-resume is pending** (`_pending_validation_indices`
+  or `run_state.is_resuming()`). Startup "Resume" restores `validation_enabled=True`; unticking it on the
+  data reload would make the launch gate's settings diff fire a restore dialog the user never caused.
+  The split itself is still cleared; the gate restores the run's own split.
+- **`_load_and_plot_data`'s readers assign `self.X_original/y/ref` piecemeal.** It now snapshots the
+  previous dataset first (`_capture_dataset_state`) and restores it on any stop before the install
+  (sub-integer axis, X/y misalignment, append failure, exception). Before, a sub-integer rejection left
+  new y next to old X (R038).
+- **`_wavelength_filtered` no longer rounds `X_original.columns` in place**; it returns a new frame.
+  Callers that relied on the reader's frame being mutated would now see unrounded columns.
+- **The worker builds its own validation set** (`_validation_snapshot(X_run, y_run, frozen validation
+  rows, frozen exclusions)`) and all five metric call sites (grid/Bayesian/NSGA-II/one-class/multiclass)
+  use it, never `self.validation_X`. `self.validation_X` is still refreshed (launch, wavelength filter,
+  baseline replace, target switch) for Tab 7/ensembles, but it is a convenience copy, not the source.
+  Samples excluded after the split are not scored. `search.check_validation_axes` makes the backend
+  raise on train/val width mismatch; equal-width axis identity can only be checked in the GUI (labels).
+- **Click exclusion:** plotted lines carry `_dasp_sample_label`/`_dasp_sample_pos` (`_tag_sample_artist`).
+  Never parse the gid back to an int: combined-file IDs are strings ('5', '007', '-3').
+- **Quality Check:** `generate_outlier_report` gets an array, so `Sample_Index` is a POSITION. The GUI
+  adds `Sample_Label`, keys tree rows by `outlier_row_<pos>` and maps iid -> label. Mark/unmark refuse a
+  report whose sample index differs from the current X.
+- `tests/gui/test_multiclass_gui.py::test_run_analysis_accepts_multiclass_engine_selection` fails on main
+  too (its fake Thread doesn't accept the `kwargs=` the launch has passed since #79). Not caused here.
+## 2026-10-02 - GUI dataset state, review round 1 (Codex BLOCK / GLM merge-with-fixes) follow-ups
+
+- **A crash-resume must check exclusions, not just the data fingerprint.** The fingerprint covers X/y,
+  and reloading the same file (replace) clears exclusions, so the gate accepted a resume on a different
+  calibration set. The run record now stores `calibration_rows` (`{"excluded": [...], "active": [...]|None}`,
+  via `run_state.calibration_rows_record`); `_reconcile_resume_calibration_rows` runs before the split
+  reconcile and asks (restore / start fresh / cancel). Records without the field resume with a log line.
+- **Data Management and calibration-transfer data keep their exact wavelength axis** (`exact_axis=True`),
+  preserving their behaviour before the install helper: Import's integer rounding would reject 0.48 cm^-1
+  FTIR axes and change resume fingerprints. `_exact_wavelength_axis` remembers the rule for later wavelength
+  Updates, appends and edits. Whether Import should keep rounding is still open.
+- **Rejected loads restore units/data type too** (`_DATASET_STATE_ATTRS/VARS`), and browse-time combined-file
+  detection writes `_combined_metadata_df_preview`, never `combined_metadata_df` (it ran before the snapshot).
+- **Target switch and Analysis Subset columns merge metadata stores by sample** (`_metadata_column`):
+  after Data Management data gets an appended combined file, `ref` and `combined_metadata_df` each hold
+  their own samples' values. Use `.infer_objects()`: a NaN-padded store makes numeric targets object dtype.
+- **Between-run validation consumers:** manual ensemble retrain uses the run's frozen holdout
+  (`training_data_cache["validation"]`, `_last_run_validation`); Tab 7 refit builds its own snapshot from the
+  same data as its calibration rows. Prediction-tab data loaded from the validation set keeps its own targets
+  (`prediction_actuals`). `_check_validation_axis` is called where it can fire (it was tautological in the
+  worker).
+- **Duplicate IDs:** `io.rename_duplicate_ids` now never produces a duplicate (`["A","A.1","A"]` gave two
+  "A.1"); `_install_dataset` also gives repeated labels a unique suffix. QC staleness uses a data
+  fingerprint (index, columns, values), so a baseline replace or wavelength change also refuses a stale report.
+## 2026-10-02 - GUI dataset state, review round 2 follow-ups
+
+- **Resume gate: check every saved label is present BEFORE comparing.** Intersecting saved exclusions/subset
+  with the loaded labels made a renamed sample vanish from both sides and the gate returned "ok". Now any
+  missing saved label refuses (record kept).
+- **`calibration_rows` stores `run_state.canonical_label` keys** (type-tagged strings: `i:5`, `f:5.0`,
+  `s:5`, `t:[...]`), so float/tuple IDs are recorded and compare equal after the JSON round trip. A new
+  record without rows asks (resume anyway / fresh / cancel) instead of resuming silently.
+- **GUI records carry `label_normalization` (`run_state.LABEL_NORMALIZATION` = 1; `start_run` defaults to None, so headless and test records count as legacy).** Legacy records (None) were
+  saved before repeated IDs got collision-free suffixes (old reader: `["A","A.1","A"]` -> "A.1" twice), so
+  the same saved label can name other rows. `_labels_differ_from_legacy` is set at install when the reader's
+  `duplicate_rename_mapping` differs from the old scheme or the install had to suffix repeats; the gate
+  then refuses a legacy resume (keep/fresh). An exact migration would need the old row order, not stored.
+- QC staleness fingerprint includes the targets; the Analysis Subset dialog and `_metadata_stores` use only
+  the installed dataset's stores (the uninstalled DM merge never had `metadata_df` anyway); Comparison's
+  validation load refreshes the snapshot; repeated NaN IDs become "nan", "nan.1".
+## 2026-10-02 - GUI dataset state, review round 3: one identity check for crash-resume
+
+- **`calibration_identity` is the final authority on resume.** At launch the GUI records a blake2b digest of
+  the exact calibration rows the worker trains on (after subset, exclusions and holdout removal, in order:
+  canonical labels, wavelength labels, float64 spectra, targets) and of the holdout rows
+  (`run_state.calibration_identity`, built by `_calibration_identity_now`, which mirrors the worker's
+  filtering). The gate recomputes it after any user-approved restore and resumes only on a match; otherwise
+  one dialog: start fresh / keep (default keep). This replaces chasing label edge cases (swaps, order,
+  normalization drift, provenance). The coarse `dataset_fingerprint` (shape + 3 cells) is still checked first.
+- `calibration_rows` (versioned keys of excluded / active / holdout) only drives the restore offers;
+  the holdout keys also fix float/tuple holdout labels that `validation_indices` drops.
+- `canonical_label` supports int/float/str/bool (numpy too) and tuples of these, nothing else
+  (`UnsupportedLabelError`): no repr fallback, which could collide or change across sessions.
+- Record classes: legacy (all three new fields None) resumes with a log, unless the loaded labels look renamed
+  (`_labels_look_renamed`: `"<id>.<k>"` next to `"<id>"`), computed from the loaded labels at the gate so it
+  can't go stale after Data Management, merges, viewer edits or Revert. Anything else not exactly current
+  (unknown `label_normalization`, malformed rows/identity, unsupported labels) asks: resume anyway / fresh /
+  keep. `from_dict` no longer coerces malformed `calibration_rows` to None (that made it look legacy).
+- `rename_duplicate_ids` tests missingness per label (`pd.isna` on a MultiIndex raises).
+## 2026-10-02 - GUI dataset state, review round 4: transactional resume checks, worker-parity identity
+
+- **Resume reconciliation is transactional.** `_reconcile_resume_selection` runs rows -> holdout -> identity;
+  the gate snapshots the selection first (`_capture_calibration_selection`) and puts it back on any outcome
+  but "ok" (`_restore_calibration_selection`), so an approved exclusion/holdout restore followed by "keep"
+  at a mismatch leaves the GUI as it was at the click.
+- **`_prepare_calibration` is the one definition of the rows a run trains on** (subset -> exclusions ->
+  holdout -> mixed-type label normalisation -> rare-class drop). The worker and `_calibration_identity_now`
+  both call it, so the digest never includes rows the worker later drops. Tests capture the X/y the worker
+  actually passes to `run_unified_bayesian` and rebuild the identity independently, for both start_run sites.
+- **Identity v2** (`CALIBRATION_IDENTITY_VERSION`): every label/section length-prefixed (NUL-joined labels
+  collided), row counts hashed, integer targets as int64 (float64 merged ints above 2**53), object targets
+  that are all Python/numpy numbers hashed like the numeric column they equal. Unknown versions ask.
+- `valid_calibration_rows/identity` require every schema key and element type; "resume anyway" on an
+  unverifiable record keeps the current selection and never decodes its holdout keys.
+- Legacy record + labels that look renamed ("S1" and "S1.2") now asks resume anyway / fresh / keep: that
+  spelling also occurs naturally. `rename_duplicate_ids` uses missing-aware keys (tuple IDs with NaN parts).
+
+
 ## 2026-10-02 - Tab 7 Y-transform save contract (R048/R001/R020/R014/R010), branch fix/ytransform-save
 - **R048 was masking R001/R020.** Every TTR refit crashed on `pipe.steps` before reaching the TTR save branch, so no
   .dasp with a TTR could exist; a bare `hasattr` guard would have shipped silent corruption (lost prep_pipeline,
@@ -1199,6 +1309,17 @@ the same folds, as for PLS LV selection. Implemented on branch fix/booster-early
   bitmap, which hides the blur. Grab the full screen, which comes back in physical pixels, and crop it by
   `full.width / winfo_screenwidth()`.
 
+## 2026-10-02 - GUI dataset state, review round 5 follow-ups
+
+- Resume reconciliation restores the click-time selection in a `finally`, so an exception part-way (e.g. in
+  the identity digest) also leaves exclusions, holdout and the validation status text as they were.
+- `_prepare_calibration` aligns X and y by label (equal lengths only; unequal lengths stay a worker error)
+  before the digest; the worker's own realignment after it is now a no-op.
+- uint64 targets above the int64 range are hashed as uint64 (an int64 cast wrapped them onto negatives);
+  smaller unsigned columns still hash like signed ones.
+- `rename_duplicate_ids` and the install step decide "repeated" with missing-aware keys: pandas'
+  `duplicated()` treats NaN and pd.NA as different IDs.
+
 ## 2026-10-02 - fix/readers: OPUS block priority (R017) and one ASCII reader (R062)
 - **brukeropus gotchas.** `OPUSFile.__getattr__` returns None (not AttributeError) for any absent name, so
   `hasattr(opus_file, 'a')` is always True; trust `data_keys` (1-D blocks only; `series_keys` are 2-D). A non-OPUS file
@@ -1293,6 +1414,10 @@ Gotchas worth knowing:
   applies the target transformer BEFORE in-fold samplers, as the final TransformedTargetRegressor does.
   Still open (pre-existing, not changed): regression sample weighters (`imbalance` step with `sample_weight_`)
   weight the CV folds, but neither the grid final refit nor the validation rebuild applies them.
+- **Merge of main 1ca2de3 (#92-#95):** #94's thread budget wraps the booster folds: the grid runs `_run_single_fold`
+  on `fold_pipe` (thread-capped copy of the sanitized pipe) with `y_fit` (XGBoost codes); the final refit keeps
+  `pipe`. Bayesian round selection uses the capped `cv_model`; the plan goes sequential whenever round selection or
+  per-fold balanced weights (`_cv_balanced_param`, which replaces #94's `_cv_fit_params`) force the manual loop.
 - **Merge of main 6f63216 (PR #90 export helpers, PR #91 label policy / pooled metrics):** study names put
   `|labels=raw1` AFTER `|boost_rounds=`; the booster old-scoring notice matches the previous base both with and
   without the `|labels=` segment (a post-#91, pre-fix LightGBM/CatBoost study on raw labels would otherwise
@@ -1377,6 +1502,15 @@ Gotchas worth knowing:
   `cross_val_boosting_rounds` accepts a TTR and derives the matching target transformer. #89's leaky export
   `_fit_fold` / `_fit_with(eval_set)` path was dropped in the merge; the export reads staged predictions through the
   fold wrapper's `transformer_`.
+
+
+## 2026-10-02 - GUI dataset state, round 7 follow-ups
+
+- The combined CSV/Excel readers decide "repeated IDs" with the same missing-aware check as
+  `rename_duplicate_ids` (`io._has_repeated_ids`), not `duplicated()`.
+- Object-dtype targets with non-negative ints above int64 hash like the uint64 column they equal.
+- The worker's X/y realignment after preparation is gone (it was dead after round 6);
+  `_prepare_calibration` records `n_realigned` and the worker logs the same warning from it.
 
 ## 2026-10-02 - Classification label convention + pooled CV metrics + regression FoM (R029/R030/QW5, branch fix/classification-metrics)
 - **Label convention lives in the METRICS, not the fitted labels.** `scoring.classification_metrics` scores against the
@@ -1497,3 +1631,110 @@ Gotchas worth knowing:
   outside the 25% of samples nearest the threshold. Added OneClassSVM (scaling branch) and regression-imbalance
   notebook cases. Gotcha: under Repeated K-Fold `cv_scores` are per-sample means, `y_pred_cv` a majority vote, so
   they can disagree near 0 (now said in the template comments).
+
+## 2026-10-02 - QW1 thread budget + QW10 test split (branch perf/thread-budget)
+- **`n_jobs=1` inside the fold pool is NOT the right rule on a many-core box.** Warm loky pool, 5 folds, 24 cores:
+  XGBoost 49x2151 was 617 ms with `n_jobs=1` vs 450 ms with 4 threads/fit (24//5) and 526 ms with the old nested
+  `-1`; at 100x2151 `n_jobs=1` (2.1 s) was *slower* than the old nesting (1.4 s) because 5 single-threaded fits leave
+  19 cores idle. `parallel_policy.plan_cv` therefore splits the cores: pool = min(n_splits, physical cores), each fit
+  gets cores // pool (= 1 once folds >= cores, e.g. LOO). Never multiplied.
+- **Tiny jobs:** a warm pool already beats a serial loop at ~20k cells (5 folds x 20 x 200); break-even ~5-10k.
+  `TINY_JOB_CELLS = 10_000`, below which folds run serially with single-threaded fits. Serial fits that keep
+  `n_jobs=-1` lose to `n_jobs=1` at every size below ~50k cells (thread wake-up).
+- **Only the fold clone is capped** (`limit_estimator_threads` clones). The refit pipe/`model` keeps `n_jobs=-1`, so
+  result-row Params, Bayesian fingerprints and study hashes are unchanged (asserted in tests/test_parallel_policy.py).
+- **Bayesian:** `cross_val_predict_pooled` honours `n_jobs` only on its sklearn-delegate path; repeated CV,
+  fit_params (class_weight sample weights) and early stopping run a serial loop, so the plan collapses to serial with
+  untouched (all-core) models there. sklearn-owned pools need `joblib.parallel_config(backend=...)`
+  (`CVPlan.backend_context()`), otherwise frozen bundles would get loky. Frozen Bayesian/diagnostic curves now use a
+  threading pool instead of a serial loop (same backend grid search already used frozen).
+- **`threadpool_limits()` costs ~8 ms per call** (it rescans loaded DLLs); one-class CV calls it per config. The policy
+  caches a `ThreadpoolController` (0.006 ms per limit). OMP via env (`OMP_NUM_THREADS`) must be set before numpy loads
+  and never caps an explicit booster `n_jobs`.
+- **GUI session reset:** deepcopy of all launch attributes fails (`cannot pickle '_tkinter.tkapp'` - fonts, styles,
+  sidebar hold Tk handles), so the snapshot keeps only plain-data launch attributes; objects are judged GUI-bound by
+  their *direct* attributes only (recursing reaches the app itself via bound methods/args and marks everything GUI).
+  The reset also drops data attributes created since launch (e.g. `X_before_contam_correction`), cancels pending
+  `after` callbacks (a fresh app has none), removes test-added traces and Toplevels, and re-applies Tk values until
+  traces stop rewriting them.
+- **Order-dependent GUI tests found by the reset** (each failed when run alone on main f6a2287): 
+  `test_multiclass_gui::test_run_analysis_accepts_multiclass_engine_selection` (its fake Thread lacked `kwargs=`), and
+  `test_resume_round9::test_e2e_one_failing_model_keeps_run_resumable` + `test_resume_round11::
+  test_settings_changed_mid_run_do_not_reach_later_models` (`_select_models` unticked only PLS/Ridge; the launch tier
+  also ticks ElasticNet). Fixed in the tests. Default GUI selection now passes forward and reversed.
+- **Suite timings (24-thread box at 100% from ~10 concurrent agents; ratios only):** non-GUI on main f6a2287 (no
+  addopts, all 3522) 21.0 min; branch with `-o addopts=""` (3592 incl. 70 new) 17.7 min; branch default selection
+  16.7 min. GUI default selection (253) ~80 s on both main and branch. So most of QW10's time saving must come from
+  the 34 comprehensive GUI tests (not timed here; `test_xgboost_via_gui` alone ~60 min on CI). The biggest remaining
+  default-run costs are not marked slow: `test_wavelength_filtering_integration.py::TestScenario8Consistency` (2
+  tests, 130 s) and five 24 s `test_t41_auto_rerun_preserves_study.py` tests.
+- **Visible "ASP ... (Not Responding)" windows during GUI tests:** withdrawing the root before
+  `SpectralPredictApp(root)` is undone by the app's own `root.state('zoomed')` in `__init__`; dialogs also call
+  `deiconify()` and every new Toplevel maps on creation. `tests/gui/conftest.py` now has a session autouse fixture
+  (off with `--visible`) that makes `Wm.state('normal'/'zoomed'/'iconic')` and `deiconify` no-ops, withdraws each new
+  Toplevel, tolerates `grab_set` on a withdrawn dialog, and re-withdraws after app startup and each reset. Verified by
+  polling MainWindowTitle of the pytest process: main showed the window, the branch showed none over the full default
+  GUI run (253 passed).
+- **Review round 1 fixes (Codex + GLM, both MERGE-WITH-FIXES):** (1) Black running on 3.14 rewrote
+  `except (A, B, C):` into the 3.14-only `except A, B, C:` - breaks the 3.12 rollback build. Run Black with
+  `--target-version py312` on touched files. (2) OpenMP/BLAS caps are process-wide (vcomp: a cap set in one thread is
+  seen by already-running threads), so overlapping `threadpoolctl` limit contexts from two threads left OpenMP stuck at
+  1; `native_thread_limit` is now lock + refcount, originals restored at depth 0. (3) Threading-backend pools (frozen)
+  share one BLAS pool: `CVPlan.backend_context()` caps BLAS at the per-fit budget (loky workers already get
+  cores//workers via joblib's worker env). (4) CatBoost's predict and post-fit feature importance ignore the
+  constructor `thread_count` (default -1 = all cores): CatBoost folds run serially in threading pools. (5)
+  `root.after_cancel(id)` on a callback scheduled by a child widget deletes the child's Tcl command; the child's
+  destroy then raises "can't delete Tcl command" (reproduced). Cancel the raw timer with
+  `root.tk.call('after','cancel',id)`. (6) Caller-sized pools (`n_jobs=-1` = logical CPUs) are capped at physical
+  cores (`pool_workers`). Nightly Linux leg added for the 52 non-GUI slow tests.
+- **Review round 2 (GLM + DeepSeek):** threadpoolctl's `restore_original_limits()` restores EVERY library the
+  controller holds, not just the user_api it limited - a BLAS context's exit un-capped a live OpenMP context and a BLAS
+  cap leaked past all exits (reproduced by both reviewers). `native_thread_limit` now limits/restores through
+  `controller.select(user_api=...)` and keeps a multiset of open limits per API, re-applying the strictest open one on
+  every exit (so a stricter inner context no longer pins the outer at its value). GA candidate pools and the SPA seed
+  loop now go through the policy (`task_pool_plan`; SPA = physical cores, max 8, BLAS capped; SPA output verified
+  bit-identical on example data). Notes: `plan_cv(requested_n_jobs=0)` now raises; a single non-tiny split keeps the
+  estimator's own n_jobs, so LightGBM/XGBoost may differ in the last bits from a 1-thread fit; the GUI fixture's raw
+  `after cancel` leaves one Tcl command per cancelled callback registered until its widget dies.
+- **Review round 3 (DeepSeek):** (1) a policy test that pins `physical_cores` must also pin
+  `joblib.effective_n_jobs` - `pool_workers` reads the real logical count (4 on CI runners). (2) VotingRegressor /
+  StackingRegressor keep their models in list-valued `estimators` params, which a "values with get_params" walk skips,
+  so a wrapped CatBoost kept `thread_count=None`. `_set_threads` and `contains_catboost` now share one walker
+  (`_sub_estimators` / `_walk_estimators`) that also reads `(name, estimator)` lists, tuples and dicts, with an
+  id-visited set instead of a depth cap. (3) `native_thread_limit` rolls back its bookkeeping if applying the cap
+  fails on enter, and rejects non-int / < 1 thread counts with ValueError.
+
+## 2026-10-02 - QW4 holdout direction (`fix/holdout-direction`)
+
+- **Root cause.** The GUI's `_validation_kennard_stone` / `_validation_spxy` returned the samples KS/SPXY
+  pick first as the *holdout*. KS/SPXY pick the representative boundary samples, so the extremes went to
+  validation and the model had to extrapolate. Now `sample_selection.split_calibration_holdout(X, n_holdout,
+  method, y)` picks the `N - n_holdout` **calibration** samples and the rest validate; the GUI and the test
+  harness (`tests/gui/harness.py::apply_spxy_holdout`, same bug) route through it.
+- **SPXY** (Galvão 2005) now divides the X- and y-distance *matrices* by their maxima and adds them
+  (`spxy_distance_matrix`). Both the GUI and backend versions used to min-max scale every spectral column,
+  which gives a near-constant noise column the weight of a real band. **DUPLEX** (Snee 1977) now runs two
+  interleaved max-min selections (cal seed = farthest pair, val seed = farthest remaining pair, then each set
+  adds the sample farthest from its *own* members); the old version alternated one KS order, which sent an
+  extreme to validation. DUPLEX is a new GUI option.
+- **Kennard-Stone order is unchanged** (checked against the old implementation on 200 random cases, ties
+  included), so calibration-transfer standards (`calibration_transfer`, GUI CT tab) and `model_io`
+  representative sets are identical. CT semantics untouched: there the KS pick *is* the wanted set.
+- **Saved holdouts are stable by construction.** Every persisted path stores holdout IDs, never the algorithm
+  output: run_state `validation_indices` / `calibration_rows` (resume restores those labels in
+  `_reconcile_resume_validation_split`), the refined-model config, the data-viewer revert state. Nothing
+  re-runs a selector on load. The `run_gui_settings` comment that said the algorithm name was enough to
+  rebuild a deterministic split was wrong and is rewritten. Test: `tests/gui/test_holdout_direction_gui.py`
+  restores a pre-QW4 holdout exactly with every selector patched to raise.
+- **Example numbers** (bundled bone collagen, N=49, PLS, LV by 5-fold CV on the calibration set, raw spectra;
+  scratch script, not pinned): 9 held out (the GUI's 20%): KS old 3.57 (4 holdout samples outside the cal y
+  range) vs new 1.30 (0); SPXY old 4.63 (2) vs new 1.62 (0); DUPLEX 2.06 (1); random splits mean 2.97 (sd
+  1.05, 200 splits). 10 held out: KS 3.35 vs 1.29, SPXY 4.38 vs 1.56, DUPLEX 1.88, random 3.02. SNV gives
+  the same picture (KS 4.69 vs 1.22, SPXY 5.26 vs 2.41). Note the corrected KS/SPXY RMSEP is *below* the
+  random-split mean: an interior holdout is the easy case, which the UserGuide now says.
+- **Not done (optional per the cross-check):** distances on preprocessed spectra / PCA scores (still raw X as
+  loaded), stratified KS, and group-aware selection (F1).
+- **GLM 5.3 review LOWs (fixed).** A one-sample DUPLEX set has no seed pair: a one-sample holdout now takes the
+  sample farthest from the calibration seed (was: the lower end of the farthest remaining pair). KS tie rule
+  (lowest row index) is pinned by a duplicated-rows test and a randomized check against a slow literal max-min
+  reference in `tests/test_holdout_direction.py`.

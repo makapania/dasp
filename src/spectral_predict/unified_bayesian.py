@@ -1819,17 +1819,6 @@ def create_unified_objective(
             # selection): eval-only settings are removed for CV and final fit.
             strip_eval_only_params(model)
 
-            # Enable CV parallelism (safe - Bayesian trials are sequential)
-            from spectral_predict.search import _frozen_needs_threading_fallback
-
-            # Models that are slower with parallel CV (threading conflicts or low overhead)
-            # SVM: threading conflicts; PLS/PLS-DA: so fast that joblib overhead dominates
-            # Ridge/Lasso/ElasticNet: linear solve is ~5ms, joblib spawn overhead is ~1s on Windows
-            models_prefer_serial_cv = {'SVM', 'PLS', 'PLS-DA', 'Ridge', 'Lasso', 'ElasticNet'}
-            use_serial = _frozen_needs_threading_fallback() or model_name in models_prefer_serial_cv
-
-            n_jobs_cv = 1 if use_serial else -1
-
             # 7. Compute metrics
             # Per-fold balanced sample_weight for sample_weight-only classifiers
             # (XGBoost-style). The CV helpers slice it per train_idx and recompute
@@ -1845,6 +1834,29 @@ def create_unified_objective(
             _cv_balanced_param = (
                 'model__sample_weight' if use_sample_weight_for_classification else None
             )
+
+            # Thread budget (parallel_policy). Trials are sequential, so the folds may
+            # use a pool. sklearn owns that pool inside cross_val_predict, which honours
+            # n_jobs only on its delegate path (no repeated CV, no fit_params); the
+            # manual loop and the early-stopping helper are serial, so there each fit
+            # keeps all cores. Only the fold copy (`cv_model`) is capped: `model` keeps
+            # its own n_jobs for the refit and every params capture, so fingerprints
+            # and study hashes are unchanged.
+            from spectral_predict import parallel_policy
+            from spectral_predict.cv_utils import _is_repeated_cv
+
+            _cv_plan = parallel_policy.plan_cv(
+                cv.get_n_splits(X_final, y),
+                X_final.shape[0],
+                X_final.shape[1],
+                model_name=model_name,
+            )
+            if _cv_plan.parallel and (
+                use_early_stopping or _is_repeated_cv(cv) or _cv_balanced_param
+            ):
+                _cv_plan = parallel_policy.CVPlan(n_jobs=1, backend="sequential", model_threads=None)
+            n_jobs_cv = _cv_plan.n_jobs
+            cv_model = parallel_policy.limit_estimator_threads(model, _cv_plan.model_threads)
 
             fingerprint = _build_fit_fingerprint(
                 preprocess_config=preprocess_config,
@@ -1897,17 +1909,18 @@ def create_unified_objective(
                 # and the method used in search.py for consistency with Model Development.
                 if _select_rounds:
                     _rounds = cross_val_boosting_rounds(
-                        model, X_final, y, cv,
+                        cv_model, X_final, y, cv,
                         patience=early_stopping_rounds,
                         balanced_sample_weight=use_sample_weight_for_classification,
                     )
                     n_rounds_selected = _rounds.n_rounds
                     y_pred_cv = pool_boosting_predictions(_rounds, len(y))
                 else:
-                    y_pred_cv = cross_val_predict_pooled(
-                        model, X_final, y, cv=cv, n_jobs=n_jobs_cv,
-                        balanced_weight_param=_cv_balanced_param,
-                    )
+                    with _cv_plan.backend_context():
+                        y_pred_cv = cross_val_predict_pooled(
+                            cv_model, X_final, y, cv=cv, n_jobs=n_jobs_cv,
+                            balanced_weight_param=_cv_balanced_param,
+                        )
                 rmse = float(np.sqrt(mean_squared_error(y, y_pred_cv)))
                 r2 = r2_score(y, y_pred_cv)
 
@@ -1971,7 +1984,7 @@ def create_unified_objective(
                     # One CV pass gives labels AND probabilities at the same
                     # selected round count.
                     _rounds = cross_val_boosting_rounds(
-                        model, X_final, y, cv,
+                        cv_model, X_final, y, cv,
                         patience=early_stopping_rounds,
                         balanced_sample_weight=use_sample_weight_for_classification,
                     )
@@ -1981,10 +1994,11 @@ def create_unified_objective(
                     )
                     _boost_proba = pool_boosting_predictions(_rounds, len(y), 'predict_proba')
                 else:
-                    y_pred_cv = cross_val_predict_pooled(
-                        model, X_final, y, cv=cv, n_jobs=n_jobs_cv,
-                        balanced_weight_param=_cv_balanced_param,
-                    )
+                    with _cv_plan.backend_context():
+                        y_pred_cv = cross_val_predict_pooled(
+                            cv_model, X_final, y, cv=cv, n_jobs=n_jobs_cv,
+                            balanced_weight_param=_cv_balanced_param,
+                        )
                 accuracy = float(accuracy_score(y, y_pred_cv))
 
                 # Compute ROC_AUC using cross_val_predict for probability estimates
@@ -1992,10 +2006,11 @@ def create_unified_objective(
                     if _select_rounds:
                         y_proba = _boost_proba
                     else:
-                        y_proba = cross_val_predict_pooled(
-                            model, X_final, y, cv=cv, method='predict_proba', n_jobs=n_jobs_cv,
-                            balanced_weight_param=_cv_balanced_param,
-                        )
+                        with _cv_plan.backend_context():
+                            y_proba = cross_val_predict_pooled(
+                                cv_model, X_final, y, cv=cv, method='predict_proba',
+                                n_jobs=n_jobs_cv, balanced_weight_param=_cv_balanced_param,
+                            )
                 except Exception as e:
                     logger.debug(f"Bayesian CV predict_proba unavailable: {e}")
                     y_proba = None

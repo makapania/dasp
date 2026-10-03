@@ -493,6 +493,33 @@ def test_contamination_other_type_refuses_conversion(tmp_path, monkeypatch, dial
     assert any(c[1] == "No Conversion" for c in dialogs)
 
 
+def _with_dataset_state(app, X=None, y=None, holdout=()):
+    """The loaded-dataset state the validation and dataset-install paths read.
+
+    The Comparison tab rebuilds the validation set from the loaded data, and
+    calibration-transfer replace installs through ``_install_dataset``, which
+    clears the previous dataset's exclusions and validation split.
+    """
+    app.X = X
+    app.X_original = X
+    app.y = y
+    app.ref = None
+    app.combined_metadata_df = None
+    app.excluded_spectra = set()
+    app.validation_indices = set(holdout)
+    app.validation_X = app.validation_y = None
+    app.validation_enabled = _Var(bool(holdout))
+    app.wavelength_min = _Var("")
+    app.wavelength_max = _Var("")
+    app._pending_validation_indices = None
+    app.active_indices = None
+    app.outlier_report = None
+    app.data_sources = []
+    app.source_group_names = [""]
+    app.use_custom_group_names = False
+    return app
+
+
 def _comparison_app(source, path=""):
     app = _bare_app()
     app.colors = {"success": "green", "warning": "orange", "text_light": "gray", "accent": "blue"}
@@ -523,8 +550,8 @@ def _comparison_app(source, path=""):
 def test_comparison_validation_set_keeps_main_tab_type(dialogs):
     """A validation matrix of -log10(R) values must stay absorbance in the comparison tab."""
     app = _comparison_app("validation")
-    app.validation_X = pd.DataFrame([LOGR], columns=np.linspace(3410.0, 4000.0, 60))
-    app.validation_y = pd.Series([1.0])
+    X = pd.DataFrame([LOGR], index=["v0"], columns=np.linspace(3410.0, 4000.0, 60))
+    _with_dataset_state(app, X, pd.Series([1.0], index=X.index), holdout=["v0"])
     app.current_data_type.set("absorbance")
     app.type_confidence = 95.0
     app.source_data_type = "log_reflectance"
@@ -858,8 +885,8 @@ def test_comparison_keeps_carried_percent_scale_for_absorbance(dialogs):
     """50 % reflectance converted to absorbance on the main tab converts back to 50."""
     app = _comparison_app("validation")
     A = np.full((1, 5), np.log10(1 / 0.5))
-    app.validation_X = pd.DataFrame(A, columns=[1000.0, 1001.0, 1002.0, 1003.0, 1004.0])
-    app.validation_y = pd.Series([1.0])
+    X = pd.DataFrame(A, index=["v0"], columns=[1000.0, 1001.0, 1002.0, 1003.0, 1004.0])
+    _with_dataset_state(app, X, pd.Series([1.0], index=X.index), holdout=["v0"])
     app.current_data_type.set("absorbance")
     app.original_data_type.set("reflectance")
     app.data_has_been_converted = True
@@ -885,7 +912,7 @@ def test_ct_handoff_keeps_type_and_percent_scale(monkeypatch, dialogs):
         "specimen_ids": ["a", "b"],
         "metadata_df": None,
     }
-    app.validation_indices = None
+    _with_dataset_state(app)
     app.tab1_status = _AnyWidget()
     app.notebook = types.SimpleNamespace(select=lambda i: None)
     for name in (

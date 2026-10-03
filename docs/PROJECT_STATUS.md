@@ -4,7 +4,7 @@
 
 ## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-27)
 
-### 0. IN PROGRESS (2026-10-02): Wave 1 + Wave 2 fixes, 9 of 11 branches merged — HAND-OFF
+### 0. IN PROGRESS (2026-10-02): Wave 1 + Wave 2 fixes, 10 of 11 branches merged + QW4 merged — HAND-OFF
 Every Wave 1/2 item was cross-checked by Codex gpt-6-astra and GLM 5.3 before fixing. User decisions: booster tree
 count = one value from the pooled CV curve; chemometrics validation conventions (CLAUDE.md).
 **Merged:** #83 fix/ct-honest-labels; #84 fix/ensemble-cv (wrappers now in `model_wrappers.py`); #85 feat/dpi-fonts; #86 fix/contaminant-maths (QW3, QW6; auto EPO count
@@ -15,26 +15,23 @@ carried through every tab; comma files dot-decimal + warning).
 encoders decode only when owned); #89 fix/ytransform-save (Tab 7 saves/exports the trained model: Y-transform,
 bias correction bound by token, frozen refit inputs, atomic RefinedState); #90 fix/preexisting-test-export (multiclass GUI test fake Thread;
 code export without CV / imbalance / plot fixes; PLS + regression imbalance sample_weight still open); #91 fix/classification-metrics (one label rule
-`scoring.classification_fit_labels` in every engine; pooled CV metrics; regression FoM).
+`scoring.classification_fit_labels` in every engine; pooled CV metrics; regression FoM); #92 fix/gui-dataset-state (calibration-identity crash-resume
+gate, transactional reconcile, missing-aware duplicate IDs). #93 test isolation (#89/#90 GUI tests); #94 perf/thread-budget (QW1 one
+thread-budget rule in `parallel_policy`; frozen builds fall back to the threading backend with BLAS/OpenMP caps and
+CatBoost serial; QW10 slow/comprehensive tests deselected by default, run nightly incl. Linux job).
+**#95 QW4 (holdout direction):** KS/SPXY/DUPLEX pick the CALIBRATION set (`sample_selection.split_calibration_holdout`);
+SPXY per Galvão (normalised distance matrices); DUPLEX per Snee; saved holdouts unchanged. Example RMSEP KS 3.57→1.30.
 **Reviewers:** Codex is reset but reserved for MAJOR checks only (user, 2026-10-03); routine confirms use GLM 5.3 + DeepSeek (deepseek-flash; Pro only if the
 user says "pro") stand in. opencode prompts must forbid shell redirection, writes, and reads outside the repo, and
 demand a verdict even if a tool call is rejected. Merge rule: well-reviewed PR → merge origin/main into branch, test,
 `gh pr create`, `gh pr merge N --merge --match-head-commit <full sha>`.
 **Open branches** (pushed to origin as backup; worktrees under `.claude/worktrees/agent-*`), state at hand-off:
-- `fix/booster-early-stopping` — final-review fixes (grid final-fit class weights, grid XGBoost integer
-  labels, TTR train scores, transform-before-resample) committed; main merged in. Ready to merge.
-- `fix/gui-dataset-state` 77063e1 — round in progress (Codex BLOCK: transactional reconcile, shared calibration-prep
-  function for digest+worker, lossless int targets, object-y canonicalisation, framed digest + counts, strict
-  record schema, dotted IDs → "can't verify", MultiIndex NaN dedupe). QW4 (holdout direction) waits for this.
-- `perf/thread-budget` c53c6f2 — GLM r2 MWF (GA candidate pool lacks CatBoost-serial rule; `native_thread_limit`
-  cross-API restore via `restore_original_limits()` clobbers other APIs; stricter nested exit never re-loosens);
-  DeepSeek r2 pending; then fix round + merge main.
-Known on main: `tests/gui/test_tab7_correction_binding.py::test_double_click_during_refit_keeps_selection_and_run_uses_a`
-(from #89) fails after test_multiclass_gui (Results tree rows left over) and hangs alone (real validation curve);
-fix in progress on `fix/tab7-test-isolation`.
+- `fix/booster-early-stopping` — final review (Codex BLOCK / DeepSeek MWF on 5ec39e5) fixed in 60ed8c9 (grid
+  final-fit class weights, grid XGBoost integer labels, TTR train scores, transform-before-resample); main
+  1ca2de3 (#92-#95) merged. Ready to merge.
 **Open questions for the user:** Import rounds wavelengths to integers and refuses sub-unit spacing (FTIR?); comma
 ASCII files default to dot-decimal with a warning (my call); advisory EPO count (my call); delete stray GLM temp files
-in %TEMP% (diff.txt, gui_f359708.py, opencodeepo_*).
+in %TEMP% (diff.txt, gui_f359708.py, opencode\repo_*).
 
 **Booster round selection (branch `fix/booster-early-stopping`, Wave 1 item 1, R028/R003/R022/R126).** XGBoost,
 LightGBM and CatBoost no longer early-stop each CV fold on its own test fold. The round count is chosen once from the

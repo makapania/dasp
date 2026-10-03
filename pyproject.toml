@@ -94,3 +94,8 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_functions = "test_*"
 pythonpath = ["src"]
+# The default run skips the long tests; the nightly CI job ("Nightly long tests" in
+# .github/workflows/ci.yml) runs them. Locally: `pytest -m "comprehensive or slow"`
+# for just those, or `pytest -o addopts=""` for everything. A later -m on the
+# command line replaces this one.
+addopts = ["-m", "not comprehensive and not slow"]

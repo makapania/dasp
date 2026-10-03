@@ -80,6 +80,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CPU oversubscription in cross-validation (QW1).** Boosters and random forests were
+  built with `n_jobs=-1` inside a fold pool that was itself `n_jobs=-1`, so every fold
+  fought every other for the same cores. The new `spectral_predict.parallel_policy`
+  module owns one rule: a fold pool of `min(n_splits, physical cores)` workers, each fit
+  getting cores // workers threads (`n_jobs`, CatBoost `thread_count`); tiny jobs and
+  PLS/linear/SVM run serially; one-class CV and the SIMCA cross-fitted null run with
+  OpenMP capped at one thread; frozen bundles keep the threading backend with the
+  shared BLAS pool capped. Applied to grid search, Bayesian CV, iPLS, the diagnostics
+  learning/validation curves, GA-preprocessing candidate pools and the SPA seed loop.
+  Only the fold copy of a model is capped, so result-row Params, fingerprints and
+  study names are unchanged, and metrics are identical (RandomForest to ~1e-16).
+  Measured on the example data under heavy machine load: LightGBM configs ~1.7x, LOF
+  grids ~2.8x, iPLS ~1.9x faster; XGBoost and RandomForest about unchanged.
+- **Test loop (QW10).** `pytest` now deselects `comprehensive` and `slow` tests by
+  default (`-o addopts=""` runs everything); nightly CI jobs run them on Windows and,
+  for the non-GUI ones, on Linux. The shared GUI test app is restored to its launch
+  state before every test and stays hidden while tests run.
+- **Loading data no longer carries the previous dataset's exclusions, validation set or
+  Quality Check report into the new one** (review R004-R007, R037, R038). Every loader
+  (Import, Data Management, calibration transfer) installs data the same way. Loading
+  a file in replace mode, **including reloading the same file, clears the excluded
+  spectra and the validation set**; append keeps them. A load that fails puts the
+  previous dataset back whole, with its units and data type. Validation metrics are
+  computed on the run's own current spectra and wavelengths, without samples excluded
+  after the split. Clicking a spectrum and Quality Check "Mark for exclusion" now
+  exclude the right sample for numeric-looking and repeated IDs. A crash-resume now
+  continues only on exactly the interrupted run's calibration samples (same IDs, order,
+  spectra, targets and selection); otherwise it offers to start fresh or keep the run.
+
+
 - **Model Development Y-transform now refits, saves and predicts correctly** (review
   R048, R001, R020, R014/R019). Selecting any Y-transform for a model without booster
   early stopping crashed the refit, and 'Box-Cox' was rejected outright. The save path

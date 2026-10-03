@@ -71,6 +71,7 @@ import threading
 from datetime import datetime
 import numpy as np
 import pandas as pd
+from dataclasses import dataclass
 
 # Child of "spectral_predict" so setup_app_logger's dasp.log handler receives GUI
 # warnings (__name__ is "__main__" when the GUI is run as a script).
@@ -2682,6 +2683,170 @@ def _round_truncation_metadata(refined_config, selected_model_config) -> dict:
         return {k: refined_config.get(k) for k in keys}
     source = selected_model_config or {}
     return {k: source.get(k) for k in keys}
+
+
+def _validation_snapshot(X, y, validation_rows, excluded_rows=()):
+    """Validation spectra and targets taken from the CURRENT data (R005).
+
+    A holdout is a set of sample labels fixed when the split was made. Its spectra
+    are not frozen: they are read here from ``X`` (its current rows and
+    wavelengths), minus any sample excluded since the split, so calibration and
+    validation always come from one dataset snapshot.
+
+    Args:
+        X: Current spectra (rows = sample labels, columns = wavelengths), or None.
+        y: Targets aligned with ``X`` by label, or None (spectra-only data).
+        validation_rows: Labels of the holdout samples.
+        excluded_rows: Labels the user has excluded from the analysis.
+
+    Returns:
+        ``(X_val, y_val)``, or ``(None, None)`` when no holdout sample is left.
+        ``y_val`` is None when ``y`` is None.
+    """
+    if X is None or not validation_rows:
+        return None, None
+    mask = X.index.isin(list(validation_rows))
+    if excluded_rows:
+        mask &= ~X.index.isin(list(excluded_rows))
+    if not mask.any():
+        return None, None
+    X_val = X[mask]
+    if y is None:
+        y_val = None
+    elif y.index.equals(X.index):
+        y_val = y[mask]
+    else:
+        y_val = y.reindex(X_val.index)
+    return X_val, y_val
+
+
+@dataclass
+class _PreparedCalibration:
+    """The rows a run trains and scores on, and what was removed on the way."""
+
+    X: "pd.DataFrame"
+    y: "pd.Series | None"
+    X_val: "pd.DataFrame | None"
+    y_val: "pd.Series | None"
+    n_inactive: int = 0
+    mixed_types: dict | None = None
+    collapsed_labels: list | None = None
+    rare_dropped: list | None = None
+    n_before_rare: int = 0
+    n_realigned: int | None = None  # rows kept when X and y labels had to be aligned
+
+
+def _prepare_calibration(
+    X,
+    y,
+    *,
+    active,
+    excluded,
+    holdout,
+    validation_on: bool,
+    task_type: str,
+    cv_strategy: str,
+    folds: int,
+) -> _PreparedCalibration:
+    """The calibration and holdout rows of one analysis launch.
+
+    The single definition shared by the analysis worker and the crash-resume
+    identity (``_calibration_identity_now``), so the digest covers exactly what
+    the worker trains on. In order: Analysis Subset, exclusions, holdout removal
+    (the holdout is read from ``X`` minus exclusions), mixed-type classification
+    labels normalised to strings, and classes rarer than the CV folds dropped.
+    """
+    if active is not None:
+        mask = X.index.isin(active)
+        X_cal, y_cal = X[mask], (None if y is None else y[mask])
+        n_inactive = len(X) - len(X_cal)
+    else:
+        X_cal, y_cal, n_inactive = X, y, 0
+    if excluded:
+        mask = ~X_cal.index.isin(excluded)
+        X_cal = X_cal[mask]
+        y_cal = None if y_cal is None else y_cal[mask]
+    if validation_on:
+        X_val, y_val = _validation_snapshot(X, y, holdout, excluded)
+    else:
+        X_val, y_val = None, None
+    if validation_on and holdout:
+        X_cal = X_cal[~X_cal.index.isin(holdout)]
+        y_cal = None if y_cal is None else y_cal[~y_cal.index.isin(holdout)]
+    prepared = _PreparedCalibration(X_cal, y_cal, X_val, y_val, n_inactive=n_inactive)
+
+    if (
+        task_type in ("classification", "one_class")
+        and y_cal is not None
+        and getattr(y_cal, "dtype", None) == object
+    ):
+        types_present = {type(v).__name__ for v in y_cal.dropna().values}
+        if len(types_present) > 1:
+            from collections import Counter
+
+            prepared.mixed_types = dict(Counter(type(v).__name__ for v in y_cal.dropna()))
+            before = set(y_cal.dropna().astype(str).unique())
+            y_cal = _normalize_mixed_type_labels(y_cal)
+            after = set(y_cal.dropna().unique())
+            prepared.collapsed_labels = sorted(before - after) if after != before else []
+            prepared.y = y_cal
+
+    if (
+        task_type == "classification"
+        and y_cal is not None
+        and cv_strategy in ("kfold", "repeated_kfold")
+    ):
+        classes, counts = np.unique(np.asarray(y_cal), return_counts=True)
+        rare = counts < folds
+        if rare.any() and len(classes) - int(rare.sum()) >= 2:
+            prepared.rare_dropped = [(str(classes[i]), int(counts[i])) for i in np.where(rare)[0]]
+            keep = ~y_cal.isin([classes[i] for i in np.where(rare)[0]])
+            prepared.n_before_rare = len(y_cal)
+            prepared.X = prepared.X[keep]
+            prepared.y = y_cal[keep]
+
+    # Same rows in X and y, by label. Unequal lengths are left for the worker to
+    # report as a data-alignment error; equal lengths with different labels keep
+    # the common samples (the worker used to do this after preparation, which
+    # trained on fewer rows than the resume identity covered).
+    if (
+        prepared.y is not None
+        and len(prepared.X) == len(prepared.y)
+        and not prepared.X.index.equals(prepared.y.index)
+    ):
+        common = prepared.X.index.intersection(prepared.y.index)
+        prepared.X = prepared.X.loc[common]
+        prepared.y = prepared.y.loc[common]
+        prepared.n_realigned = len(common)
+    return prepared
+
+
+class _MissingSample:
+    """Placeholder for a saved sample key with no sample in the loaded data."""
+
+    __slots__ = ("key",)
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+
+    def __repr__(self) -> str:
+        return f"<missing sample {self.key}>"
+
+
+def _check_validation_axis(train_columns, val_columns) -> None:
+    """Raise ValueError unless calibration and validation share one wavelength axis.
+
+    Comparing widths is not enough: two 100-column axes over different ranges
+    would pass, and selected-variable models would then score the wrong
+    wavelengths without any error (R005).
+    """
+    train = pd.Index(train_columns)
+    val = pd.Index(val_columns)
+    if not train.equals(val):
+        raise ValueError(
+            "Validation spectra are not on the calibration wavelength axis "
+            f"({len(val)} vs {len(train)} wavelengths). Recreate the validation set."
+        )
 
 
 _UNSET = object()  # field not set yet (reads raise AttributeError, as before)
@@ -8037,6 +8202,8 @@ class SpectralPredictApp:
             corrected = self._compute_corrected_spectra(method)
             self.X = pd.DataFrame(corrected, index=self.X.index, columns=self.X.columns)
             self.X_original = self.X.copy()
+            # R005: validation spectra get the same correction as calibration.
+            self._refresh_validation_snapshot()
             self._generate_explore_plots()
             messagebox.showinfo("Done", "Working data replaced with corrected spectra.")
             print(f"> Replaced working data with {desc}")
@@ -9021,6 +9188,8 @@ class SpectralPredictApp:
             corrected = self._mbl_apply_to_all()
             self.X = pd.DataFrame(corrected, index=self.X.index, columns=self.X.columns)
             self.X_original = self.X.copy()
+            # R005: validation spectra get the same correction as calibration.
+            self._refresh_validation_snapshot()
             self._generate_explore_plots()
             messagebox.showinfo("Done", "Working data replaced with corrected spectra.")
             print("> Replaced working data with manual baseline correction")
@@ -9092,7 +9261,7 @@ class SpectralPredictApp:
                           color=line_color, linewidth=current_linewidth,
                           linestyle=current_linestyle)
             # Store DataFrame index label as GID (not positional index)
-            line.set_gid(str(self.X.index[i]))
+            self._tag_sample_artist(line, self.X.index[i], i)
             line.set_picker(5)
 
         ax.set_xlabel(self._get_spectral_xlabel(), fontsize=12)
@@ -9205,17 +9374,11 @@ class SpectralPredictApp:
                 and not self._set_assign_mode.get()):
             return
 
-        gid = event.artist.get_gid()
-        try:
-            sample_idx = int(gid) if gid.lstrip('-').isdigit() else gid
-        except (ValueError, AttributeError):
-            sample_idx = gid
-
-        # Get positional index for _format_specimen_info
-        try:
-            pos_idx = self.X.index.get_loc(sample_idx)
-        except KeyError:
+        # R006: the sample's real label, never a number parsed from the gid.
+        sample = self._sample_from_artist(event.artist)
+        if sample is None:
             return
+        sample_idx, pos_idx = sample
 
         # Sample Sets: assign mode intercept (left-click only)
         if (event.mouseevent.button != 3
@@ -9238,15 +9401,12 @@ class SpectralPredictApp:
             return
 
         # Get Y value if available
-        y_value = None
-        if self.y is not None:
-            try:
-                y_value = self.y.iloc[pos_idx]
-            except (IndexError, KeyError):
-                pass
+        y_value = self._y_value_for_sample(sample_idx, pos_idx)
 
         # Build annotation text
-        info_text = self._format_specimen_info(pos_idx, y_value=y_value)
+        info_text = self._format_specimen_info(
+            pos_idx, y_value=y_value, specimen_label=sample_idx
+        )
 
         # Find midpoint of the clicked line for annotation placement
         line = event.artist
@@ -14777,31 +14937,38 @@ class SpectralPredictApp:
         algo_frame = ttk.Frame(validation_frame)
         algo_frame.grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=5)
 
+        # QW4: Kennard-Stone and SPXY choose the calibration set (extremes
+        # included); the holdout is the remaining samples.
         ttk.Radiobutton(algo_frame, text="Kennard-Stone",
                        variable=self.validation_algorithm, value="Kennard-Stone").grid(row=0, column=0, sticky=tk.W, padx=(0, 15))
-        ttk.Label(algo_frame, text="Maximizes spectral diversity only (ignores y distribution)",
+        ttk.Label(algo_frame, text="Calibration covers the spectral range; holdout = the remaining samples",
                  style='Caption.TLabel').grid(row=0, column=1, sticky=tk.W)
 
         self.validation_spxy_radio = ttk.Radiobutton(algo_frame, text="SPXY ⭐",
                        variable=self.validation_algorithm, value="SPXY")
         self.validation_spxy_radio.grid(row=1, column=0, sticky=tk.W, padx=(0, 15), pady=3)
-        ttk.Label(algo_frame, text="Balances spectral and target diversity (recommended)",
+        ttk.Label(algo_frame, text="Calibration covers spectral and target range; holdout = the rest (recommended)",
                  style='Caption.TLabel').grid(row=1, column=1, sticky=tk.W, pady=3)
 
-        ttk.Radiobutton(algo_frame, text="Random",
-                       variable=self.validation_algorithm, value="Random").grid(row=2, column=0, sticky=tk.W, padx=(0, 15), pady=3)
-        ttk.Label(algo_frame, text="Simple random selection",
+        ttk.Radiobutton(algo_frame, text="DUPLEX",
+                       variable=self.validation_algorithm, value="DUPLEX").grid(row=2, column=0, sticky=tk.W, padx=(0, 15), pady=3)
+        ttk.Label(algo_frame, text="Calibration and holdout chosen alternately, so both span the spectral range",
                  style='Caption.TLabel').grid(row=2, column=1, sticky=tk.W, pady=3)
 
-        ttk.Radiobutton(algo_frame, text="Stratified",
-                       variable=self.validation_algorithm, value="Stratified").grid(row=3, column=0, sticky=tk.W, padx=(0, 15), pady=3)
-        ttk.Label(algo_frame, text="Ensures balanced target variable distribution",
+        ttk.Radiobutton(algo_frame, text="Random",
+                       variable=self.validation_algorithm, value="Random").grid(row=3, column=0, sticky=tk.W, padx=(0, 15), pady=3)
+        ttk.Label(algo_frame, text="Simple random selection",
                  style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, pady=3)
 
-        ttk.Radiobutton(algo_frame, text="Manual",
-                       variable=self.validation_algorithm, value="Manual").grid(row=4, column=0, sticky=tk.W, padx=(0, 15), pady=3)
-        ttk.Label(algo_frame, text="Select samples manually from Data Viewer tab",
+        ttk.Radiobutton(algo_frame, text="Stratified",
+                       variable=self.validation_algorithm, value="Stratified").grid(row=4, column=0, sticky=tk.W, padx=(0, 15), pady=3)
+        ttk.Label(algo_frame, text="Ensures balanced target variable distribution",
                  style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, pady=3)
+
+        ttk.Radiobutton(algo_frame, text="Manual",
+                       variable=self.validation_algorithm, value="Manual").grid(row=5, column=0, sticky=tk.W, padx=(0, 15), pady=3)
+        ttk.Label(algo_frame, text="Select samples manually from Data Viewer tab",
+                 style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, pady=3)
 
         # Manual selection button (initially hidden)
         self.manual_validation_button_frame = ttk.Frame(validation_frame)
@@ -16676,9 +16843,10 @@ class SpectralPredictApp:
                 else:
                     X, y, metadata_df, metadata = read_combined_csv(combined_file, drop_na_y=False)
 
-                # Store metadata for later use
-                self.combined_metadata = metadata
-                self.combined_metadata_df = metadata_df
+                # The loaded dataset's metadata (combined_metadata[_df]) changes
+                # only when Load installs this file, never at browse time: a failed
+                # load would otherwise leave this file's metadata next to the old
+                # spectra. The read here only fills the column dropdowns below.
 
                 # Check for duplicate specimen IDs that were auto-renamed
                 n_dups = metadata.get('duplicates_renamed', 0)
@@ -16872,7 +17040,7 @@ class SpectralPredictApp:
 
             # Store the path
             self.combined_file_path = filepath
-            self.combined_metadata = metadata
+            # combined_metadata is set by Load when it installs the file.
 
             # Clear folder picker since we're using combined file
             self.spectral_data_path.set("")
@@ -17606,6 +17774,39 @@ class SpectralPredictApp:
                 foreground=self.colors.get("info", "blue"),
             )
 
+    def _metadata_stores(self) -> list[tuple[str, pd.DataFrame | None]]:
+        """Metadata tables that describe the loaded samples, in priority order.
+
+        Only the installed dataset's own stores: a Data Management merge that was
+        not installed must not fill values for these samples (its metadata is in
+        ``ref`` once it is installed).
+        """
+        return [
+            ("combined_metadata_df", getattr(self, "combined_metadata_df", None)),
+            ("self.ref", getattr(self, "ref", None)),
+        ]
+
+    def _metadata_column(self, col_name: str) -> pd.Series | None:
+        """One metadata column over the loaded samples, merged across stores by sample.
+
+        The first store with a value for a sample wins; later stores fill the
+        samples it lacks. Returns None when no store has the column.
+        """
+        base = self.X_original if self.X_original is not None else self.X
+        index = base.index if base is not None else None
+        result = None
+        for _, store in self._metadata_stores():
+            if store is None or col_name not in getattr(store, "columns", []):
+                continue
+            series = store[col_name]
+            if series.index.has_duplicates:
+                series = series[~series.index.duplicated(keep="first")]
+            if index is not None:
+                series = series.reindex(index)
+            result = series.copy() if result is None else result.combine_first(series)
+        # A store padded with NaN for other samples can be object dtype; keep numbers numeric.
+        return None if result is None else result.infer_objects()
+
     def _on_target_column_changed(self, event=None):
         """Handle target column change without reloading data.
 
@@ -17619,31 +17820,19 @@ class SpectralPredictApp:
         if not new_target:
             return
 
-        # Extract Y from first available data source that contains the target column
-        new_y = None
-        sources_checked = []
-        candidates = [
-            ("combined_metadata_df", getattr(self, "combined_metadata_df", None)),
-            ("self.ref", getattr(self, "ref", None)),
-        ]
-        # data_source_manager path (optional attribute chain)
-        dsm = getattr(self, "data_source_manager", None)
-        if dsm is not None:
-            merged = getattr(dsm, "merged_dataset", None)
-            if merged is not None:
-                candidates.append(("data_source_manager.merged_dataset.metadata_df",
-                                   getattr(merged, "metadata_df", None)))
-        for source_name, source_df in candidates:
-            if source_df is None:
-                sources_checked.append(f"{source_name}: None")
-                continue
-            if new_target in getattr(source_df, "columns", []):
-                new_y = source_df[new_target].copy()
-                break
-            cols = list(source_df.columns)[:10]
-            suffix = "..." if len(source_df.columns) > 10 else ""
-            sources_checked.append(f"{source_name}: {cols}{suffix}")
+        # Extract Y per sample from every metadata store that has the column: after
+        # Data Management data gets an appended combined file, each store holds
+        # the targets of its own samples only.
+        new_y = self._metadata_column(new_target)
         if new_y is None:
+            sources_checked = []
+            for source_name, source_df in self._metadata_stores():
+                if source_df is None:
+                    sources_checked.append(f"{source_name}: None")
+                    continue
+                cols = list(source_df.columns)[:10]
+                suffix = "..." if len(source_df.columns) > 10 else ""
+                sources_checked.append(f"{source_name}: {cols}{suffix}")
             detail = "\n".join(f"  - {s}" for s in sources_checked)
             messagebox.showerror(
                 "Column Not Found",
@@ -17669,17 +17858,14 @@ class SpectralPredictApp:
             )
 
         # Keep validation targets in sync with current target column
-        if self.validation_X is not None or self.validation_y is not None:
+        if self.validation_indices:
             try:
-                if self.validation_X is not None and len(self.validation_X) > 0:
-                    validation_idx = list(self.validation_X.index)
-                elif self.validation_y is not None and len(self.validation_y) > 0:
-                    validation_idx = list(self.validation_y.index)
-                else:
-                    validation_idx = []
+                self._refresh_validation_snapshot()
+                validation_idx = (
+                    list(self.validation_y.index) if self.validation_y is not None else []
+                )
 
                 if validation_idx:
-                    self.validation_y = self.y.loc[validation_idx]
                     nan_val = int(self.validation_y.isna().sum())
                     if nan_val > 0:
                         messagebox.showwarning(
@@ -17735,13 +17921,14 @@ class SpectralPredictApp:
 
     def _get_available_target_columns(self) -> list:
         """Get list of columns that can be used as target variables."""
-        if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
-            return sorted(self.combined_metadata_df.columns.tolist())
-        elif self.ref is not None:
+        columns = set()
+        if getattr(self, 'combined_metadata_df', None) is not None:
+            columns.update(self.combined_metadata_df.columns.tolist())
+        if self.ref is not None:
             # Exclude spectral file column from options
             exclude = self.spectral_file_column.get() if self.spectral_file_column.get() else ''
-            return sorted([c for c in self.ref.columns if c != exclude])
-        return []
+            columns.update(c for c in self.ref.columns if c != exclude)
+        return sorted(columns, key=str)
 
     def _on_refine_model_changed(self, *args):
         """Handle model type changes in Model Development tab - show/hide appropriate hyperparameter section."""
@@ -18448,39 +18635,64 @@ class SpectralPredictApp:
             # If merged data exists, use that
             if self.data_source_manager.merged_dataset:
                 dataset = self.data_source_manager.merged_dataset
-                self.X = dataset.X
-                self.y = dataset.y
-                self.ref = dataset.ref
-                messagebox.showinfo("Success", "Merged dataset loaded for analysis")
+                done_msg = "Merged dataset loaded for analysis"
             else:
                 messagebox.showwarning("No Selection", "Please select a source or create a merged dataset")
                 return
         else:
             # Use selected source
             source_id = self.data_sources_tree.item(selected[0])['text']
-            source = self.data_source_manager.get_source(source_id)
-            if source:
-                self.X = source.X
-                self.y = source.y
-                self.ref = source.ref
-                messagebox.showinfo("Success", f"Source '{source.name}' loaded for analysis")
+            dataset = self.data_source_manager.get_source(source_id)
+            if not dataset:
+                return
+            done_msg = f"Source '{dataset.name}' loaded for analysis"
 
-        # Refresh analysis subset cache (dataset replaced)
-        self._refresh_active_group_indices()
-
-        # Update plots in Tab 1 if needed
-        if hasattr(self, 'plot_canvas') and self.plot_canvas:
-            self._update_spectral_plots()
-
-        # Update Data Viewer tab
-        if hasattr(self, 'sheet') and self.sheet:
-            self._update_data_viewer()
+        # R037: install through the one dataset path, so X_original, metadata,
+        # exclusions and the validation split all follow the new data.
+        if not self._install_data_management_dataset(dataset):
+            return
+        messagebox.showinfo("Success", done_msg)
 
         # Switch to Import & Preview tab to show the data
         self.notebook.select(1)  # Tab 1 (Import & Preview)
 
         # Update ensemble controls state (may change if auto-detect is enabled)
         self._update_ensemble_controls_state()
+
+    def _install_data_management_dataset(self, dataset) -> bool:
+        """Install a Data Management source or merged dataset as the working data.
+
+        The Import-tab wavelength range belonged to the previous dataset, so it is
+        reset to the new data's full range. The wavelength axis is kept exactly
+        as Data Management holds it (no integer rounding), as before the install
+        helper existed, so sub-unit FTIR axes still load. Returns False (nothing
+        changed) if the dataset can't be installed.
+        """
+        name = getattr(dataset, "name", None) or "merged dataset"
+        try:
+            installed = self._install_dataset(
+                dataset.X,
+                dataset.y,
+                dataset.ref,
+                None,
+                mode="replace",
+                exact_axis=True,
+                reset_wavelength_range=True,
+            )
+        except ValueError as exc:
+            messagebox.showerror("Can't use this dataset", str(exc))
+            return False
+        if installed:
+            self._reset_source_tracking(f"Data Management: {name}")
+        return installed
+
+    def _reset_source_tracking(self, source_label: str) -> None:
+        """Import's source/group list after a whole-dataset replacement."""
+        self.data_sources = [(source_label, len(self.X_original))]
+        self.source_group_names = [""]
+        self.use_custom_group_names = False
+        if hasattr(self, "_update_data_sources_display"):
+            self._update_data_sources_display()
 
     def _preview_merge(self):
         """Preview merge operation."""
@@ -18606,10 +18818,8 @@ class SpectralPredictApp:
         """Execute merge and immediately use for analysis."""
         self._execute_merge()
         if self.data_source_manager and self.data_source_manager.merged_dataset:
-            self.X = self.data_source_manager.merged_dataset.X
-            self.y = self.data_source_manager.merged_dataset.y
-            self.ref = self.data_source_manager.merged_dataset.ref
-            self._refresh_active_group_indices()
+            if not self._install_data_management_dataset(self.data_source_manager.merged_dataset):
+                return
             messagebox.showinfo("Success", "Merged dataset loaded for analysis")
             # Switch to Import & Preview tab
             self.notebook.select(1)
@@ -18837,22 +19047,24 @@ class SpectralPredictApp:
             filter_value = self.filter_value_var.get()
             filter_column = self.filter_column_var.get() if self.filter_column_var.get() else None
 
-            # Apply filter
+            # Apply filter to the full-range data, so a later wavelength Update
+            # rebuilds from the filtered samples (R037).
             X_filtered, y_filtered, ref_filtered = self.data_source_manager.filter_samples(
-                self.X, self.y, self.ref,
+                self.X_original, self.y, self.ref,
                 filter_type=filter_type,
                 filter_value=filter_value,
                 column=filter_column
             )
+            meta = self.combined_metadata_df
+            meta_filtered = None if meta is None else meta[meta.index.isin(X_filtered.index)]
 
-            # Update data
             original_samples = len(self.X)
-            self.X = X_filtered
-            self.y = y_filtered
-            self.ref = ref_filtered
-
-            # Recompute active Analysis Subset against new dataset
-            self._refresh_active_group_indices()
+            # Same samples, fewer of them: exclusions and the holdout are kept for
+            # the samples that remain.
+            if not self._install_dataset(
+                X_filtered, y_filtered, ref_filtered, meta_filtered, mode="update"
+            ):
+                return
 
             messagebox.showinfo("Filter Applied",
                 f"Filtered from {original_samples} to {len(self.X)} samples")
@@ -18873,9 +19085,16 @@ class SpectralPredictApp:
             min_wl = self.min_wavelength_var.get() if self.min_wavelength_var.get() else None
             max_wl = self.max_wavelength_var.get() if self.max_wavelength_var.get() else None
 
-            # Apply trimming
+            # Trim the full-range data so the trim survives a wavelength Update,
+            # and the validation spectra follow it (R037/R005).
             original_wl = len(self.X.columns)
-            self.X = self.data_source_manager.trim_wavelengths(self.X, min_wl, max_wl)
+            X_trimmed = self.data_source_manager.trim_wavelengths(
+                self.X_original, min_wl, max_wl
+            )
+            if not self._install_dataset(
+                X_trimmed, self.y, self.ref, self.combined_metadata_df, mode="update"
+            ):
+                return
 
             messagebox.showinfo("Wavelengths Trimmed",
                 f"Trimmed from {original_wl} to {len(self.X.columns)} wavelengths")
@@ -18974,21 +19193,316 @@ class SpectralPredictApp:
                 messagebox.showerror("Export Error", f"Failed to export: {str(e)}")
 
     def _update_spectral_plots(self):
-        """Update spectral plots when data changes."""
-        # This will be called when data is loaded from Data Management tab
-        # The existing plot update logic can be reused
-        pass
+        """Redraw the Import & Preview and Explore spectral plots for the current data."""
+        if self.X is None:
+            return
+        self._generate_plots()
+        self._generate_explore_plots()
 
     def _update_data_viewer(self):
-        """Update Data Viewer tab when data changes."""
-        # This will be called when data is loaded from Data Management tab
-        # The existing data viewer update logic can be reused
-        pass
+        """Refresh the Data Viewer tab for the current data."""
+        if self.X is None:
+            return
+        self._populate_data_viewer()
+
+    # ------------------------------------------------------------------
+    # Dataset installation (R004 / R037 / R038)
+    # ------------------------------------------------------------------
+
+    def _install_dataset(
+        self,
+        X_original: pd.DataFrame,
+        y: pd.Series | None,
+        ref: pd.DataFrame | None = None,
+        metadata_df: pd.DataFrame | None = None,
+        *,
+        mode: str = "replace",
+        filter_wavelengths: bool = True,
+        exact_axis: bool | None = None,
+        reset_wavelength_range: bool = False,
+        replot: bool = True,
+    ) -> bool:
+        """Make a dataset the working data: the one path every loader goes through.
+
+        ``X_original``, ``X`` (``X_original`` cut to the Import-tab wavelength range),
+        ``y``, ``ref`` and ``combined_metadata_df`` are set together. If the
+        wavelength filter rejects the data (sub-integer axis), the user is told and
+        NOTHING changes (R038).
+
+        Modes:
+            ``"replace"``: a different dataset. Exclusions, the validation split
+                (labels and spectra; the Validation checkbox too unless a
+                crash-resume is waiting for its data) and the Quality Check report
+                are cleared. Labels from the old data must never select rows of
+                the new one (R004).
+            ``"append"``: rows were added and existing labels kept (the append
+                merge renames colliding new labels). Exclusions and the holdout
+                are kept.
+            ``"update"``: the same samples, possibly fewer, or with changed
+                spectra or wavelengths. Exclusions and the holdout are kept for the
+                samples still present.
+
+        In every mode the Quality Check report is dropped (it was computed on other
+        data), the Analysis Subset is recomputed, and the validation spectra are
+        rebuilt from the new ``X``. Repeated sample labels get a unique suffix. A
+        resumed Bayesian run's split (``_pending_validation_indices``) and its
+        exclusions are never carried here; the launch gate re-applies them.
+
+        ``exact_axis``: keep the wavelength axis as given (Data Management and
+        calibration-transfer data, as before this helper) instead of the Import
+        rule that rounds it to integers. None: False for ``"replace"``, otherwise
+        the loaded dataset's rule.
+
+        Returns:
+            True if the dataset was installed, False if nothing changed.
+
+        Raises:
+            ValueError: unknown ``mode``, or ``y`` not indexed like ``X_original``.
+        """
+        if mode not in ("replace", "append", "update"):
+            raise ValueError(f"Unknown install mode {mode!r}")
+        if X_original is None:
+            raise ValueError("No spectra to install")
+        if y is not None and not y.index.equals(X_original.index):
+            raise ValueError(
+                "The target values are not indexed by the same samples as the spectra "
+                f"({len(y)} targets, {len(X_original)} spectra), so they can't be paired."
+            )
+
+        if exact_axis is None:
+            # Import data uses the integer-axis rule; added rows and edits keep
+            # whatever rule the loaded dataset already follows.
+            exact_axis = (
+                False if mode == "replace" else getattr(self, "_exact_wavelength_axis", False)
+            )
+
+        # R007 follow-up: every sample needs its own label, or one exclusion
+        # (or one Quality Check row) would remove several spectra.
+        X_original, y, ref, metadata_df = self._with_unique_sample_ids(
+            X_original, y, ref, metadata_df
+        )
+
+        saved_range = (self.wavelength_min.get(), self.wavelength_max.get())
+        if reset_wavelength_range:
+            wavelengths = X_original.columns.astype(float)
+            self.wavelength_min.set(str(int(np.floor(wavelengths.min()))))
+            self.wavelength_max.set(str(int(np.ceil(wavelengths.max()))))
+
+        if filter_wavelengths:
+            filtered = self._wavelength_filtered(X_original, round_axis=not exact_axis)
+            if filtered is None:
+                self.wavelength_min.set(saved_range[0])
+                self.wavelength_max.set(saved_range[1])
+                return False
+            X_original, X = filtered
+        else:
+            X = X_original.copy()
+
+        self.X_original = X_original
+        self.X = X
+        self.y = y
+        self.ref = ref
+        self.combined_metadata_df = metadata_df
+        self._exact_wavelength_axis = exact_axis
+
+        if mode == "replace":
+            self._clear_dataset_specific_state()
+        else:
+            present = X_original.index
+            self.excluded_spectra = {s for s in self.excluded_spectra if s in present}
+            self.validation_indices = {
+                s for s in (self.validation_indices or ()) if s in present
+            }
+            if not self.validation_indices and not self._resume_split_pending():
+                self._reset_validation_set()
+        self._invalidate_outlier_report()
+        self._refresh_active_group_indices()
+        self._refresh_validation_snapshot()
+
+        if replot:
+            self._refresh_views_after_install()
+        return True
+
+    def _labels_look_renamed(self) -> bool:
+        """True if the loaded labels carry the suffix a duplicate-ID rename adds.
+
+        A label ``"<id>.<k>"`` next to ``"<id>"`` (or ``"nan.<k>"``) means repeated
+        raw IDs were renamed, by the Import reader, Data Management, a merge or
+        the install step. The old scheme named repeats differently, so a run
+        saved by released code may use such labels for other rows. Computed
+        from the loaded labels, so it can't go stale after an edit or Revert.
+        """
+        if self.X_original is None:
+            return False
+        spelled = {str(label) for label in self.X_original.index}
+        for label in self.X_original.index:
+            if not isinstance(label, str):
+                continue
+            base, sep, suffix = label.rpartition(".")
+            if sep and suffix.isdigit() and (base in spelled or base == "nan"):
+                return True
+        return False
+
+    def _with_unique_sample_ids(self, X_original, y, ref, metadata_df):
+        """Give repeated sample labels a unique suffix everywhere they index rows.
+
+        Exclusions, holdouts and Quality Check rows name samples by label; with a
+        repeated label one click would remove every spectrum sharing it. ``y``,
+        ``ref`` and ``metadata_df`` are relabelled when they are indexed exactly
+        like ``X_original``.
+        """
+        from spectral_predict.io import rename_duplicate_ids
+
+        index = X_original.index
+        # Missing-aware: NaN and pd.NA labels count as repeats although pandas'
+        # has_duplicates says otherwise.
+        new_index, n_renamed, mapping = rename_duplicate_ids(index)
+        if n_renamed == 0:
+            return X_original, y, ref, metadata_df
+
+        def _relabel(frame):
+            if frame is not None and frame.index.equals(index):
+                return frame.set_axis(new_index, axis=0)
+            return frame
+
+        examples = "\n".join(
+            f"  • {orig!r} → {', '.join(repr(n) for n in new)}"
+            for orig, new in list(mapping.items())[:5]
+        )
+        messagebox.showwarning(
+            "Duplicate sample IDs renamed",
+            f"{n_renamed} sample(s) shared an ID with another sample and were "
+            f"renamed so each spectrum can be excluded on its own:\n\n{examples}",
+        )
+        return (
+            X_original.set_axis(new_index, axis=0),
+            _relabel(y),
+            _relabel(ref),
+            _relabel(metadata_df),
+        )
+
+    def _clear_dataset_specific_state(self) -> None:
+        """Forget everything that names samples of the previous dataset (R004)."""
+        self.excluded_spectra = set()
+        self._exclusion_markers = {}
+        self.validation_indices = set()
+        if self._resume_split_pending():
+            # The launch gate restores the resumed run's split once the data
+            # matches. Keep the Validation checkbox it was restored with, or the
+            # settings check would flag a difference the user never made.
+            self.validation_X = None
+            self.validation_y = None
+            if hasattr(self, 'validation_status_label'):
+                self.validation_status_label.config(text="No validation set created")
+        else:
+            self._reset_validation_set()
+
+    def _resume_split_pending(self) -> bool:
+        """True while a crash-resumed Bayesian run is waiting for its data."""
+        if getattr(self, "_pending_validation_indices", None):
+            return True
+        try:
+            from spectral_predict.run_state import is_resuming
+        except ImportError:
+            return False
+        try:
+            return bool(is_resuming())
+        except Exception:
+            return False
+
+    def _refresh_validation_snapshot(self) -> None:
+        """Rebuild validation_X/validation_y from the holdout labels and current data."""
+        self.validation_X, self.validation_y = _validation_snapshot(
+            self.X, self.y, self.validation_indices, self.excluded_spectra
+        )
+
+    def _invalidate_outlier_report(self) -> None:
+        """Drop a Quality Check report computed on data that is no longer loaded (R007)."""
+        if getattr(self, "outlier_report", None) is None:
+            return
+        self.outlier_report = None
+        self._outlier_row_labels = {}
+        self._outlier_report_fingerprint = None
+        tree = getattr(self, "outlier_tree", None)
+        if tree is not None:
+            for item in tree.get_children():
+                tree.delete(item)
+        if hasattr(self, "tab2_status"):
+            self.tab2_status.config(text="Data changed - run outlier detection again")
+
+    def _refresh_views_after_install(self) -> None:
+        """Redraw plots, viewer and status for a newly installed dataset."""
+        self._update_spectral_plots()
+        self._update_data_viewer()
+        self._update_exclusion_status()
+        self._update_task_type_label()
+        self._on_task_type_changed()
+        if hasattr(self, 'tab1_status'):
+            self.tab1_status.config(
+                text=f"> Loaded {len(self.X)} samples × {self.X.shape[1]} wavelengths"
+            )
+        if hasattr(self, 'update_wl_button'):
+            self.update_wl_button.config(state='normal')
+        if hasattr(self, 'reset_exclusions_button'):
+            self.reset_exclusions_button.config(state='normal')
+        if hasattr(self, 'analysis_target_combo'):
+            self.analysis_target_combo['values'] = self._get_available_target_columns()
+
+    # How the loaded spectra are interpreted. A load applies the new file's values
+    # before it can fail, so a rejected load must put these back with the data.
+    _DATASET_STATE_ATTRS = (
+        "X", "X_original", "y", "ref", "combined_metadata_df", "combined_metadata",
+        "detected_type", "combined_file_path", "combined_sheet_name",
+        "_exact_wavelength_axis",
+        "type_confidence", "type_detection_method",
+        "data_value_scale", "source_data_type", "data_has_been_converted",
+        "x_unit_confidence", "x_unit_detection_method", "x_unit_has_been_converted",
+        "use_custom_group_names",
+    )
+    _DATASET_STATE_VARS = (
+        "wavelength_min", "wavelength_max", "original_data_type", "current_data_type",
+        "use_absorbance", "original_x_unit", "current_x_unit",
+    )
+
+    def _capture_dataset_state(self) -> dict:
+        """Everything a failed load must put back (see ``_restore_dataset_state``)."""
+        state = {name: getattr(self, name, None) for name in self._DATASET_STATE_ATTRS}
+        state["data_sources"] = list(getattr(self, "data_sources", []) or [])
+        state["source_group_names"] = list(getattr(self, "source_group_names", []) or [])
+        state["vars"] = {
+            name: getattr(self, name).get()
+            for name in self._DATASET_STATE_VARS
+            if hasattr(self, name)
+        }
+        return state
+
+    def _restore_dataset_state(self, state: dict) -> None:
+        """Put back the dataset captured before a load that did not complete."""
+        for name in self._DATASET_STATE_ATTRS:
+            setattr(self, name, state[name])
+        self.data_sources = state["data_sources"]
+        self.source_group_names = state["source_group_names"]
+        for name, value in state["vars"].items():
+            getattr(self, name).set(value)
+        for refresh in (
+            "_update_data_sources_display",
+            "_update_data_type_status_ui",
+            "_update_x_unit_status_ui",
+            "_update_x_unit_labels",
+        ):
+            try:
+                getattr(self, refresh)()
+            except Exception as exc:  # a status label must not hide the load error
+                print(f"WARNING: {refresh} failed after restoring the dataset: {exc}")
 
     # === END OF TAB 0 HELPER METHODS ===
 
     def _load_and_plot_data(self):
         """Load data and generate spectral plots."""
+        # The readers below assign the new data piecemeal; a load that stops
+        # before _install_dataset puts the previous dataset back whole (R038).
+        prev_dataset = self._capture_dataset_state()
+        installed = False
         try:
             from spectral_predict.io import read_csv_spectra, read_csv_dir, read_reference_csv, align_xy, read_asd_dir, read_spc_dir
 
@@ -19467,11 +19981,8 @@ class SpectralPredictApp:
             new_n_samples = len(self.X_original)
             source_path = self.spectral_data_path.get() or self.combined_file_path or "Unknown"
 
+            appended = False
             if self.append_mode.get() and hasattr(self, '_existing_X') and self._existing_X is not None:
-                # Save group state snapshot for rollback
-                _saved_group_names = list(self.source_group_names)
-                _saved_use_custom = self.use_custom_group_names
-
                 try:
                     # Prompt for group names
                     existing_group_name, new_group_name = self._prompt_for_group_names()
@@ -19528,19 +20039,19 @@ class SpectralPredictApp:
                     self.source_group_names.append(new_group_name)
                     self.data_sources.append((source_path, new_n_samples))
                     self._update_data_sources_display()
+                    appended = True
                     print(f"> Appended {new_n_samples} samples from: {source_path}")
                 except Exception as e:
                     import traceback
                     traceback.print_exc()
                     messagebox.showerror("Append Error", f"Failed to merge data:\n{str(e)}")
-                    # Restore previous data and group state
-                    self.X_original = self._existing_X
-                    self.y = self._existing_y
-                    self.ref = self._existing_ref
-                    if self._existing_metadata_df is not None:
-                        self.combined_metadata_df = self._existing_metadata_df
-                    self.source_group_names = _saved_group_names
-                    self.use_custom_group_names = _saved_use_custom
+                    # Restore previous data (including its metadata) and group state
+                    self._restore_dataset_state(prev_dataset)
+                    self._existing_X = None
+                    self._existing_y = None
+                    self._existing_ref = None
+                    self._existing_metadata_df = None
+                    self.tab1_status.config(text="[X] Append failed - previous data kept")
                     return
             else:
                 # First load or replace mode - reset data sources and group state
@@ -19565,6 +20076,8 @@ class SpectralPredictApp:
                                        "Critical: X and y indices don't match after loading!\n"
                                        "This would cause incorrect model training.\n"
                                        "Please check your data format.")
+                    self._restore_dataset_state(prev_dataset)
+                    self.tab1_status.config(text="[X] Load failed - previous data kept")
                     return
 
                 # Also check ref alignment if it exists
@@ -19579,11 +20092,22 @@ class SpectralPredictApp:
                 self.wavelength_min.set(str(int(wavelengths.min())))
                 self.wavelength_max.set(str(int(wavelengths.max())))
 
-            # Apply wavelength filtering
-            self._apply_wavelength_filter()
-
-            # Refresh analysis subset cache (dataset replaced)
-            self._refresh_active_group_indices()
+            # Install through the one dataset path (R004/R037): X, X_original, y,
+            # metadata, exclusions, the validation split and the Quality Check
+            # report move together. A sub-integer axis rejects the whole load and
+            # the previous dataset stays (R038).
+            installed = self._install_dataset(
+                self.X_original,
+                self.y,
+                self.ref,
+                getattr(self, 'combined_metadata_df', None),
+                mode="append" if appended else "replace",
+                replot=False,
+            )
+            if not installed:
+                self._restore_dataset_state(prev_dataset)
+                self.tab1_status.config(text="[X] Load cancelled - previous data kept")
+                return
 
             # Auto-detect and display task type
             self._update_task_type_label()
@@ -19612,6 +20136,7 @@ class SpectralPredictApp:
 
             # Populate the data viewer tab
             self._populate_data_viewer()
+            self._update_exclusion_status()
 
             # Populate Analysis tab target dropdown with available columns
             if hasattr(self, 'analysis_target_combo'):
@@ -19621,6 +20146,9 @@ class SpectralPredictApp:
         except Exception as e:
             import traceback
             traceback.print_exc()
+            if not installed:
+                # Never leave new targets/metadata next to the old spectra.
+                self._restore_dataset_state(prev_dataset)
             messagebox.showerror("Error", f"Failed to load data:\n{e}")
             self.tab1_status.config(text="[X] Error loading data")
 
@@ -19772,18 +20300,42 @@ class SpectralPredictApp:
 
         return X_aligned, y_aligned, ref
 
-    def _apply_wavelength_filter(self):
-        """Apply wavelength filtering to X_original and store in self.X."""
-        if self.X_original is None:
-            return
+    def _apply_wavelength_filter(self) -> bool:
+        """Apply wavelength filtering to X_original and store in self.X.
 
+        Returns False (nothing changed) when the data can't be filtered.
+        """
+        if self.X_original is None:
+            return False
+        filtered = self._wavelength_filtered(
+            self.X_original, round_axis=not getattr(self, "_exact_wavelength_axis", False)
+        )
+        if filtered is None:
+            return False
+        self.X_original, self.X = filtered
+        # R005: the holdout's spectra follow the new wavelength range.
+        self._refresh_validation_snapshot()
+        return True
+
+    def _wavelength_filtered(self, X_original, round_axis: bool = True):
+        """``(X_original, X cut to the Import-tab range)``.
+
+        With ``round_axis`` (the Import rule) the axis is rounded to integers first;
+        without it (Data Management and calibration-transfer data, as before this
+        change) the exact axis is kept and only the range is applied. Touches no
+        state. Returns None, after telling the user, when rounding would merge
+        columns (sub-integer spacing).
+        """
         # Get wavelength range
         wl_min = self.wavelength_min.get().strip()
         wl_max = self.wavelength_max.get().strip()
 
+        if not round_axis:
+            return X_original, self._cut_to_range(X_original.copy(), wl_min, wl_max)
+
         # Round x-axis columns to integers for consistency
         # (all_vars/top_vars store integers; typical spectral resolution >=1 unit)
-        rounded_cols = self.X_original.columns.astype(float).round().astype(int)
+        rounded_cols = X_original.columns.astype(float).round().astype(int)
 
         # Guard: if rounding causes duplicate columns, the data has sub-unit spacing
         if len(set(rounded_cols)) < len(rounded_cols):
@@ -19796,21 +20348,19 @@ class SpectralPredictApp:
                 f"to integers (e.g., 350.1 and 350.2 both become 350).\n\n"
                 f"Sub-integer resolution {axis_name} data ({unit_short}) is not currently supported."
             )
-            return
+            return None
 
-        self.X_original.columns = rounded_cols
+        X_original = X_original.set_axis(rounded_cols, axis=1)
+        return X_original, self._cut_to_range(X_original.copy(), wl_min, wl_max)
 
-        # Start with full data
-        self.X = self.X_original.copy()
-
-        # Apply filtering
-        if wl_min or wl_max:
-            wavelengths = self.X.columns.astype(float)
-            if wl_min:
-                self.X = self.X.loc[:, wavelengths >= float(wl_min)]
-            if wl_max:
-                wavelengths = self.X.columns.astype(float)
-                self.X = self.X.loc[:, wavelengths <= float(wl_max)]
+    @staticmethod
+    def _cut_to_range(X, wl_min: str, wl_max: str):
+        """Keep the columns of ``X`` inside the Import-tab range (blank = open)."""
+        if wl_min:
+            X = X.loc[:, X.columns.astype(float) >= float(wl_min)]
+        if wl_max:
+            X = X.loc[:, X.columns.astype(float) <= float(wl_max)]
+        return X
 
     def _update_wavelengths(self):
         """Update wavelength filter and regenerate plots."""
@@ -19829,7 +20379,8 @@ class SpectralPredictApp:
                 float(wl_max)  # Validate it's a number
 
             # Apply new filter
-            self._apply_wavelength_filter()
+            if not self._apply_wavelength_filter():
+                return
 
             # Regenerate plots
             self._generate_plots()
@@ -20090,15 +20641,8 @@ class SpectralPredictApp:
             self.X.columns = new_cols
             self.X = self.X[sorted(self.X.columns)]
 
-            # Convert validation set if present
-            if hasattr(self, 'validation_X') and self.validation_X is not None and len(self.validation_X) > 0:
-                try:
-                    old_val_cols = self.validation_X.columns.astype(float).values
-                    new_val_cols = convert_x_axis(old_val_cols, current_unit, target_unit)
-                    self.validation_X.columns = new_val_cols
-                    self.validation_X = self.validation_X[sorted(self.validation_X.columns)]
-                except Exception as e:
-                    print(f"WARNING: Could not convert validation_X columns: {e}")
+            # Validation spectra follow the converted axis (R005)
+            self._refresh_validation_snapshot()
 
             # Swap and convert wavelength filter values
             old_min_str = self.wavelength_min.get().strip()
@@ -20191,23 +20735,8 @@ class SpectralPredictApp:
                                           index=self.X_original.index,
                                           columns=self.X_original.columns)
 
-            # Keep validation set in sync with converted data
-            if self.validation_indices:
-                try:
-                    # Preserve original validation order to keep X/y aligned
-                    if self.validation_X is not None and len(self.validation_X) > 0:
-                        validation_idx = list(self.validation_X.index)
-                    elif self.validation_y is not None and len(self.validation_y) > 0:
-                        validation_idx = list(self.validation_y.index)
-                    else:
-                        validation_idx = list(self.validation_indices)
-
-                    self.validation_X = self.X.loc[validation_idx]
-                    if self.y is not None:
-                        self.validation_y = self.y.loc[validation_idx]
-                    print(f"DEBUG: Updated validation set after data type conversion (n={len(self.validation_X)})")
-                except Exception as e:
-                    print(f"WARNING: Could not update validation_X after conversion: {e}")
+            # Keep validation set in sync with converted data (minus exclusions, R005)
+            self._refresh_validation_snapshot()
 
             # Update state
             self.current_data_type.set(target_type)
@@ -20764,73 +21293,90 @@ class SpectralPredictApp:
 
     # ==================== Validation Set Selection Methods ====================
 
+    # Kennard-Stone, SPXY and DUPLEX choose the CALIBRATION set (the
+    # representative samples, extremes included); the holdout is what is left.
+    # QW4 (2026-10-02): these used to pick the holdout itself, which put the
+    # extremes in validation and made the model extrapolate. Only NEW selections
+    # use this: a saved or resumed holdout is restored from its stored sample IDs
+    # and never re-selected (see _reconcile_resume_validation_split).
+
+    @staticmethod
+    def _holdout_labels_by_selection(X, n_samples, method, y_array=None):
+        """Holdout labels for a ``sample_selection.split_calibration_holdout`` split.
+
+        Args:
+            X: pandas DataFrame of spectral data (rows = candidate samples).
+            n_samples: number of samples to hold out.
+            method: ``"kennard-stone"``, ``"spxy"`` or ``"duplex"``.
+            y_array: numeric target values, required for SPXY.
+
+        Returns:
+            list of DataFrame index labels in the holdout, in row order.
+        """
+        from spectral_predict.sample_selection import split_calibration_holdout
+
+        n_total = len(X)
+        if n_samples >= n_total:
+            raise ValueError(
+                f"Validation set size ({n_samples}) must be less than total samples ({n_total})"
+            )
+        _, holdout = split_calibration_holdout(
+            np.asarray(X.values, dtype=float), n_samples, method=method, y=y_array
+        )
+        return X.index[holdout].tolist()
+
     def _validation_kennard_stone(self, X, n_samples):
         """
-        Select validation samples using Kennard-Stone algorithm.
-        Maximizes Euclidean distance in X-space for spectral diversity.
+        Select a validation holdout with Kennard-Stone.
+
+        Kennard-Stone picks the ``n_total - n_samples`` calibration samples that
+        cover the spectral space (extremes included); the remaining interior
+        samples are the holdout.
 
         Args:
             X: pandas DataFrame of spectral data
-            n_samples: number of samples to select
+            n_samples: number of samples to hold out
 
         Returns:
-            list of indices to include in validation set
+            list of indices in the validation set
         """
-        from scipy.spatial.distance import pdist, squareform
+        return SpectralPredictApp._holdout_labels_by_selection(X, n_samples, "kennard-stone")
 
-        X_array = X.values
-        n_total = len(X_array)
+    def _validation_duplex(self, X, n_samples):
+        """
+        Select a validation holdout with DUPLEX (Snee 1977).
 
-        if n_samples >= n_total:
-            raise ValueError(f"Validation set size ({n_samples}) must be less than total samples ({n_total})")
+        Calibration and validation sets are grown alternately, each by max-min
+        distance to its own members, so both span the spectral space.
 
-        # Compute pairwise Euclidean distances
-        distances = squareform(pdist(X_array, metric='euclidean'))
+        Args:
+            X: pandas DataFrame of spectral data
+            n_samples: number of samples to hold out
 
-        # Start with the two samples that are farthest apart
-        max_dist_idx = np.unravel_index(distances.argmax(), distances.shape)
-        selected = [max_dist_idx[0], max_dist_idx[1]]
-
-        # Iteratively select samples that maximize minimum distance to already selected
-        remaining = list(set(range(n_total)) - set(selected))
-
-        while len(selected) < n_samples:
-            # For each remaining sample, find minimum distance to selected samples
-            min_distances = []
-            for idx in remaining:
-                min_dist = min(distances[idx, s] for s in selected)
-                min_distances.append((min_dist, idx))
-
-            # Select the sample with maximum minimum distance
-            _, best_idx = max(min_distances)
-            selected.append(best_idx)
-            remaining.remove(best_idx)
-
-        # Convert array indices to DataFrame indices
-        return X.index[selected].tolist()
+        Returns:
+            list of indices in the validation set
+        """
+        return SpectralPredictApp._holdout_labels_by_selection(X, n_samples, "duplex")
 
     def _validation_spxy(self, X, y, n_samples):
         """
-        Select validation samples using SPXY algorithm.
-        Maximizes distance in both X-space and Y-space.
+        Select a validation holdout with SPXY (Galvão et al. 2005).
+
+        SPXY picks the ``n_total - n_samples`` calibration samples that cover the
+        joint spectral and target space, using the X-distance and y-distance
+        matrices each divided by its maximum; the rest are the holdout.
 
         Args:
             X: pandas DataFrame of spectral data
             y: pandas Series of target values
-            n_samples: number of samples to select
+            n_samples: number of samples to hold out
 
         Returns:
-            list of indices to include in validation set
+            list of indices in the validation set
         """
-        from scipy.spatial.distance import pdist, squareform
         from sklearn.preprocessing import LabelEncoder
 
-        X_array = X.values
         y_values = y.values
-        n_total = len(X_array)
-
-        if n_samples >= n_total:
-            raise ValueError(f"Validation set size ({n_samples}) must be less than total samples ({n_total})")
 
         # Handle categorical y values by encoding them
         if not pd.api.types.is_numeric_dtype(y_values.dtype):
@@ -20840,45 +21386,13 @@ class SpectralPredictApp:
                 if len(_types) > 1:
                     y_values = _normalize_mixed_type_labels(y_values)
             le = LabelEncoder()
-            y_array = le.fit_transform(y_values).reshape(-1, 1).astype(float)
+            y_array = le.fit_transform(y_values).astype(float)
         else:
-            # Numeric data - use as is
-            y_array = y_values.reshape(-1, 1).astype(float)
+            y_array = np.asarray(y_values, dtype=float)
 
-        # Normalize X and y to [0, 1]
-        X_norm = (X_array - X_array.min(axis=0)) / (X_array.max(axis=0) - X_array.min(axis=0) + 1e-10)
-        y_norm = (y_array - y_array.min()) / (y_array.max() - y_array.min() + 1e-10)
-
-        # Compute distances in X-space
-        dist_X = squareform(pdist(X_norm, metric='euclidean'))
-
-        # Compute distances in y-space
-        dist_y = squareform(pdist(y_norm, metric='euclidean'))
-
-        # Combine distances: d_SPXY = d_X + d_y
-        distances = dist_X + dist_y
-
-        # Start with the two samples that are farthest apart
-        max_dist_idx = np.unravel_index(distances.argmax(), distances.shape)
-        selected = [max_dist_idx[0], max_dist_idx[1]]
-
-        # Iteratively select samples that maximize minimum distance to already selected
-        remaining = list(set(range(n_total)) - set(selected))
-
-        while len(selected) < n_samples:
-            # For each remaining sample, find minimum distance to selected samples
-            min_distances = []
-            for idx in remaining:
-                min_dist = min(distances[idx, s] for s in selected)
-                min_distances.append((min_dist, idx))
-
-            # Select the sample with maximum minimum distance
-            _, best_idx = max(min_distances)
-            selected.append(best_idx)
-            remaining.remove(best_idx)
-
-        # Convert array indices to DataFrame indices
-        return X.index[selected].tolist()
+        return SpectralPredictApp._holdout_labels_by_selection(
+            X, n_samples, "spxy", y_array=y_array
+        )
 
     def _validation_random(self, X, y, n_samples):
         """
@@ -21037,6 +21551,8 @@ class SpectralPredictApp:
                 selected_indices = self._validation_kennard_stone(X_available, n_val)
             elif algorithm == "SPXY":
                 selected_indices = self._validation_spxy(X_available, y_available, n_val)
+            elif algorithm == "DUPLEX":
+                selected_indices = self._validation_duplex(X_available, n_val)
             elif algorithm == "Random":
                 selected_indices = self._validation_random(X_available, y_available, n_val)
             elif algorithm == "Stratified":
@@ -21242,28 +21758,18 @@ class SpectralPredictApp:
     def _on_spectrum_click(self, event):
         """Handle clicking on a spectrum line to toggle its visibility and show info."""
         line = event.artist
-        gid = line.get_gid()
-        # Convert GID back to original index type
-        # Try to convert to int if it looks like one, otherwise keep as string
-        try:
-            sample_idx = int(gid) if gid.lstrip('-').isdigit() else gid
-        except (ValueError, AttributeError):
-            sample_idx = gid
+        # R006: the sample's real label, never a number parsed from the gid.
+        sample = self._sample_from_artist(line)
+        if sample is None:
+            return
+        sample_idx, pos_idx = sample
 
-        # Get positional index for accessing values array
-        if isinstance(sample_idx, int) and sample_idx in range(len(self.X)):
-            # If sample_idx is already a positional integer, use it directly
-            pos_idx = sample_idx
-        else:
-            # Otherwise, find the position of this index label in the DataFrame
-            pos_idx = self.X.index.get_loc(sample_idx)
-
-        # Get Y value for this sample
-        y_value = self.y.values[pos_idx] if self.y is not None else None
+        y_value = self._y_value_for_sample(sample_idx, pos_idx)
 
         # Format and display specimen information
-        # Pass positional index to _format_specimen_info (it expects positional index)
-        info_text = self._format_specimen_info(pos_idx, y_value=y_value)
+        info_text = self._format_specimen_info(
+            pos_idx, y_value=y_value, specimen_label=sample_idx
+        )
 
         # Get click coordinates from the line data
         xdata = line.get_xdata()
@@ -21293,6 +21799,57 @@ class SpectralPredictApp:
 
         event.canvas.draw()
         self._update_exclusion_status()
+
+    @staticmethod
+    def _tag_sample_artist(artist, label, position: int) -> None:
+        """Record which sample a plotted spectrum is, for the click handlers (R006)."""
+        artist.set_gid(str(label))
+        artist._dasp_sample_label = label
+        artist._dasp_sample_pos = position
+
+    def _sample_from_artist(self, artist):
+        """``(label, position in self.X)`` of the sample a spectrum line belongs to.
+
+        The label is kept on the artist when it is drawn. The gid string is only a
+        fallback, matched against ``str(label)`` and never int-coerced: '5', '007'
+        and '-3' are labels, not row numbers (R006). Returns None when the sample
+        is not in the current data.
+        """
+        if self.X is None:
+            return None
+        index = self.X.index
+        if hasattr(artist, "_dasp_sample_label"):
+            label = artist._dasp_sample_label
+            pos = getattr(artist, "_dasp_sample_pos", None)
+            try:
+                loc = index.get_loc(label)
+            except (KeyError, TypeError):
+                return None
+            if isinstance(loc, (int, np.integer)):
+                return label, int(loc)
+            # Duplicate labels: trust the drawn position if it still holds the label.
+            if pos is not None and 0 <= pos < len(index) and index[pos] == label:
+                return label, int(pos)
+            return None
+        gid = artist.get_gid()
+        if gid is None:
+            return None
+        matches = [i for i, lab in enumerate(index) if str(lab) == gid]
+        if len(matches) != 1:
+            return None
+        return index[matches[0]], matches[0]
+
+    def _y_value_for_sample(self, label, position: int):
+        """Target of one sample, looked up by label (by position only if aligned)."""
+        if self.y is None:
+            return None
+        if self.y.index.equals(self.X.index):
+            return self.y.iloc[position]
+        try:
+            value = self.y.loc[label]
+        except KeyError:
+            return None
+        return value.iloc[0] if isinstance(value, pd.Series) else value
 
     def _format_specimen_info(self, specimen_idx, y_value=None, y_pred=None,
                               extra_info=None, specimen_label=None):
@@ -21754,7 +22311,7 @@ class SpectralPredictApp:
 
             # Make clickable for all spectra (raw and derivatives)
             # Store DataFrame index label as GID (not positional index)
-            line.set_gid(str(self.X.index[i]))
+            self._tag_sample_artist(line, self.X.index[i], i)
             line.set_picker(5)  # Enable picking with 5-point tolerance
 
         ax.set_xlabel(self._get_spectral_xlabel(), fontsize=12)
@@ -21830,9 +22387,17 @@ class SpectralPredictApp:
             self.root.update()
 
             y_values = self.y.values if self.y is not None else None
-            self.outlier_report = generate_outlier_report(
+            report = generate_outlier_report(
                 X_data, y_values, n_components, y_min, y_max
             )
+            # R007: the report is built from an array, so its Sample_Index is a row
+            # position. Keep each row's real sample label beside it, and remember
+            # which samples the report describes so a stale one can be refused.
+            summary = report['outlier_summary']
+            positions = summary['Sample_Index'].astype(int).to_numpy()
+            summary['Sample_Label'] = self.X.index[positions]
+            self._outlier_report_fingerprint = self._loaded_data_fingerprint()
+            self.outlier_report = report
 
             # Update visualizations
             self._plot_pca_scores()
@@ -22521,19 +23086,25 @@ class SpectralPredictApp:
         self._add_plot_export_button(self.y_dist_plot_frame, fig, "class_distribution")
 
     def _populate_outlier_table(self):
-        """Populate the outlier summary table."""
+        """Populate the outlier summary table.
+
+        Each row's tree item id maps to the sample's real label
+        (``self._outlier_row_labels``); the Sample column shows that label. Nothing
+        reads a sample back from the displayed text (R007).
+        """
         if self.outlier_report is None:
             return
 
         # Clear existing
         for item in self.outlier_tree.get_children():
             self.outlier_tree.delete(item)
+        self._outlier_row_labels = {}
 
         # Get summary
         summary = self.outlier_report['outlier_summary']
 
         # Add rows
-        for idx, row in summary.iterrows():
+        for _, row in summary.iterrows():
             # Format Y value - handle both numeric and categorical
             y_val = row['Y_Value']
             if isinstance(y_val, (int, float)) and not np.isnan(y_val):
@@ -22543,8 +23114,9 @@ class SpectralPredictApp:
             else:
                 y_display = str(y_val)
 
+            label = self._outlier_row_label(row)
             values = (
-                row['Sample_Index'] + 1,  # Display 1-indexed for user-friendliness
+                str(label),
                 y_display,  # Use formatted value
                 ">" if row['T2_Outlier'] else "",
                 ">" if row['Q_Outlier'] else "",
@@ -22561,12 +23133,32 @@ class SpectralPredictApp:
             else:
                 tag = 'normal'
 
-            self.outlier_tree.insert('', 'end', values=values, tags=(tag,))
+            iid = self._outlier_row_iid(row)
+            self.outlier_tree.insert('', 'end', iid=iid, values=values, tags=(tag,))
+            self._outlier_row_labels[iid] = label
 
         # Configure tags
         self.outlier_tree.tag_configure('high', background='#ffcccc')
         self.outlier_tree.tag_configure('moderate', background='#ffffcc')
         self.outlier_tree.tag_configure('normal', background='white')
+
+    @staticmethod
+    def _outlier_row_iid(row) -> str:
+        """Tree item id of one outlier-report row (its row position in the report)."""
+        return f"outlier_row_{int(row['Sample_Index'])}"
+
+    def _outlier_row_label(self, row):
+        """The real sample label of one outlier-report row."""
+        if 'Sample_Label' in row.index:
+            return row['Sample_Label']
+        return self.X.index[int(row['Sample_Index'])]
+
+    def _select_outlier_rows(self, rows: pd.DataFrame) -> None:
+        """Select the tree items of the given outlier-summary rows."""
+        for _, row in rows.iterrows():
+            iid = self._outlier_row_iid(row)
+            if self.outlier_tree.exists(iid):
+                self.outlier_tree.selection_add(iid)
 
     def _auto_select_flagged(self):
         """Auto-select all flagged samples."""
@@ -22580,14 +23172,7 @@ class SpectralPredictApp:
         if self.select_all_flagged.get():
             # Select all with at least 1 flag
             summary = self.outlier_report['outlier_summary']
-            flagged = summary[summary['Total_Flags'] > 0]
-
-            for idx, row in flagged.iterrows():
-                # Find the tree item corresponding to this row
-                for item in self.outlier_tree.get_children():
-                    if int(self.outlier_tree.item(item, 'values')[0]) == row['Sample_Index'] + 1:
-                        self.outlier_tree.selection_add(item)
-                        break
+            self._select_outlier_rows(summary[summary['Total_Flags'] > 0])
 
         self._update_outlier_selection_status()
 
@@ -22603,13 +23188,7 @@ class SpectralPredictApp:
         if self.select_high_conf.get():
             # Select samples with 3+ flags
             summary = self.outlier_report['outlier_summary']
-            high_conf = summary[summary['Total_Flags'] >= 3]
-
-            for idx, row in high_conf.iterrows():
-                for item in self.outlier_tree.get_children():
-                    if int(self.outlier_tree.item(item, 'values')[0]) == row['Sample_Index'] + 1:
-                        self.outlier_tree.selection_add(item)
-                        break
+            self._select_outlier_rows(summary[summary['Total_Flags'] >= 3])
 
         self._update_outlier_selection_status()
 
@@ -22625,22 +23204,7 @@ class SpectralPredictApp:
         if self.select_moderate_conf.get():
             # Select samples with 2 flags
             summary = self.outlier_report['outlier_summary']
-            moderate_conf = summary[summary['Total_Flags'] == 2]
-
-            for idx, row in moderate_conf.iterrows():
-                for item in self.outlier_tree.get_children():
-                    # Sample_Index is now DataFrame index label (could be int or string)
-                    tree_value = self.outlier_tree.item(item, 'values')[0]
-                    # Convert tree value to match type of Sample_Index
-                    try:
-                        # Try to convert to int if it looks like one
-                        tree_sample_idx = int(tree_value) if str(tree_value).lstrip('-').isdigit() else tree_value
-                    except (ValueError, AttributeError):
-                        tree_sample_idx = tree_value
-
-                    if tree_sample_idx == row['Sample_Index'] + 1:
-                        self.outlier_tree.selection_add(item)
-                        break
+            self._select_outlier_rows(summary[summary['Total_Flags'] == 2])
 
         self._update_outlier_selection_status()
 
@@ -22650,14 +23214,53 @@ class SpectralPredictApp:
         self.outlier_selection_status.config(text=f"{n_selected} samples selected")
 
     def _get_sample_index_from_tree_item(self, item):
-        """Extract sample index from outlier tree item, handling type conversion."""
-        values = self.outlier_tree.item(item, 'values')
-        sample_idx_str = values[0]
-        try:
-            sample_idx = int(sample_idx_str) if str(sample_idx_str).lstrip('-').isdigit() else sample_idx_str
-        except (ValueError, AttributeError):
-            sample_idx = sample_idx_str
-        return sample_idx
+        """The real sample label behind an outlier-table item, or None (R007)."""
+        return getattr(self, "_outlier_row_labels", {}).get(item)
+
+    def _outlier_report_is_current(self) -> bool:
+        """True if the outlier report describes the data loaded now.
+
+        A report made before the dataset was replaced or rows were removed names
+        other samples; one made before a baseline correction, wavelength change
+        or edit flags spectra that are no longer loaded. Acting on either would
+        exclude by stale evidence (R007).
+        """
+        report_fp = getattr(self, "_outlier_report_fingerprint", None)
+        if self.outlier_report is None or report_fp is None or self.X is None:
+            return False
+        if report_fp == self._loaded_data_fingerprint():
+            return True
+        messagebox.showwarning(
+            "Outlier report is out of date",
+            "The loaded data has changed since outlier detection ran, so its table "
+            "no longer matches the data. Run outlier detection again.",
+        )
+        return False
+
+    def _loaded_data_fingerprint(self) -> tuple:
+        """Samples, wavelengths, values and targets, for staleness checks.
+
+        Quality Check uses the targets too (Y-outlier flags), so a report made for
+        one target column is stale after switching to another.
+        """
+        values = pd.util.hash_pandas_object(self.X, index=True).to_numpy()
+        if self.y is None:
+            y_hash = None
+        else:
+            y_aligned = (
+                self.y if self.y.index.equals(self.X.index) else self.y.reindex(self.X.index)
+            )
+            y_hash = int(
+                pd.util.hash_pandas_object(y_aligned.astype(str), index=True)
+                .to_numpy()
+                .sum(dtype=np.uint64)
+            )
+        return (
+            tuple(self.X.index),
+            tuple(self.X.columns),
+            int(values.sum(dtype=np.uint64)),
+            y_hash,
+        )
 
     def _mark_selected_for_exclusion(self):
         """Add selected samples to unified exclusion set."""
@@ -22666,11 +23269,15 @@ class SpectralPredictApp:
         if not selected:
             messagebox.showwarning("No Selection", "Please select samples to exclude")
             return
+        if not self._outlier_report_is_current():
+            return
 
-        # Get selected indices using helper method
+        # Get selected sample labels using helper method
         added_count = 0
         for item in selected:
             sample_idx = self._get_sample_index_from_tree_item(item)
+            if sample_idx is None:
+                continue
             if sample_idx not in self.excluded_spectra:
                 self.excluded_spectra.add(sample_idx)
                 added_count += 1
@@ -22691,10 +23298,14 @@ class SpectralPredictApp:
         if not selected:
             messagebox.showwarning("No Selection", "Please select samples to unmark")
             return
+        if not self._outlier_report_is_current():
+            return
 
         removed_count = 0
         for item in selected:
             sample_idx = self._get_sample_index_from_tree_item(item)
+            if sample_idx is None:
+                continue
             if sample_idx in self.excluded_spectra:
                 self.excluded_spectra.discard(sample_idx)
                 removed_count += 1
@@ -24756,6 +25367,10 @@ class SpectralPredictApp:
             if getattr(self, "_pending_bayesian_models", None)
             else selected_models
         )
+        # R005: the GUI's copy of the holdout spectra matches the data this run
+        # uses (the worker builds its own from the frozen rows below), so the
+        # Results and Model Development tabs see the same validation set.
+        self._refresh_validation_snapshot()
 
         # Run in thread (daemon=True so the process can exit cleanly if the
         # user closes the main window while analysis is in flight)
@@ -25394,7 +26009,9 @@ class SpectralPredictApp:
                 task_type,
                 analysis_wl_min_value=analysis_wl_min,
                 analysis_wl_max_value=analysis_wl_max,
-                is_manual_retrain=True
+                is_manual_retrain=True,
+                # The holdout cached with this X_filtered, read once with it.
+                validation_data=cache.get("validation"),
             )
 
             # Restore original encoder
@@ -25447,7 +26064,7 @@ class SpectralPredictApp:
 
     def _train_ensembles(self, results_df, X_filtered, y_filtered, task_type,
                          analysis_wl_min_value=None, analysis_wl_max_value=None,
-                         is_manual_retrain=False):
+                         is_manual_retrain=False, validation_data=None):
         """
         Train ensemble models from selected models in results_df.
 
@@ -25638,14 +26255,22 @@ class SpectralPredictApp:
                     # Compute validation metrics if validation set is available
                     val_rmse = None
                     val_r2 = None
-                    if (self.validation_enabled.get() and
-                        self.validation_X is not None and
-                        self.validation_y is not None and
-                        len(self.validation_X) > 0):
+                    # The holdout frozen with the run that produced X_filtered,
+                    # not the live one (R005 review).
+                    run_X_val, run_y_val = (
+                        validation_data
+                        if validation_data is not None
+                        else getattr(self, "_last_run_validation", (None, None))
+                    )
+                    if run_X_val is not None and run_y_val is not None and len(run_X_val) > 0:
                         try:
+                            _check_validation_axis(
+                                getattr(X_filtered, "columns", run_X_val.columns),
+                                run_X_val.columns,
+                            )
                             # Get validation data as numpy arrays
-                            X_val = self.validation_X.values if hasattr(self.validation_X, 'values') else np.array(self.validation_X)
-                            y_val = self.validation_y.values if hasattr(self.validation_y, 'values') else np.array(self.validation_y)
+                            X_val = run_X_val.values
+                            y_val = run_y_val.values
 
                             # Filter NaN target values from validation set
                             val_nan_mask = pd.isna(y_val)
@@ -26693,6 +27318,405 @@ class SpectralPredictApp:
             )
         return "restore"
 
+    def _launch_validation_enabled(self) -> bool:
+        """Whether this launch holds out the validation set (as the worker will read it)."""
+        snapshot = getattr(self, "_pending_analysis_settings", None) or {}
+        if "validation_enabled" in snapshot:
+            return bool(snapshot["validation_enabled"])
+        try:
+            return bool(self.validation_enabled.get())
+        except Exception:
+            return False
+
+    def _launch_calibration_selection(self):
+        """``(excluded, active, holdout)`` labels as the worker will receive them."""
+        index = self.X.index if self.X is not None else None
+        excluded = [s for s in (self.excluded_spectra or ()) if index is None or s in index]
+        active = None if self.active_indices is None else list(self.active_indices)
+        holdout = (
+            [s for s in (self.validation_indices or ()) if index is None or s in index]
+            if self._launch_validation_enabled()
+            else []
+        )
+        return excluded, active, holdout
+
+    def _calibration_rows_for_record(self):
+        """Exclusions, Analysis Subset and holdout as the run record stores them.
+
+        None (logged) when run-state is unavailable or a sample label has no
+        deterministic encoding; a resume of that run then asks before continuing.
+        """
+        try:
+            from spectral_predict.run_state import UnsupportedLabelError, calibration_rows_record
+        except ImportError:
+            self._log_progress(
+                "[RUN] Run-state unavailable: this run's sample selection is not recorded."
+            )
+            return None
+        excluded, active, holdout = self._launch_calibration_selection()
+        try:
+            return calibration_rows_record(excluded, active, holdout)
+        except UnsupportedLabelError as exc:
+            self._log_progress(
+                f"[RUN] This run's sample selection can't be recorded ({exc}); a resume "
+                "will ask before continuing."
+            )
+            return None
+
+    def _launch_setting(self, name: str):
+        """A launch setting as the worker reads it: the click snapshot, else the control."""
+        snapshot = getattr(self, "_pending_analysis_settings", None) or {}
+        if name in snapshot:
+            return snapshot[name]
+        return getattr(self, name).get()
+
+    def _launch_prepared_calibration(self) -> _PreparedCalibration | None:
+        """The calibration and holdout rows a launch now would give the worker."""
+        if self.X is None:
+            return None
+        task_type = self.task_type.get()
+        if task_type == "auto":
+            task_type = _infer_task_type_from_y(self.y) or "regression"
+        excluded, active, holdout = self._launch_calibration_selection()
+        return _prepare_calibration(
+            self.X,
+            self.y,
+            active=active,
+            excluded=excluded,
+            holdout=holdout,
+            validation_on=self._launch_validation_enabled(),
+            task_type=task_type,
+            cv_strategy=self._launch_setting("cv_strategy"),
+            folds=int(self._launch_setting("folds")),
+        )
+
+    def _calibration_identity_now(self):
+        """Digest of the calibration and holdout rows a launch now would use (or None).
+
+        Built from ``_prepare_calibration``, the same function the worker uses
+        (subset, exclusions, holdout, target normalisation, rare classes), so it
+        covers exactly the rows the worker trains and scores on.
+        """
+        try:
+            from spectral_predict.run_state import UnsupportedLabelError, calibration_identity
+        except ImportError:
+            return None
+        try:
+            prepared = self._launch_prepared_calibration()
+        except Exception as exc:  # never block registering the run; a resume asks
+            self._log_progress(
+                f"[RUN] This run's calibration rows could not be prepared for its record "
+                f"({exc}); a resume will ask before continuing."
+            )
+            return None
+        if prepared is None:
+            return None
+        try:
+            return calibration_identity(prepared.X, prepared.y, prepared.X_val, prepared.y_val)
+        except UnsupportedLabelError as exc:
+            self._log_progress(
+                f"[RUN] This run's calibration rows can't be fingerprinted ({exc}); a "
+                "resume will ask before continuing."
+            )
+            return None
+
+    def _capture_calibration_selection(self) -> dict:
+        """The sample selection a resume reconciliation may change (see restore)."""
+        return {
+            "excluded_spectra": set(self.excluded_spectra or ()),
+            "validation_indices": set(self.validation_indices or ()),
+            "validation_X": self.validation_X,
+            "validation_y": self.validation_y,
+            "_pending_validation_indices": getattr(self, "_pending_validation_indices", None),
+            "_validation_status_text": self._validation_status_text(),
+        }
+
+    def _validation_status_text(self) -> str | None:
+        label = getattr(self, "validation_status_label", None)
+        if label is None:
+            return None
+        try:
+            return str(label.cget("text"))
+        except Exception:
+            return None
+
+    def _restore_calibration_selection(self, saved: dict) -> None:
+        """Undo a reconciliation that did not end in a resume (nothing was run)."""
+        changed = (
+            saved["excluded_spectra"] != set(self.excluded_spectra or ())
+            or saved["validation_indices"] != set(self.validation_indices or ())
+        )
+        status_text = saved.get("_validation_status_text")
+        for name, value in saved.items():
+            if name != "_validation_status_text":
+                setattr(self, name, value)
+        if status_text is not None and hasattr(self, "validation_status_label"):
+            try:
+                self.validation_status_label.config(text=status_text)
+            except Exception:
+                pass
+        if changed:
+            self._log_progress(
+                "[RUN] The excluded and validation samples are back as they were "
+                "before Run Analysis was clicked."
+            )
+            for refresh in ("_update_exclusion_status", "_update_tab3_exclusion_status"):
+                try:
+                    getattr(self, refresh)()
+                except Exception:
+                    pass
+
+    def _ask_keep_or_fresh(self, title: str, message: str) -> str | None:
+        """Yes/No dialog: "fresh" to delete the saved run, None to keep it (default)."""
+        try:
+            start_fresh = messagebox.askyesno(
+                title,
+                f"{message}\n\nNothing was run and nothing was deleted.\n\n"
+                "  • Yes — delete the interrupted run and start fresh.\n"
+                "  • No — keep the interrupted run and run nothing.",
+                icon="warning",
+                default="no",
+            )
+        except Exception:
+            start_fresh = False
+        if start_fresh:
+            return "fresh"
+        self._log_progress(f"[RUN] Resume kept — {title.lower()}.")
+        return None
+
+    def _ask_resume_unverified(self, meta, reason: str) -> str | None:
+        """Resume anyway ("unchecked") / start fresh ("fresh") / keep (None)."""
+        try:
+            answer = messagebox.askyesnocancel(
+                "Can't verify the calibration samples",
+                f"{reason} dasp can't check that resuming the interrupted run "
+                f"{meta.run_id} uses the same calibration samples.\n\n"
+                "Nothing was run and nothing was deleted.\n\n"
+                "  • Yes — resume anyway with the current data and selection.\n"
+                "  • No — delete the interrupted run and start fresh.\n"
+                "  • Cancel — keep the interrupted run and run nothing.",
+                icon="warning",
+                default="cancel",
+            )
+        except Exception:
+            answer = None
+        if answer is None:
+            self._log_progress("[RUN] Resume kept — calibration samples unverifiable.")
+            return None
+        if answer is False:
+            return "fresh"
+        self._log_progress("[RUN] Resuming without verifying the calibration samples.")
+        return "unverified"
+
+    def _reconcile_resume_calibration_rows(self, meta):
+        """Classify the run record and help the user reach the run's sample selection.
+
+        Called on the main thread once the data fingerprint matches.
+
+        - Legacy record (released code, no selection recorded): ``"unchecked"``
+          with a log line (the holdout restore still runs), unless the loaded
+          labels may come from a duplicate-ID rename, whose old scheme named rows
+          differently. That can't be told from dotted IDs that were always so, so
+          it asks: resume anyway / fresh / keep.
+        - A record this code can't read (unknown version, missing or malformed
+          selection or digest, unsupported labels): the same question; never
+          resume silently.
+        - Otherwise every saved label must be loaded, the Analysis Subset must
+          match, and differing exclusions are offered for restore. Returns
+          ``"verify"``: the caller then compares ``calibration_identity``, which
+          decides.
+
+        Returns ``"verify"``, ``"unchecked"``, ``"unverified"`` (the user chose to
+        resume with the current selection), ``"fresh"`` (delete and start fresh)
+        or None (keep the record and run nothing).
+        """
+        from spectral_predict.run_state import (
+            LABEL_NORMALIZATION,
+            UnsupportedLabelError,
+            canonical_label,
+            valid_calibration_identity,
+            valid_calibration_rows,
+        )
+
+        rows = getattr(meta, "calibration_rows", None)
+        identity = getattr(meta, "calibration_identity", None)
+        normalization = getattr(meta, "label_normalization", None)
+        if rows is None and identity is None and normalization is None:
+            if self._labels_look_renamed():
+                return self._ask_resume_unverified(
+                    meta,
+                    "The interrupted run was saved before repeated sample IDs were "
+                    "renamed the current way, and this data has IDs like \"A\" and "
+                    "\"A.1\" that such a rename produces (or that were always so).",
+                )
+            self._log_progress(
+                "[RUN] The interrupted run's record predates sample-selection "
+                "tracking; its calibration samples can't be checked."
+            )
+            return "unchecked"
+        if normalization != LABEL_NORMALIZATION:
+            return self._ask_resume_unverified(
+                meta, "The interrupted run's record uses an unknown sample-ID format."
+            )
+        if not valid_calibration_rows(rows) or not valid_calibration_identity(identity):
+            return self._ask_resume_unverified(
+                meta, "The interrupted run's record doesn't say which samples it used."
+            )
+
+        index = self.X.index
+        try:
+            by_key = {canonical_label(label): label for label in index}
+        except UnsupportedLabelError:
+            return self._ask_resume_unverified(
+                meta, "The loaded data has sample IDs of a type that can't be compared."
+            )
+        if len(by_key) != len(index):
+            return self._ask_resume_unverified(meta, "The loaded data repeats sample IDs.")
+        saved_excl = set(rows["excluded"])
+        saved_active = rows["active"]
+        saved_keys = saved_excl | set(saved_active or ()) | set(rows["holdout"])
+        missing = [k for k in sorted(saved_keys) if k not in by_key]
+        if missing:
+            self._log_progress(
+                f"[RUN] Resume kept — {len(missing)} of the interrupted run's samples "
+                "are not in the loaded data."
+            )
+            try:
+                messagebox.showerror(
+                    "Can't restore the calibration samples",
+                    f"{len(missing)} sample(s) the interrupted run excluded, held out or "
+                    "used in its Analysis Subset are not in the loaded data (renamed or "
+                    "removed), so its calibration set can't be restored. Nothing was "
+                    "run and nothing was changed.",
+                )
+            except Exception:
+                pass
+            return None
+
+        all_keys = set(by_key)
+        saved_act = all_keys if saved_active is None else set(saved_active)
+        current_act = (
+            all_keys
+            if self.active_indices is None
+            else {canonical_label(s) for s in self.active_indices if s in index}
+        )
+        if saved_act != current_act:
+            return self._ask_keep_or_fresh(
+                "Analysis Subset differs from the interrupted run",
+                f"The interrupted run {meta.run_id} used {len(saved_act)} sample(s) of "
+                f"the Analysis Subset; the subset now has {len(current_act)}. Set the "
+                "Analysis Subset back and click Run Analysis to resume it.",
+            )
+
+        current_excl = {canonical_label(s) for s in (self.excluded_spectra or ()) if s in index}
+        if saved_excl == current_excl:
+            return "verify"
+        try:
+            answer = messagebox.askyesnocancel(
+                "Excluded samples differ from the interrupted run",
+                f"The interrupted run {meta.run_id} excluded {len(saved_excl)} "
+                f"sample(s); {len(current_excl)} are excluded now "
+                f"({len(saved_excl ^ current_excl)} differ). Reloading a file clears "
+                "its exclusions.\n\n"
+                "Nothing was run and nothing was deleted.\n\n"
+                "  • Yes — exclude the same samples as the run and resume.\n"
+                "  • No — delete the interrupted run and start fresh with the current "
+                "exclusions.\n"
+                "  • Cancel — change nothing and run nothing.",
+                icon="warning",
+                default="cancel",
+            )
+        except Exception:
+            answer = None
+        if answer is None:
+            self._log_progress("[RUN] Resume kept — the excluded samples differ.")
+            return None
+        if answer is False:
+            return "fresh"
+        self.excluded_spectra = {by_key[k] for k in saved_excl}
+        self._log_progress(
+            f"[RUN] Applying the interrupted run's {len(saved_excl)} excluded sample(s); "
+            "they stay only if the resume goes ahead."
+        )
+        try:
+            self._update_exclusion_status()
+            self._update_tab3_exclusion_status()
+        except Exception:
+            pass
+        return "verify"
+
+    def _verify_resume_calibration_identity(self, meta):
+        """The final check: the rows a launch now would use are the run's own.
+
+        Compares the ``calibration_identity`` digest (labels, order, wavelengths,
+        spectra and targets of the calibration and holdout rows) with the one
+        saved at the run's start. Returns ``"ok"``, ``"fresh"`` or None (keep).
+        """
+        saved = meta.calibration_identity
+        current = self._calibration_identity_now()
+        if current is not None and (
+            current["calibration"] == saved["calibration"]
+            and current["holdout"] == saved["holdout"]
+        ):
+            return "ok"
+        self._log_progress(
+            "[RUN] The calibration rows differ from the interrupted run's "
+            f"({saved.get('n_calibration')} calibration / {saved.get('n_holdout')} "
+            "holdout samples saved)."
+        )
+        return self._ask_keep_or_fresh(
+            "The data or sample selection differs from the interrupted run",
+            f"The calibration or validation samples this run would use are not exactly "
+            f"the ones the interrupted run {meta.run_id} used (sample IDs, their order, "
+            "spectra, targets or the samples selected differ), so its saved trials "
+            "don't describe this calibration set.",
+        )
+
+    def _reconcile_resume_selection(self, meta):
+        """Run the resume's sample-selection checks in order; ``"ok"`` to resume.
+
+        Exclusions (and subset) first, then the holdout, then, for records that
+        carry one, the calibration identity as the final authority. A record the
+        user chose to resume unverified keeps the current selection: its saved
+        holdout is never decoded. Returns ``"ok"``, ``"fresh"`` or None.
+        """
+        rows = self._reconcile_resume_calibration_rows(meta)
+        if rows in ("fresh", None):
+            return rows
+        if rows == "unverified":
+            return "ok"
+        split = self._reconcile_resume_validation_split(meta)
+        if split in ("fresh", None):
+            return split
+        if rows == "verify":
+            return self._verify_resume_calibration_identity(meta)
+        return "ok"
+
+    def _saved_holdout_labels(self, meta) -> list:
+        """The interrupted run's holdout as labels of the loaded data.
+
+        New records store type-tagged keys, which survive float and tuple IDs;
+        a key with no loaded sample maps to a placeholder that is never in the
+        data, so the caller's presence check refuses it. Older records fall back
+        to ``validation_indices``.
+        """
+        from spectral_predict.run_state import (
+            UnsupportedLabelError,
+            canonical_label,
+            valid_calibration_rows,
+        )
+
+        rows = getattr(meta, "calibration_rows", None)
+        if valid_calibration_rows(rows):
+            by_key = {}
+            if self.X is not None:
+                try:
+                    by_key = {canonical_label(label): label for label in self.X.index}
+                except UnsupportedLabelError:
+                    by_key = {}
+            return [by_key.get(k, _MissingSample(k)) for k in rows["holdout"]]
+        return list(meta.validation_indices or [])
+
     def _reconcile_resume_validation_split(self, meta):
         """Make the validation holdout match the interrupted run's before resuming.
 
@@ -26706,7 +27730,7 @@ class SpectralPredictApp:
         user chose to delete the run and start fresh), or None (don't run).
         """
         saved_settings = meta.gui_settings or {}
-        saved = list(meta.validation_indices or [])
+        saved = self._saved_holdout_labels(meta)
         if saved_settings.get("validation_enabled") is False:
             saved = []  # the run held nothing out, whatever indices it recorded
         saved_set = set(saved)
@@ -26992,6 +28016,7 @@ class SpectralPredictApp:
         self._pending_uses_bayesian_run_state = True
         try:
             from spectral_predict.run_state import (
+                LABEL_NORMALIZATION,
                 CorruptRunRecordError,
                 abandon_resume,
                 discard_incomplete_run,
@@ -27050,6 +28075,9 @@ class SpectralPredictApp:
                     ),
                     gui_settings=capture_gui_settings(self),
                     validation_indices=val_indices,
+                    calibration_rows=self._calibration_rows_for_record(),
+                    label_normalization=LABEL_NORMALIZATION,
+                    calibration_identity=self._calibration_identity_now(),
                 )
                 self._pending_bayesian_run_id = meta.run_id
                 self._log_progress(f"[RUN] Run id: {meta.run_id}")
@@ -27348,10 +28376,22 @@ class SpectralPredictApp:
         else:
             if matches:
                 if meta is not None:
-                    split = self._reconcile_resume_validation_split(meta)
-                    if split == "fresh":
+                    # The fingerprint covers the spectra and targets, not which of
+                    # them the run excluded; reloading the file clears exclusions.
+                    # Restores offered below are proposals: unless the resume goes
+                    # ahead, the selection goes back to what it was at the click.
+                    selection_before = self._capture_calibration_selection()
+                    outcome = None
+                    try:
+                        outcome = self._reconcile_resume_selection(meta)
+                    finally:
+                        # Exceptions included: an error part-way must not leave
+                        # the run's proposed exclusions or holdout applied.
+                        if outcome != "ok":
+                            self._restore_calibration_selection(selection_before)
+                    if outcome == "fresh":
                         return _delete_resumed_run_and_start_fresh(meta)
-                    if split is None:
+                    if outcome is None:
                         return False
                 self._pending_bayesian_run_id = meta.run_id if meta is not None else None
                 return True
@@ -27669,6 +28709,7 @@ class SpectralPredictApp:
             from spectral_predict.run_state import (
                 start_run as _start_run_state,
                 fingerprint_dataset,
+                LABEL_NORMALIZATION,
             )
             from spectral_predict.run_gui_settings import capture_gui_settings
 
@@ -27733,6 +28774,9 @@ class SpectralPredictApp:
                             ),
                             gui_settings=capture_gui_settings(self),
                             validation_indices=_val_indices,
+                            calibration_rows=self._calibration_rows_for_record(),
+                            label_normalization=LABEL_NORMALIZATION,
+                            calibration_identity=self._calibration_identity_now(),
                         )
                         analysis_run_id = meta.run_id
                         self._log_progress(f"[RUN] Run id: {meta.run_id}")
@@ -29409,7 +30453,9 @@ class SpectralPredictApp:
             self._log_progress(f"{'='*70}\n")
 
             # Run search
-            # Apply active group filter first
+            # Calibration rows: one definition (_prepare_calibration) shared with
+            # the crash-resume identity, so a resumed run is checked against
+            # exactly what this worker trains on.
             if analysis_rows is not None:
                 _active_rows, _excluded_rows, _validation_rows = analysis_rows
                 _validation_on = _setting("validation_enabled")
@@ -29418,38 +30464,46 @@ class SpectralPredictApp:
                 _excluded_rows = self.excluded_spectra
                 _validation_rows = self.validation_indices
                 _validation_on = self.validation_enabled.get()
+            _prepared = _prepare_calibration(
+                X_run,
+                y_run,
+                active=_active_rows,
+                excluded=_excluded_rows,
+                holdout=_validation_rows,
+                validation_on=bool(_validation_on),
+                task_type=task_type,
+                cv_strategy=_setting("cv_strategy"),
+                folds=_setting("folds"),
+            )
+            X_filtered, y_filtered = _prepared.X, _prepared.y
+
             if _active_rows is not None:
-                ag_mask = X_run.index.isin(_active_rows)
-                X_filtered = X_run[ag_mask]
-                y_filtered = y_run[ag_mask]
-                n_inactive = len(X_run) - len(X_filtered)
-                self.root.after(0, lambda n=n_inactive: self.progress_text.insert(tk.END,
-                    f"\n[i] Analysis Subset: {len(X_filtered)} samples ({n} filtered out)\n"))
+                _subset_msg = (
+                    f"\n[i] Analysis Subset: {len(X_run) - _prepared.n_inactive} samples "
+                    f"({_prepared.n_inactive} filtered out)\n"
+                )
+                self.root.after(0, lambda m=_subset_msg: self.progress_text.insert(tk.END, m))
                 self.root.after(0, lambda: self.progress_text.see(tk.END))
-            else:
-                X_filtered = X_run
-                y_filtered = y_run
 
-            # Filter out excluded spectra
             if _excluded_rows:
-                mask = ~X_filtered.index.isin(_excluded_rows)
-                X_filtered = X_filtered[mask]
-                y_filtered = y_filtered[mask]
-
                 # Update progress with exclusion info
                 self.root.after(0, lambda: self.progress_text.insert(tk.END,
                     f"\n[i] Excluding {len(_excluded_rows)} user-selected spectra from analysis...\n"))
                 self.root.after(0, lambda: self.progress_text.see(tk.END))
 
+            # R005: the validation spectra for THIS run come from the same data and
+            # rows as calibration (frozen at the click: current wavelengths, current
+            # spectra, minus exclusions), never from a snapshot frozen when the
+            # split was made. Every validation-metric call below uses these.
+            _val_X_df, _val_y_s = _prepared.X_val, _prepared.y_val
+            _has_validation = _val_X_df is not None and _val_y_s is not None
+            # Kept with this run's training data for the consumers that score
+            # between runs (manual ensemble retraining reuses the cached X_filtered).
+            self._last_run_validation = (_val_X_df, _val_y_s)
 
-            # Filter out validation set (if enabled)
             if _validation_on and _validation_rows:
-                # Remove validation samples from training data
-                X_filtered = X_filtered[~X_filtered.index.isin(_validation_rows)]
-                y_filtered = y_filtered[~y_filtered.index.isin(_validation_rows)]
-
-                n_val = len(_validation_rows)
-                n_cal = len(X_filtered)
+                n_val = len(_val_X_df) if _val_X_df is not None else 0
+                n_cal = _prepared.n_before_rare if _prepared.rare_dropped else len(X_filtered)
 
                 # Update progress with validation info
                 self.root.after(0, lambda: self.progress_text.insert(tk.END,
@@ -29466,67 +30520,37 @@ class SpectralPredictApp:
                 self._log_progress(f"   Calibration samples: {n_cal}")
                 self._log_progress(f"   Validation samples (held out): {n_val}\n")
 
-            # Auto-coerce mixed-type classification target to strings.
-            # Excel columns with mixed int+str cells produce object dtype with
-            # heterogeneous Python types, which breaks sklearn LabelEncoder's
-            # internal sort. For classification / one-class tasks a mixed column
-            # obviously isn't numeric, so casting to str is the intended read.
-            if (task_type in ('classification', 'one_class')
-                    and y_filtered is not None
-                    and hasattr(y_filtered, 'dtype')
-                    and y_filtered.dtype == object):
-                types_present = {type(v).__name__ for v in y_filtered.dropna().values}
-                if len(types_present) > 1:
-                    from collections import Counter
-                    _by_type = Counter(type(v).__name__ for v in y_filtered.dropna())
-                    self._log_progress(f"  [i] Target column has mixed Python types: {dict(_by_type)}")
+            # Mixed-type classification targets were cast to strings (Excel
+            # columns with mixed int+str cells break LabelEncoder's sort).
+            if _prepared.mixed_types:
+                self._log_progress(
+                    f"  [i] Target column has mixed Python types: {_prepared.mixed_types}"
+                )
+                if _prepared.collapsed_labels:
+                    self._log_progress(
+                        f"  [i] Normalized numeric-equivalent labels into canonical strings. "
+                        f"Collapsed labels: {_prepared.collapsed_labels}"
+                    )
 
-                    _before = set(y_filtered.dropna().astype(str).unique())
-                    y_filtered = _normalize_mixed_type_labels(y_filtered)
-                    _after = set(y_filtered.dropna().unique())
-                    if _after != _before:
-                        _collapsed = sorted(_before - _after)
-                        self._log_progress(
-                            f"  [i] Normalized numeric-equivalent labels into canonical strings. "
-                            f"Collapsed labels: {_collapsed}"
-                        )
-
-            # Auto-drop rows belonging to classes too rare for the configured CV.
-            # Stratified K-Fold requires min_class_samples >= n_folds, so any class
-            # with fewer samples than folds can't participate in a valid stratified
-            # split. We drop those rows entirely (more statistically defensible than
-            # reducing folds across all classes) and surface a popup listing exactly
-            # which classes were excluded so the user isn't blindsided by the model
-            # never seeing them at predict time.
-            if (task_type == 'classification'
-                    and y_filtered is not None
-                    and _setting("cv_strategy") in ('kfold', 'repeated_kfold')):
+            # Classes too rare for stratified K-fold were dropped: say which, so
+            # the user isn't blindsided by the model never seeing them.
+            if _prepared.rare_dropped:
                 _n_folds = _setting("folds")
-                _classes, _counts = np.unique(np.asarray(y_filtered), return_counts=True)
-                _rare_mask = _counts < _n_folds
-                if _rare_mask.any() and len(_classes) - int(_rare_mask.sum()) >= 2:
-                    _dropped = [(str(_classes[i]), int(_counts[i]))
-                                for i in np.where(_rare_mask)[0]]
-                    _keep_mask = ~y_filtered.isin([_classes[i] for i in np.where(_rare_mask)[0]])
-                    _n_before = len(y_filtered)
-                    X_filtered = X_filtered[_keep_mask]
-                    y_filtered = y_filtered[_keep_mask]
-                    _n_after = len(y_filtered)
-                    _lines = "\n".join(
-                        f"  • '{lbl}' — {cnt} sample(s)" for lbl, cnt in _dropped
-                    )
-                    _warn = (
-                        f"The following class(es) have fewer than {_n_folds} samples "
-                        f"and cannot participate in stratified {_n_folds}-fold CV:\n\n"
-                        f"{_lines}\n\n"
-                        f"Their rows have been DROPPED from this analysis "
-                        f"({_n_before - _n_after} sample(s) total). The resulting model "
-                        f"will NOT predict these classes.\n\n"
-                        f"To include them, add more samples or reduce the fold count."
-                    )
-                    self._log_progress(f"\n[!] Rare classes dropped:\n{_lines}\n")
-                    self.root.after(0, lambda m=_warn: messagebox.showwarning(
-                        "Rare Classes Dropped from Analysis", m))
+                _lines = "\n".join(
+                    f"  • '{lbl}' — {cnt} sample(s)" for lbl, cnt in _prepared.rare_dropped
+                )
+                _warn = (
+                    f"The following class(es) have fewer than {_n_folds} samples "
+                    f"and cannot participate in stratified {_n_folds}-fold CV:\n\n"
+                    f"{_lines}\n\n"
+                    f"Their rows have been DROPPED from this analysis "
+                    f"({_prepared.n_before_rare - len(y_filtered)} sample(s) total). The "
+                    f"resulting model will NOT predict these classes.\n\n"
+                    f"To include them, add more samples or reduce the fold count."
+                )
+                self._log_progress(f"\n[!] Rare classes dropped:\n{_lines}\n")
+                self.root.after(0, lambda m=_warn: messagebox.showwarning(
+                    "Rare Classes Dropped from Analysis", m))
 
             # Apply wavelength restriction for analysis (if enabled)
             # These will be passed to run_search() to filter variable selection only
@@ -29799,14 +30823,13 @@ class SpectralPredictApp:
                 # operation that can destabilise the main loop on Windows.
                 raise ValueError(error_msg)
 
-            # Ensure indices match
-            if not X_filtered.index.equals(y_filtered.index):
-                self._log_progress("[!] Warning: Realigning X and y indices to ensure consistency...")
-                # Realign by taking only common indices
-                common_idx = X_filtered.index.intersection(y_filtered.index)
-                X_filtered = X_filtered.loc[common_idx]
-                y_filtered = y_filtered.loc[common_idx]
-                self._log_progress(f"> Realigned to {len(common_idx)} common samples")
+            # X and y were aligned by label in _prepare_calibration, before the
+            # resume identity was computed; report it here.
+            if _prepared.n_realigned is not None:
+                self._log_progress(
+                    "[!] Warning: Realigning X and y indices to ensure consistency..."
+                )
+                self._log_progress(f"> Realigned to {_prepared.n_realigned} common samples")
 
             # Adjust max_n_components based on restricted wavelength count
             # PLS cannot use more components than min(n_features, n_samples)
@@ -29823,7 +30846,7 @@ class SpectralPredictApp:
 
             # Calculate excluded and validation counts for saving in results
             n_excluded = len(_excluded_rows) if _excluded_rows else 0
-            n_validation = len(_validation_rows) if _validation_on and _validation_rows else 0
+            n_validation = len(_val_X_df) if _val_X_df is not None else 0
             n_total_original = len(X_run)  # Total samples before filtering
 
             # Get imbalance handling parameters (if enabled)
@@ -30159,10 +31182,8 @@ class SpectralPredictApp:
                 # so val_* columns match the cal/CV metric set (7 metrics) and the
                 # top-N cap respects self.validation_top_n (default 700) — parity
                 # with the classification/regression path.
-                if (self.validation_enabled.get() and
+                if (_has_validation and
                         self.show_validation_metrics.get() and
-                        self.validation_X is not None and
-                        self.validation_y is not None and
                         results_df is not None and len(results_df) > 0):
                     self._log_progress("\n> Computing validation metrics for one-class results...")
                     try:
@@ -30170,12 +31191,8 @@ class SpectralPredictApp:
                             compute_validation_metrics_for_top_one_class_models,
                         )
 
-                        X_val_np = (self.validation_X.values
-                                    if hasattr(self.validation_X, 'values')
-                                    else np.asarray(self.validation_X))
-                        y_val_np = (self.validation_y.values
-                                    if hasattr(self.validation_y, 'values')
-                                    else np.asarray(self.validation_y))
+                        X_val_np = _val_X_df.values
+                        y_val_np = _val_y_s.values
                         X_train_np = (X_filtered.values
                                       if hasattr(X_filtered, 'values')
                                       else np.asarray(X_filtered))
@@ -30360,11 +31377,11 @@ class SpectralPredictApp:
                     # Holdout validation for multi-class: rebuild each top row's
                     # model on the calibration split and score the held-out
                     # samples' decision matrix. Mirrors the regression/classification
-                    # call sites — X_val/y_val come straight from self.validation_X/_y
+                    # call sites — X_val/y_val come from this run's validation snapshot
                     # (full-spectrum, same columns as X_filtered), and the SAME
                     # run-global baseline/smoothing/min_class_n settings thread
                     # through so the holdout preprocessing matches the ranked row.
-                    if self.validation_enabled.get() and self.validation_indices:
+                    if _has_validation:
                         try:
                             from spectral_predict.search import (
                                 compute_validation_metrics_for_top_models,
@@ -30380,12 +31397,8 @@ class SpectralPredictApp:
                             else:
                                 mc_wavelengths = np.arange(X_filtered.shape[1])
 
-                            X_val_mc = (self.validation_X.values
-                                        if hasattr(self.validation_X, 'values')
-                                        else np.asarray(self.validation_X))
-                            y_val_mc = (self.validation_y.values
-                                        if hasattr(self.validation_y, 'values')
-                                        else np.asarray(self.validation_y))
+                            X_val_mc = _val_X_df.values
+                            y_val_mc = _val_y_s.values
                             X_train_mc = (X_filtered.values
                                           if hasattr(X_filtered, 'values')
                                           else np.asarray(X_filtered))
@@ -30413,7 +31426,7 @@ class SpectralPredictApp:
                             self.results_df = results_df
                             self._log_progress(
                                 f"  Holdout validation: known-class val_* metrics "
-                                f"added for {len(self.validation_indices)} held-out "
+                                f"added for {len(_val_X_df)} held-out "
                                 f"samples."
                             )
                             self._log_progress(
@@ -30634,10 +31647,8 @@ class SpectralPredictApp:
                     results_df['Rank'] = results_df.index + 1
 
                     # === COMPUTE VALIDATION METRICS FOR UNIFIED BAYESIAN ===
-                    if (self.validation_enabled.get() and
+                    if (_has_validation and
                         self.show_validation_metrics.get() and
-                        self.validation_X is not None and
-                        self.validation_y is not None and
                         len(results_df) > 0):
 
                         self._log_progress("\n📊 Computing validation metrics for Bayesian Optimization results...")
@@ -30646,8 +31657,8 @@ class SpectralPredictApp:
                             from spectral_predict.search import compute_validation_metrics_for_top_models
 
                             # Prepare validation data as numpy arrays
-                            X_val_np = self.validation_X.values if hasattr(self.validation_X, 'values') else np.array(self.validation_X)
-                            y_val_np = self.validation_y.values if hasattr(self.validation_y, 'values') else np.array(self.validation_y)
+                            X_val_np = _val_X_df.values
+                            y_val_np = _val_y_s.values
 
                             # Filter NaN target values from training data for validation
                             train_nan_mask = pd.isna(y_np)
@@ -30883,10 +31894,8 @@ class SpectralPredictApp:
                 label_encoder = nsga_result.get('label_encoder')
 
                 # === COMPUTE VALIDATION METRICS FOR NSGA-II ===
-                if (self.validation_enabled.get() and
+                if (_has_validation and
                     self.show_validation_metrics.get() and
-                    self.validation_X is not None and
-                    self.validation_y is not None and
                     len(results_df) > 0):
 
                     self._log_progress("\n📊 Computing validation metrics for NSGA-II results...")
@@ -30895,8 +31904,8 @@ class SpectralPredictApp:
                         from spectral_predict.search import compute_validation_metrics_for_top_models
 
                         # Prepare validation data as numpy arrays
-                        X_val_np = self.validation_X.values if hasattr(self.validation_X, 'values') else np.array(self.validation_X)
-                        y_val_np = self.validation_y.values if hasattr(self.validation_y, 'values') else np.array(self.validation_y)
+                        X_val_np = _val_X_df.values
+                        y_val_np = _val_y_s.values
 
                         # Filter NaN target values from training data for validation
                         train_nan_mask = pd.isna(y_np)
@@ -31135,20 +32144,14 @@ class SpectralPredictApp:
                 # Search control (pause/resume/stop)
                 controller=my_controller,
                 # Validation metrics for results table
-                X_validation=self.validation_X.values if (
-                    self.validation_enabled.get() and
-                    self.show_validation_metrics.get() and
-                    self.validation_X is not None
+                X_validation=_val_X_df.values if (
+                    _has_validation and self.show_validation_metrics.get()
                 ) else None,
-                y_validation=self.validation_y.values if (
-                    self.validation_enabled.get() and
-                    self.show_validation_metrics.get() and
-                    self.validation_y is not None
+                y_validation=_val_y_s.values if (
+                    _has_validation and self.show_validation_metrics.get()
                 ) else None,
                 compute_validation=(
-                    self.validation_enabled.get() and
-                    self.show_validation_metrics.get() and
-                    self.validation_X is not None
+                    _has_validation and self.show_validation_metrics.get()
                 ),
                 validation_top_n=self.validation_top_n.get()
             )
@@ -31233,7 +32236,8 @@ class SpectralPredictApp:
                         task_type,
                         analysis_wl_min_value=analysis_wl_min_value,
                         analysis_wl_max_value=analysis_wl_max_value,
-                        is_manual_retrain=False
+                        is_manual_retrain=False,
+                        validation_data=(_val_X_df, _val_y_s),
                     )
 
                     if ensemble_results is not None:
@@ -31274,6 +32278,7 @@ class SpectralPredictApp:
                 'label_encoder': label_encoder,
                 'analysis_wl_min': analysis_wl_min_value,
                 'analysis_wl_max': analysis_wl_max_value,
+                'validation': (_val_X_df, _val_y_s),
                 'timestamp': datetime.now().isoformat()
             }
             self._log_progress(f"\n> Cached training data for ensemble retraining")
@@ -35207,13 +36212,47 @@ For detailed documentation, see the User Guide.
                     col_name = headers[i]
                     new_metadata[col_name].append(row[i])
 
-            # Update self.X
-            self.X = pd.DataFrame(new_X_data, index=new_indices, columns=wavelength_cols)
-            self.X_original = self.X.copy()
-
-            # Update self.y
+            X_new = pd.DataFrame(new_X_data, index=new_indices, columns=wavelength_cols)
             if target_idx is not None:
-                self.y = pd.Series(new_y_values, index=new_indices)
+                y_new = pd.Series(new_y_values, index=new_indices)
+            elif self.y is not None and len(self.y) == len(X_new):
+                y_new = self.y.set_axis(X_new.index)  # sheet rows are in X order
+            elif self.y is not None:
+                y_new = self.y.reindex(X_new.index)
+            else:
+                y_new = None
+
+            # Update metadata (ref or combined_metadata_df)
+            ref_new = self.ref
+            meta_new = getattr(self, "combined_metadata_df", None)
+            if new_metadata:
+                metadata_df = pd.DataFrame(new_metadata, index=new_indices)
+                if meta_new is not None:
+                    # Re-attach target column — `_get_available_target_columns` reads
+                    # `combined_metadata_df.columns` to populate the target dropdown.
+                    # The sheet-rebuild loop above excludes target-named headers from
+                    # `metadata_indices`, so without this re-attachment the target would
+                    # disappear from the dropdown after the first edit.
+                    meta_new = metadata_df
+                    if target_idx is not None and y_new is not None and target_col_name:
+                        meta_new[target_col_name] = y_new
+                else:
+                    ref_new = metadata_df
+
+            # Review of R004/R037: an edit is the same samples with new values or
+            # labels. Install it like any other update so exclusions and the
+            # holdout are pruned to the rows that remain, validation spectra are
+            # rebuilt and the Quality Check report is dropped. The edited, cut
+            # spectra become X_original, as before.
+            self._install_dataset(
+                X_new,
+                y_new,
+                ref_new,
+                meta_new,
+                mode="update",
+                filter_wavelengths=False,
+                replot=False,
+            )
 
             # Update sample sets
             if set_idx is not None:
@@ -35222,27 +36261,9 @@ For detailed documentation, see the User Guide.
                 self.sample_set_names = unique
                 self._update_set_combo()
 
-            # Update metadata (ref or combined_metadata_df)
-            if new_metadata:
-                metadata_df = pd.DataFrame(new_metadata, index=new_indices)
-                if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
-                    # Re-attach target column — `_get_available_target_columns` reads
-                    # `combined_metadata_df.columns` to populate the target dropdown.
-                    # The sheet-rebuild loop above excludes target-named headers from
-                    # `metadata_indices`, so without this re-attachment the target would
-                    # disappear from the dropdown after the first edit.
-                    self.combined_metadata_df = metadata_df
-                    if target_idx is not None and self.y is not None and target_col_name:
-                        self.combined_metadata_df[target_col_name] = self.y
-                else:
-                    self.ref = metadata_df
-
             # Mark as modified so Revert button is available
             self.data_viewer_modified = True
             self.revert_data_btn.config(state='normal')
-
-            # Recompute active group membership (metadata may have changed)
-            self._refresh_active_group_indices()
 
         except Exception as e:
             import traceback
@@ -35261,6 +36282,8 @@ For detailed documentation, see the User Guide.
             'ref': self.ref.copy() if self.ref is not None else None,
             'combined_metadata_df': self.combined_metadata_df.copy() if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None else None,
             'excluded_spectra': self.excluded_spectra.copy(),
+            'validation_indices': set(self.validation_indices or ()),
+            'validation_enabled': self.validation_enabled.get(),
             'sample_sets': self.sample_sets.copy() if self.sample_sets is not None else None,
             'sample_set_names': list(self.sample_set_names),
             'active_group_filter': self.active_group_filter.copy() if self.active_group_filter else None,
@@ -35282,6 +36305,12 @@ For detailed documentation, see the User Guide.
         if state['combined_metadata_df'] is not None:
             self.combined_metadata_df = state['combined_metadata_df'].copy()
         self.excluded_spectra = state['excluded_spectra'].copy()
+        if 'validation_indices' in state:
+            # Rows deleted in the viewer also left the holdout; Revert brings both back.
+            self.validation_indices = set(state['validation_indices'])
+            self.validation_enabled.set(state['validation_enabled'])
+        self._refresh_validation_snapshot()
+        self._invalidate_outlier_report()
         self.sample_sets = state['sample_sets'].copy() if state['sample_sets'] is not None else None
         self.sample_set_names = list(state['sample_set_names'])
         self.active_group_filter = state.get('active_group_filter')
@@ -35643,12 +36672,9 @@ For detailed documentation, see the User Guide.
         target_name = self.target_column.get() if self.target_column.get() else "Target"
         if col_name == target_name and self.y is not None:
             return self.y
-        if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
-            if col_name in self.combined_metadata_df.columns:
-                return self.combined_metadata_df[col_name]
-        if self.ref is not None and col_name in self.ref.columns:
-            return self.ref[col_name]
-        return None
+        # Merged by sample across combined metadata and ref, so a column that only
+        # one store has for some samples is still usable for the others.
+        return self._metadata_column(col_name)
 
     def _compute_active_group_matches(self, col: str, cond: str, val: str, val2: str) -> set:
         """Return set of sample indices matching the given condition."""
@@ -35751,11 +36777,12 @@ For detailed documentation, see the User Guide.
             messagebox.showwarning("No Data", "Please load data first.")
             return
 
+        # Every metadata store, as _get_column_series resolves them by sample: after
+        # an append, ref and combined metadata each describe some of the samples.
         columns = []
-        if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
-            columns = list(self.combined_metadata_df.columns)
-        elif self.ref is not None:
-            columns = list(self.ref.columns)
+        for _, store in self._metadata_stores():
+            if store is not None:
+                columns.extend(c for c in store.columns if c not in columns)
         if not columns:
             messagebox.showwarning(
                 "No Columns", "No metadata columns available for subset filtering."
@@ -40527,6 +41554,19 @@ F1 Score:  {f1:.4f}
                 print(f"DEBUG: Calibration: {n_cal} samples | Validation: {n_val} samples")
                 print(f"DEBUG: This matches the data split used in the main search (Results tab)")
 
+            # R005 review: score this refit on the holdout read from the same data
+            # as X_base_df (current spectra and wavelengths, minus exclusions),
+            # not on self.validation_X, which may predate an exclusion or edit.
+            # Built from this run's frozen inputs (R010), like the calibration rows.
+            refine_val_X, refine_val_y = (None, None)
+            if run_inputs['training']['validation_enabled'] and run_inputs['validation_indices']:
+                refine_val_X, refine_val_y = _validation_snapshot(
+                    run_inputs['X'] if run_inputs['X'] is not None else run_inputs['X_original'],
+                    run_inputs['y'],
+                    run_inputs['validation_indices'],
+                    run_inputs['excluded_spectra'],
+                )
+
             # Drop rows where y is NaN (safety net, matches search.py)
             nan_mask = y_series.isna()
             if nan_mask.any():
@@ -41573,15 +42613,14 @@ F1 Score:  {f1:.4f}
                 )
 
                 # Compute external validation metrics if enabled
-                if (run_inputs['training']['validation_enabled'] and
-                        run_inputs['validation_X'] is not None and
-                        run_inputs['validation_y'] is not None):
+                if refine_val_X is not None and refine_val_y is not None:
                     try:
                         from spectral_predict.contamination import one_class_metrics
 
+                        _check_validation_axis(X_base_df.columns, refine_val_X.columns)
                         # Preprocess validation data using same pipeline
-                        X_val_raw = run_inputs['validation_X'].values if hasattr(run_inputs['validation_X'], 'values') else np.array(run_inputs['validation_X'])
-                        y_val_raw = run_inputs['validation_y'].values if hasattr(run_inputs['validation_y'], 'values') else np.array(run_inputs['validation_y'])
+                        X_val_raw = refine_val_X.values
+                        y_val_raw = refine_val_y.values
 
                         # Apply preprocessing
                         if isinstance(prep_steps, list) and len(prep_steps) > 0:
@@ -42741,33 +43780,31 @@ Calibration Performance (n={len(y_array)}):
 
             # --- External validation metrics ---
             val_text = ""
-            if (run_inputs['training']['validation_enabled'] and
-                    run_inputs['validation_X'] is not None and
-                    run_inputs['validation_y'] is not None and
-                    len(run_inputs['validation_X']) > 0):
+            if refine_val_X is not None and refine_val_y is not None and len(refine_val_X) > 0:
                 try:
+                    _check_validation_axis(X_base_df.columns, refine_val_X.columns)
                     # Prepare validation X based on preprocessing path
                     if preprocess == 'ga_optimized' and run_ga_genes is not None:
                         # GA path: subset validation data by GA gene indices
-                        val_X_prepared = run_inputs['validation_X'].values[:, run_ga_genes]
+                        val_X_prepared = refine_val_X.values[:, run_ga_genes]
                     elif use_full_spectrum_preprocessing and prep_pipeline is not None:
                         # Full-spectrum path: preprocess then subset
-                        val_X_full = run_inputs['validation_X'].values
+                        val_X_full = refine_val_X.values
                         val_X_preprocessed = prep_pipeline.transform(val_X_full)
                         val_X_prepared = val_X_preprocessed[:, wavelength_indices]
                     elif use_full_spectrum_preprocessing and prep_pipeline is None:
                         # Full-spectrum path, raw preprocessing (no transform needed)
-                        val_X_full = run_inputs['validation_X'].values
+                        val_X_full = refine_val_X.values
                         if wavelength_indices is not None:
                             val_X_prepared = val_X_full[:, wavelength_indices]
                         else:
-                            val_X_prepared = run_inputs['validation_X'][selected_cols].values
+                            val_X_prepared = refine_val_X[selected_cols].values
                     else:
                         # Standard path: subset columns (pipeline handles preprocessing)
-                        val_X_prepared = run_inputs['validation_X'][selected_cols].values
+                        val_X_prepared = refine_val_X[selected_cols].values
 
                     # Prepare validation y
-                    val_y = run_inputs['validation_y'].values
+                    val_y = refine_val_y.values
 
                     # Filter NaN target values from validation set
                     val_nan_mask = pd.isna(val_y)
@@ -45033,12 +46070,23 @@ External Validation Performance (n={n_val}):
             if self.pred_data_path.get() == "(Using pre-selected validation set)":
                 self.pred_data_path.set("")
 
+    def _prediction_has_actuals(self) -> bool:
+        """True when the loaded prediction spectra came with their actual targets."""
+        return (
+            self.pred_data_source.get() == "validation"
+            and getattr(self, "prediction_actuals", None) is not None
+        )
+
     def _load_prediction_data(self):
         """Load spectral data for predictions."""
         source = self.pred_data_source.get()
+        # Actual targets travel with the spectra they belong to (R005 review):
+        # the live validation set changes with exclusions and wavelength edits.
+        self.prediction_actuals = None
 
         # Handle validation set separately
         if source == 'validation':
+            self._refresh_validation_snapshot()
             if self.validation_X is None or self.validation_y is None:
                 messagebox.showerror("No Validation Set",
                     "No validation set has been created yet.\n\n"
@@ -45047,6 +46095,7 @@ External Validation Performance (n={n_val}):
 
             try:
                 self.prediction_data = self.validation_X.copy()
+                self.prediction_actuals = self.validation_y.copy()
 
                 # Update status
                 n_samples = len(self.prediction_data)
@@ -45363,9 +46412,9 @@ External Validation Performance (n={n_val}):
                         print(f"Warning: Could not add metadata column '{col}': {str(e)}")
 
             # Add actual values column if using validation set
-            if self.pred_data_source.get() == 'validation' and self.validation_y is not None:
+            if self._prediction_has_actuals():
                 # Align actual values with prediction samples
-                actual_values = self.validation_y.loc[results['Sample']].values
+                actual_values = self.prediction_actuals.loc[results['Sample']].values
 
                 # For classification models, predictions are already decoded text labels
                 # (e.g., "Clean", "Contaminated"), so keep actual values as text too
@@ -46152,14 +47201,13 @@ External Validation Performance (n={n_val}):
         self.pred_stats_text.delete('1.0', 'end')
 
         # Check if we're using validation set (has actual y values)
-        is_validation = (self.pred_data_source.get() == 'validation' and
-                        self.validation_y is not None)
+        is_validation = self._prediction_has_actuals()
 
         if is_validation:
             stats_text = "🔬 VALIDATION SET RESULTS\n"
             stats_text += "=" * 60 + "\n"
             stats_text += f"Algorithm: {self.validation_algorithm.get()}\n"
-            stats_text += f"Validation Samples: {len(self.validation_y)}\n"
+            stats_text += f"Validation Samples: {len(self.prediction_actuals)}\n"
             stats_text += "=" * 60 + "\n\n"
         else:
             stats_text = "Prediction Statistics:\n"
@@ -46218,7 +47266,7 @@ External Validation Performance (n={n_val}):
                     if is_validation:
                         try:
                             # Get actual values aligned with predictions
-                            y_true = self.validation_y.loc[self.predictions_df['Sample']].values
+                            y_true = self.prediction_actuals.loc[self.predictions_df['Sample']].values
                             y_pred = values.values
 
                             # Coerce mixed-type labels to strings
@@ -46336,8 +47384,7 @@ External Validation Performance (n={n_val}):
             return
 
         # Only plot if using validation set
-        is_validation = (self.pred_data_source.get() == 'validation' and
-                        self.validation_y is not None)
+        is_validation = self._prediction_has_actuals()
 
         if not is_validation or self.predictions_df is None or self.predictions_df.empty:
             # Hide placeholder if it exists
@@ -46410,7 +47457,7 @@ External Validation Performance (n={n_val}):
 
         # Get actual values
         try:
-            y_true = self.validation_y.loc[self.predictions_df['Sample']].values
+            y_true = self.prediction_actuals.loc[self.predictions_df['Sample']].values
         except Exception as e:
             print(f"Error getting validation y values: {e}")
             return
@@ -46602,7 +47649,7 @@ External Validation Performance (n={n_val}):
 
         # Get actual values (text labels)
         try:
-            y_true = self.validation_y.loc[self.predictions_df['Sample']].values
+            y_true = self.prediction_actuals.loc[self.predictions_df['Sample']].values
         except Exception as e:
             print(f"Error getting validation y values: {e}")
             return
@@ -52053,43 +53100,43 @@ External Validation Performance (n={n_val}):
 
             # --- Build working data ---
             col_floats = [float(w) for w in wavelengths]
-            self.X = pd.DataFrame(
+            X_new = pd.DataFrame(
                 X_transferred,
                 index=pd.RangeIndex(len(specimen_ids)),
                 columns=col_floats
             )
-            self.X.index = list(specimen_ids) if hasattr(specimen_ids, '__iter__') else specimen_ids
-            self.X_original = self.X.copy()
+            X_new.index = list(specimen_ids) if hasattr(specimen_ids, '__iter__') else specimen_ids
 
             # Set Y
             if y_col is not None and metadata_df is not None:
-                y_series = metadata_df[y_col].copy()
-                y_series.index = self.X.index
-                self.y = y_series
+                y_new = metadata_df[y_col].copy()
+                y_new.index = X_new.index
             else:
-                self.y = None
+                y_new = None
 
             # Set metadata (remaining columns)
+            meta_new = None
             if metadata_df is not None:
                 meta_cols = [c for c in metadata_df.columns if c != y_col]
                 if meta_cols:
-                    self.combined_metadata_df = metadata_df[meta_cols].copy()
-                    self.combined_metadata_df.index = self.X.index
-                else:
-                    self.combined_metadata_df = None
-            else:
-                self.combined_metadata_df = None
+                    meta_new = metadata_df[meta_cols].copy()
+                    meta_new.index = X_new.index
 
-            self.ref = None  # Combined format uses combined_metadata_df
-
-            # Refresh analysis subset cache (dataset replaced)
-            self._refresh_active_group_indices()
-
-            # Reset validation set (stale after data replacement)
-            self.validation_X = None
-            self.validation_y = None
-            if hasattr(self, 'validation_indices'):
-                self.validation_indices = None
+            # One dataset-install path (R004/R037): clears the previous data's
+            # exclusions, validation split and Quality Check report. Combined
+            # format uses combined_metadata_df, so ref is None.
+            self._install_dataset(
+                X_new,
+                y_new,
+                None,
+                meta_new,
+                mode="replace",
+                filter_wavelengths=False,
+                exact_axis=True,
+                reset_wavelength_range=True,
+                replot=False,
+            )
+            self._reset_source_tracking("Calibration-transferred data")
 
             # --- Data type: what the transformed spectra carry (Mode B type after any
             # conversion); the value heuristic only if that is unknown ---
@@ -53726,7 +54773,9 @@ External Validation Performance (n={n_val}):
 
         try:
             if source == 'validation':
-                # Use validation set from Tab 4
+                # Use validation set from Tab 4, rebuilt from the current data so
+                # samples excluded since the split are left out (R005 review).
+                self._refresh_validation_snapshot()
                 if self.validation_X is None or self.validation_y is None:
                     messagebox.showerror("Error",
                         "No validation set has been created yet.\n\n"
