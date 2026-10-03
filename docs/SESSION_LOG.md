@@ -668,6 +668,121 @@ the same folds, as for PLS LV selection. Implemented on branch fix/booster-early
   control characters (a backspace ended up in a regex). Write code containing backslashes with the Write/Edit
   tools, not via heredoc.
 
+## 2026-10-02 - Booster early stopping replaced by ONE round count from the pooled CV curve (R028/R003/R022/R126)
+Branch `fix/booster-early-stopping`. `cv_utils._fit_with_early_stopping` (eval_set = the scored test fold) is deleted.
+New primitives in `cv_utils`: `cross_val_boosting_rounds` (fit each fold at max rounds, no eval_set; stage test
+predictions; pick one count from pooled RMSECV, or pooled accuracy with pooled log-loss as exact-tie breaker),
+`booster_staged_predict`, `select_n_rounds` (`early_stopping_rounds` = patience of the scan), `set_booster_rounds`.
+Gotchas worth knowing:
+- **Final review (Codex BLOCK / DeepSeek MERGE-WITH-FIXES on 5ec39e5):** (1) the grid final R->k refit fitted
+  XGBoost without the balanced class weights CV used (calibration F1 0.000 vs 0.625 on rebuild); it now passes
+  `compute_sample_weight('balanced', y)` and the weighted-grid test compares calibration metrics with the
+  validation rebuild. (2) #91 left integer labels {1,2,5} un-encoded in the grid, and XGBoost refuses them:
+  `_run_single_config` now fits codes (`classification_fit_labels(..., 'XGBoost')`) and decodes y_test/y_pred,
+  calibration predictions and probability class order. (3) With a TTR, `cross_validate_with_early_stopping`
+  train scores used the fold model's transformed-space predictions; `BoostingRoundsCV.fold_target_transformers`
+  now keeps each fold's transformer and `_predict_with_fold_model` inverse-transforms. (5) `_fit_fold_full_rounds`
+  applies the target transformer BEFORE in-fold samplers, as the final TransformedTargetRegressor does.
+  Still open (pre-existing, not changed): regression sample weighters (`imbalance` step with `sample_weight_`)
+  weight the CV folds, but neither the grid final refit nor the validation rebuild applies them.
+- **Merge of main 1ca2de3 (#92-#95):** #94's thread budget wraps the booster folds: the grid runs `_run_single_fold`
+  on `fold_pipe` (thread-capped copy of the sanitized pipe) with `y_fit` (XGBoost codes); the final refit keeps
+  `pipe`. Bayesian round selection uses the capped `cv_model`; the plan goes sequential whenever round selection or
+  per-fold balanced weights (`_cv_balanced_param`, which replaces #94's `_cv_fit_params`) force the manual loop.
+- **Exported helper sources are user-visible text.** The export copies cv_utils functions with
+  `inspect.getsource`, docstrings included: `_final_estimator`'s docstring named `YTransformRegressor`, so every
+  export "contained" a Y-transform (`test_y_transform_consumers::test_export_without_transform_is_unchanged`).
+  Keep export-only class names out of copied helpers' docstrings.
+- **Tab 7 XGBoost on {1,2,5} crashed** (also on main since #91: integer labels fitted as given, XGBoost refuses
+  them; the refit ends with no model). Tab 7 now label-encodes when `classification_fit_labels(y, model_name)`
+  says `xgb_codes`; the codes equal the grid's, and the existing encoder plumbing decodes CV predictions,
+  probability columns (sorted-label order) and the saved model's predictions. GUI test pins accuracy = grid row's.
+- **Merge of main 6f63216 (PR #90 export helpers, PR #91 label policy / pooled metrics):** study names put
+  `|labels=raw1` AFTER `|boost_rounds=`; the booster old-scoring notice matches the previous base both with and
+  without the `|labels=` segment (a post-#91, pre-fix LightGBM/CatBoost study on raw labels would otherwise
+  restart silently). #91's `label_policy_changed` notice goes through the same `_notes` loop as
+  `booster_scoring_changed`, so it carries `resume_declined` and the GUI keeps the run record. `search._fold_metrics`
+  (shared by plain folds and the pooled-round booster folds) now uses `scoring.classification_metrics` with
+  probabilities aligned to the FULL class list and returns `y_proba` for #91's pooled AUC/log-loss.
+- **Truncation identity holds** for XGBoost (`iteration_range`), LightGBM (`num_iteration`) and CatBoost (`ntree_end`),
+  bagging included: a refit with `n_estimators=k` predicts exactly what the max-round fold model predicts at round k
+  (diff 0.0 / 2e-16). So CV at the selected count = CV of the refit, and re-running the selection with max=k returns k
+  (idempotent). Tab 7 and exports therefore reproduce a row whose Params already carry k with no special casing.
+- **CatBoost `staged_predict` costs ~1-3 ms per round** (0.9 s for 300 rounds on 16 rows). `_catboost_staged_raw` uses
+  `calc_leaf_indexes` + `get_leaf_values` + cumsum (exact, ~1 ms total) and falls back to `staged_predict` if the last
+  round does not match `predict`/`predict_proba` (unusual losses / tree layouts).
+- **LightGBM may build fewer trees than `n_estimators`** (stops when no split helps); staged arrays are padded with the
+  last round, which is what a refit with more rounds would also do.
+- **Pure accuracy as the classification curve picks round 1** on plateaus (strict improvement keeps the earliest round),
+  giving nearly untrained boosters. Hence the pooled log-loss tie-break on exact accuracy ties.
+- **Stratified splits move when labels move**: a "change only the test-fold labels" test must replay fixed splits.
+- Bayesian study names gain `|boost_rounds=pooled_cv_curve_v1` only for booster studies with round selection on, so
+  old biased trials never resume beside corrected ones; every other study name (and the T51 pinned names) is unchanged.
+- Bayesian Params carry `model__n_estimators` (pipeline-prefixed), grid Params `n_estimators`/`iterations`.
+- Export copies the cv_utils primitives' source with `inspect.getsource`, so in-app and exported selection cannot drift;
+  the export runs a pre-pass `_choose_boosting_rounds` and then a plain CV loop at the selected count.
+- Example data (BoneCollagen, snv, 5-fold, 200 rounds, patience 40): LightGBM RMSEcv 3.900 -> 3.949 (k=93),
+  XGBoost 3.960 -> 4.062 (k=177). The bias is modest on real signal and large on noise (review repro: R2cv +0.02 vs -0.54).
+- **Review round 1 (Codex BLOCK, GLM merge-with-fixes) gotchas:**
+  - Balanced class weights computed from ALL of y and then sliced per fold (Bayesian and NSGA-II XGBoost
+    class_weight paths) also leak test labels into a fold's fit. CV now uses `balanced_sample_weight=True` /
+    `cross_val_predict_pooled(balanced_weight_param=...)`; all-of-y weights only for the full-data refit.
+  - Prefix selection is invalid for XGBoost gblinear (iteration_range ignored: flat curve), XGBoost/LightGBM DART
+    and CatBoost model_shrink_rate/posterior_sampling (later rounds rescale earlier trees).
+    `round_selection_unsupported_reason` -> fitted at the configured count, row records no selection.
+  - CatBoost with learning_rate=None picks its rate from the round count: `learning_rate_` of the first fold is pinned
+    for the other folds and the refit (`BoostingRoundsCV.pinned_params`, `apply_round_selection`); exact (diff 0.0).
+  - LightGBM `num_iterations` aliases override `n_estimators`; setting an alias to None crashes LightGBM, so
+    `set_booster_rounds` sets every present alias to the same count. Early-stopping aliases CAN be set to None.
+  - CatBoost Poisson/Tweedie: `predict` exponentiates, `staged_predict` defaults to raw; staging is accepted only when
+    its last round equals native predict (raw, exp(raw), or staged_predict 'Exponent').
+  - Repeated-CV vote ties: reported predictions use `Counter.most_common` (first-voted label wins ties); the selection
+    curve now reproduces that exactly (`first_vote` array) - test checks curve[k] == accuracy of reported preds at k.
+  - Changing a booster study's identity hid the old study from the env/legacy notice (it searched the new base only).
+    The previous-policy base is recomputed (`previous_policy_study_base` study attr) and reported like an env change.
+  - Tab 7's validation-curve diagnostic refits the model ~27 times on purpose; a fit-count test must exclude it.
+- **Review round 2 (Codex BLOCK; GLM MERGE) - redesign of the final booster model:**
+  - Pinning CatBoost's automatic learning rate from fold 1 leaked labels across folds when a resampler made fold
+    sizes label-dependent, and missed other round-dependent defaults (leaf_estimation_iterations changes with
+    iterations). Replaced by: every fold chooses its own defaults; the final model is the scored configuration
+    fitted on all data at the maximum R and TRUNCATED to k (`cv_utils.truncate_booster`). Truncation that pickles:
+    XGBoost `est._Booster = booster[:k]`; LightGBM `est._Booster = Booster(model_str=model_to_string(num_iteration=k))`;
+    CatBoost `shrink(ntree_end=k)` - CatBoost refuses set_params on a fitted model, so the count is written to
+    `_init_params`. All exact vs the R-fit's staged predictions at k (diff 0.0), also after pickling.
+  - Params carry the selected count k; rows add `n_estimators_fit` (R) and `round_selection_truncated`. Params stay
+    pure estimator params on purpose: Tab 7 and other consumers `set_params` every bare key, so flag keys there would
+    break them. Rebuilds use `cv_utils.round_truncation_from_row` (validation rebuild, Tab 7, export). Ensembles
+    (since round 3, faf0dba) wrap such boosters in `RoundTruncatedRegressor/Classifier`, so every ensemble fit and
+    refit is also "fit at R, truncate to k".
+  - A declined resume (old booster scoring, other environment/data) no longer completes the saved run when the
+    replacement finishes: `_resume_not_continued_run_id` keeps the record (PROJECT_STATUS §1 binding decision).
+  - NSGA-II XGBoost Params contained `'missing': nan` (not literal_eval-able), so the selected count was silently
+    dropped; NaN defaults are now omitted and `_with_selected_rounds` raises instead of ignoring.
+  - XGBoost supports dropout under gbtree (rate_drop / one_drop): prefix-unsafe like DART.
+  - The export's regression final-model template prints CCC with `_lins_ccc`, which only the CV section defines, so
+    a regression export without CV raises NameError (pre-existing, not fixed here).
+- **Review round 3 (Codex BLOCK; GLM merge-with-fixes) gotchas:**
+  - CatBoost `get_params` reports only the arguments that were set, so a row's Params omit automatic defaults.
+    Rebuilding from `get_model("CatBoost")` (or the export's DEFAULT_PARAMS) and then `set_params` silently injects
+    `learning_rate=0.1` etc. CatBoost rows are now built from their stored params alone
+    (`models.catboost_from_row_params`): validation rebuild, Tab 7, export.
+  - CatBoost drops None-valued keys when reconstructing, and `od_type=None` fails at fit: eval-only keys are now
+    REMOVED from `_init_params` rather than nulled, or a later sklearn clone raises KeyError.
+  - The export's final-model template computes calibration metrics right after `model.fit(...)`: truncation must be
+    spliced in immediately after that line, not appended after the section.
+  - `_resume_not_continued_run_id` must be scoped to one launch attempt (reset at launch and on every completion path).
+  - all_vars is written with %g (R031, other branch): tests that round-trip a row through the validation rebuild need
+    integer wavelengths, or columns are silently dropped.
+- **Round 4 (DeepSeek, final) + merge of main f1fbf79 (PR #89 ytransform-save):** #89 wraps the Tab 7 final model in
+  a TransformedTargetRegressor even when CV transformed each fold by hand, so the saved booster now trains on the
+  transformed target; truncation runs right after that fit (`truncate_booster` unwraps TTR `regressor_`). The
+  export's `YTransformRegressor` has no `transformer` attribute, so `_final_estimator` now unwraps any `regressor`
+  (and `booster_max_rounds` / `set_booster_rounds` / `uses_round_selection` resolve through it);
+  `cross_val_boosting_rounds` accepts a TTR and derives the matching target transformer. #89's leaky export
+  `_fit_fold` / `_fit_with(eval_set)` path was dropped in the merge; the export reads staged predictions through the
+  fold wrapper's `transformer_`.
+
+
 ## 2026-10-02 - GUI dataset state, round 7 follow-ups
 
 - The combined CSV/Excel readers decide "repeated IDs" with the same missing-aware check as

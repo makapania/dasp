@@ -165,3 +165,63 @@ def test_declined_event_outside_resume_is_only_logged(gui_app, run_state_tmp, im
         gui_app._progress_callback(event)
     assert not warn.called
     assert not any(m.startswith("[RUN] Resume:") for m in immediate_after)
+
+
+
+def test_declined_resume_keeps_saved_run_after_replacement_completes(
+    gui_app, run_state_tmp, immediate_after
+):
+    """Round 2 #1: when the backend declines a resumed run's saved trials (old booster
+    scoring, other environment, other data), the replacement finishing must not
+    complete the saved run: it stays offered until the user deletes it."""
+    rs = run_state_tmp
+    meta = _crashed_run(rs, "auto", gui_mode=None, with_store=True)
+    assert rs.resume_run(meta.run_id) is not None
+    with patch("tkinter.messagebox.showwarning"):
+        gui_app._progress_callback({
+            "message": "Previous Bayesian results ... old booster early stopping ...",
+            "booster_scoring_changed": True,
+            "resume_declined": True,
+        })
+
+    gui_app._complete_run_state_after_search(meta.run_id)
+
+    kept = rs.find_incomplete_run()
+    assert kept is not None and kept.run_id == meta.run_id
+    assert not rs.is_resuming()
+    assert any("saved run is kept" in m for m in immediate_after)
+
+
+def test_resumed_run_completion_still_releases_the_record(gui_app, run_state_tmp):
+    """Control: a resume whose trials were continued is completed as before."""
+    rs = run_state_tmp
+    meta = _crashed_run(rs, "auto", gui_mode=None, with_store=True)
+    assert rs.resume_run(meta.run_id) is not None
+    gui_app._complete_run_state_after_search(meta.run_id)
+    assert rs.find_incomplete_run() is None
+
+
+def test_check_failure_then_failed_attempt_then_successful_retry_releases_record(
+    gui_app, run_state_tmp, immediate_after
+):
+    """Round 3 #4: the "not continued" mark belongs to one launch attempt. A resume
+    check failure followed by a failed attempt must not stop a later successful retry
+    of the same run from completing and releasing the record."""
+    rs = run_state_tmp
+    meta = _crashed_run(rs, "auto", gui_mode=None, with_store=True)
+    assert rs.resume_run(meta.run_id) is not None
+    with patch("tkinter.messagebox.showwarning"):
+        gui_app._progress_callback({"message": "could not check", "resume_check_failed": True})
+    gui_app._complete_run_state_after_search(meta.run_id, n_model_errors=1)  # failed attempt
+    assert rs.find_incomplete_run() is not None  # paused, still resumable
+
+    assert rs.resume_run(meta.run_id) is not None  # retry: saved trials continued
+    gui_app._complete_run_state_after_search(meta.run_id)
+    assert rs.find_incomplete_run() is None
+
+
+def test_launch_resets_the_not_continued_mark(gui_app, run_state_tmp):
+    gui_app._resume_not_continued_run_id = "stale"
+    with patch.object(gui_app, "_uses_bayesian_run_state", return_value=False):
+        gui_app._confirm_resume_before_launch()
+    assert gui_app._resume_not_continued_run_id is None

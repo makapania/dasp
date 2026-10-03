@@ -132,9 +132,13 @@ def test_lightgbm_golden_standard(example_data):
     print(f"\n  LightGBM Golden: R2={best['R2']:.15f}, RMSE={best['RMSE']:.15f}")
     print(f"  LightGBM Model: {best['Model']}, Preprocess: {best['Preprocess']}")
 
-    # ---- GOLDEN VALUES (captured 2026-03-22 before optimization changes) ----
-    GOLDEN_R2 = 0.998707473227969
-    GOLDEN_RMSE = 0.245741414101907
+    # ---- GOLDEN VALUES (re-blessed 2026-10-02, fix/booster-early-stopping) ----
+    # R2/RMSE are calibration (full-data refit) metrics. The refit now uses the ONE
+    # boosting-round count chosen from the pooled CV curve instead of the full
+    # configured n_estimators (R028/R003), so the in-sample fit is less tight.
+    # Previous values (captured 2026-03-22): R2=0.998707473227969, RMSE=0.245741414101907.
+    GOLDEN_R2 = 0.969716502497707
+    GOLDEN_RMSE = 1.189492190357265
     np.testing.assert_allclose(best["R2"], GOLDEN_R2, rtol=1e-6,
         err_msg="LightGBM R² changed after optimization!")
     np.testing.assert_allclose(best["RMSE"], GOLDEN_RMSE, rtol=1e-6,

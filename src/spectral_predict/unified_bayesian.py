@@ -49,9 +49,16 @@ from sklearn.model_selection import cross_val_predict
 
 # Import early stopping CV utilities
 from spectral_predict.cv_utils import (
+    BOOSTING_ROUND_POLICY,
+    booster_max_rounds,
     build_cv_splitter,
+    cross_val_boosting_rounds,
     cross_val_predict_pooled,
-    cross_val_predict_with_early_stopping,
+    pool_boosting_predictions,
+    round_selection_unsupported_reason,
+    strip_eval_only_params,
+    truncate_booster,
+    uses_round_selection,
 )
 from sklearn.pipeline import Pipeline
 from sklearn.base import clone
@@ -148,6 +155,10 @@ DEFAULT_N_STARTUP_TRIALS = 20
 
 # study.user_attrs keys written only when extra axes are in effect (T-51).
 EXTRA_AXES_SPACE_ATTR = 'extra_axes_space_id'
+# Round-selection policy a booster study was scored under (see cv_utils).
+BOOSTING_ROUND_POLICY_ATTR = 'boosting_round_policy'
+# Base study name this configuration had under the previous booster scoring (R003).
+PREVIOUS_POLICY_STUDY_BASE_ATTR = 'previous_policy_study_base'
 EXTRA_AXES_BUNDLES_ATTR = 'extra_axes_bundles'
 # Last explicitly requested startup count (last writer wins). Not written when the caller
 # passes None, so it can lag behind a later default-startup resume; audit only.
@@ -1804,17 +1815,24 @@ def create_unified_objective(
 
             # Use the constructed pipeline as the model
             model = pipeline
+            # Boosters are never given an eval_set (with or without round
+            # selection): eval-only settings are removed for CV and final fit.
+            strip_eval_only_params(model)
 
             # 7. Compute metrics
             # Per-fold balanced sample_weight for sample_weight-only classifiers
             # (XGBoost-style). The CV helpers slice it per train_idx and recompute
             # post any in-fold resampler step. Mirrors c395317's GUI plumbing.
+            # CV folds get balanced weights computed from their own training y
+            # (balanced_* below): weights computed from all of y would make a
+            # fold's fit depend on its test labels. _balanced_sw (all of y) is
+            # used only for the full-data refit.
             _balanced_sw = None
             if use_sample_weight_for_classification:
                 from sklearn.utils.class_weight import compute_sample_weight
                 _balanced_sw = compute_sample_weight('balanced', y)
-            _cv_fit_params = (
-                {'model__sample_weight': _balanced_sw} if _balanced_sw is not None else None
+            _cv_balanced_param = (
+                'model__sample_weight' if use_sample_weight_for_classification else None
             )
 
             # Thread budget (parallel_policy). Trials are sequential, so the folds may
@@ -1833,7 +1851,9 @@ def create_unified_objective(
                 X_final.shape[1],
                 model_name=model_name,
             )
-            if _cv_plan.parallel and (use_early_stopping or _is_repeated_cv(cv) or _cv_fit_params):
+            if _cv_plan.parallel and (
+                use_early_stopping or _is_repeated_cv(cv) or _cv_balanced_param
+            ):
                 _cv_plan = parallel_policy.CVPlan(n_jobs=1, backend="sequential", model_threads=None)
             n_jobs_cv = _cv_plan.n_jobs
             cv_model = parallel_policy.limit_estimator_threads(model, _cv_plan.model_threads)
@@ -1868,23 +1888,38 @@ def create_unified_objective(
                 # compute savings; original parameter space preserved.
                 return _cached_value
 
+            # Boosters: ONE round count chosen from the pooled CV curve (no fold
+            # ever sees its own test y); the full-data refit below uses it.
+            # Configurations where prefix selection is invalid (DART, gblinear,
+            # CatBoost shrinkage) are fitted at their configured round count.
+            n_rounds_selected = None
+            _rounds = None
+            _select_rounds = use_early_stopping and uses_round_selection(
+                model, early_stopping_rounds,
+            )
+            if use_early_stopping and not _select_rounds:
+                trial.set_user_attr(
+                    'round_selection_skipped', round_selection_unsupported_reason(model),
+                )
             if task_type == 'regression':
                 # Compute pooled CV predictions once and derive both RMSE and R² from them.
                 # Averaging per-fold R² is mathematically incorrect (different SS_tot per fold),
                 # and averaging per-fold RMSE degenerates to MAE under LOO (1-sample test folds).
                 # This matches chemometrics convention (Unscrambler, PLS_Toolbox, SIMCA, IUPAC)
                 # and the method used in search.py for consistency with Model Development.
-                if use_early_stopping:
-                    y_pred_cv = cross_val_predict_with_early_stopping(
-                        cv_model, X_final, y, cv=cv,
-                        early_stopping_rounds=early_stopping_rounds,
-                        sample_weight=_balanced_sw,
+                if _select_rounds:
+                    _rounds = cross_val_boosting_rounds(
+                        cv_model, X_final, y, cv,
+                        patience=early_stopping_rounds,
+                        balanced_sample_weight=use_sample_weight_for_classification,
                     )
+                    n_rounds_selected = _rounds.n_rounds
+                    y_pred_cv = pool_boosting_predictions(_rounds, len(y))
                 else:
                     with _cv_plan.backend_context():
                         y_pred_cv = cross_val_predict_pooled(
                             cv_model, X_final, y, cv=cv, n_jobs=n_jobs_cv,
-                            fit_params=_cv_fit_params,
+                            balanced_weight_param=_cv_balanced_param,
                         )
                 rmse = float(np.sqrt(mean_squared_error(y, y_pred_cv)))
                 r2 = r2_score(y, y_pred_cv)
@@ -1944,34 +1979,37 @@ def create_unified_objective(
                 # matches how RMSE/R² are computed above and matches scikit-learn's
                 # cross_val_predict convention. (IUPAC's CV guidance is regression-specific.)
                 # This also saves a full CV pass per trial (was 2 passes: score + predict).
-                if use_early_stopping:
-                    y_pred_cv = cross_val_predict_with_early_stopping(
-                        cv_model, X_final, y, cv=cv,
-                        early_stopping_rounds=early_stopping_rounds,
-                        sample_weight=_balanced_sw,
+                _boost_proba = None
+                if _select_rounds:
+                    # One CV pass gives labels AND probabilities at the same
+                    # selected round count.
+                    _rounds = cross_val_boosting_rounds(
+                        cv_model, X_final, y, cv,
+                        patience=early_stopping_rounds,
+                        balanced_sample_weight=use_sample_weight_for_classification,
                     )
+                    n_rounds_selected = _rounds.n_rounds
+                    y_pred_cv = pool_boosting_predictions(
+                        _rounds, len(y), 'predict', y_dtype=np.asarray(y).dtype,
+                    )
+                    _boost_proba = pool_boosting_predictions(_rounds, len(y), 'predict_proba')
                 else:
                     with _cv_plan.backend_context():
                         y_pred_cv = cross_val_predict_pooled(
                             cv_model, X_final, y, cv=cv, n_jobs=n_jobs_cv,
-                            fit_params=_cv_fit_params,
+                            balanced_weight_param=_cv_balanced_param,
                         )
                 accuracy = float(accuracy_score(y, y_pred_cv))
 
                 # Compute ROC_AUC using cross_val_predict for probability estimates
                 try:
-                    if use_early_stopping:
-                        y_proba = cross_val_predict_with_early_stopping(
-                            cv_model, X_final, y, cv=cv,
-                            early_stopping_rounds=early_stopping_rounds,
-                            method='predict_proba',
-                            sample_weight=_balanced_sw,
-                        )
+                    if _select_rounds:
+                        y_proba = _boost_proba
                     else:
                         with _cv_plan.backend_context():
                             y_proba = cross_val_predict_pooled(
                                 cv_model, X_final, y, cv=cv, method='predict_proba',
-                                n_jobs=n_jobs_cv, fit_params=_cv_fit_params,
+                                n_jobs=n_jobs_cv, balanced_weight_param=_cv_balanced_param,
                             )
                 except Exception as e:
                     logger.debug(f"Bayesian CV predict_proba unavailable: {e}")
@@ -2064,6 +2102,13 @@ def create_unified_objective(
             if _balanced_sw is not None:
                 _final_fit_kwargs['model__sample_weight'] = _balanced_sw
             model.fit(X_final, y, **_final_fit_kwargs)
+            if _rounds is not None:
+                # The scored configuration fitted at its maximum round count, then
+                # truncated to the selected count: exactly what the CV curve was read
+                # from (round-dependent defaults included); Params report the count.
+                trial.set_user_attr('n_estimators_fit', int(booster_max_rounds(model)))
+                truncate_booster(model, n_rounds_selected)
+                trial.set_user_attr('n_estimators_selected', int(n_rounds_selected))
             captured_params = _capture_serializable_params(model)
             if captured_params:
                 trial.set_user_attr('model_params', str(captured_params))
@@ -2921,6 +2966,32 @@ def run_unified_bayesian(
     _space_id = canonical_space_identity(_resolved_extra_axes, search_space is not None)
     if _space_id is not None:
         config_components += f"|space={_space_id}"
+    # R003: booster trials used to be scored with the CV test fold as early-stopping
+    # eval_set. Only studies whose scores changed get the policy segment, so their
+    # old (biased) trials are never resumed alongside corrected ones, while every
+    # other study name (non-boosters, boosters without round selection) is unchanged.
+    _boost_policy = (
+        BOOSTING_ROUND_POLICY
+        if (
+            early_stopping_rounds is not None
+            and early_stopping_rounds > 0
+            and _supports_early_stopping(model_name)
+        )
+        else None
+    )
+    # Base name the same study had under the previous scoring (test-fold early
+    # stopping), so its saved trials can be reported as not reused (see below).
+    _prev_policy_base = None
+    _pre_boost_components = config_components
+    if _boost_policy is not None:
+        _prev_policy_base = (
+            f"unified_bayesian_{model_name}_"
+            f"{_hashlib.sha256(config_components.encode('utf-8')).hexdigest()[:8]}"
+        )
+        config_components += f"|boost_rounds={_boost_policy}"
+    # Every base name this configuration had under the previous booster scoring:
+    # before and after the label policy added its |labels= segment.
+    _prev_policy_bases = [_prev_policy_base] if _prev_policy_base is not None else []
     # Numeric labels that are not 0..K-1 are now fitted as given (PLS-DA scores
     # change), so those studies get their own name; every other study name is
     # unchanged. Keep this segment AFTER any |boost_rounds= segment.
@@ -2933,6 +3004,12 @@ def run_unified_bayesian(
             f"{_hashlib.sha256(config_components.encode('utf-8')).hexdigest()[:8]}"
         )
         config_components += f"|labels={LABEL_FIT_POLICY}"
+        if _boost_policy is not None:
+            _prev_label_components = _pre_boost_components + f"|labels={LABEL_FIT_POLICY}"
+            _prev_policy_bases.append(
+                f"unified_bayesian_{model_name}_"
+                f"{_hashlib.sha256(_prev_label_components.encode('utf-8')).hexdigest()[:8]}"
+            )
     config_hash = _hashlib.sha256(config_components.encode("utf-8")).hexdigest()[:8]
 
     # The config hash alone is NOT sufficient identity for a resumable study.
@@ -3086,8 +3163,27 @@ def run_unified_bayesian(
                 n for n in _existing
                 if n.startswith(f"{_study_base}_") and n != study_name
             )
+            # R003: the same configuration scored under the previous booster policy
+            # (each fold early-stopped on its own test fold). Never reused, never
+            # deleted; reported like an environment change.
+            _old_scoring = sorted(
+                n for n in _existing
+                if any(n == b or n.startswith(f"{b}_") for b in _prev_policy_bases)
+            )
             if study_name not in _existing:
                 _notes = []
+                if _old_scoring:
+                    _notes.append((
+                        f"Previous Bayesian results for {model_name} were scored with "
+                        f"the old booster early stopping, which stopped each CV fold on "
+                        f"its own test samples and so overstated the scores. Boosters "
+                        f"now use one round count chosen from the pooled CV curve, so "
+                        f"those cached scores will NOT be reused — starting a fresh "
+                        f"study. The previous results are preserved: "
+                        f"{', '.join(_old_scoring)}",
+                        "booster_scoring_changed",
+                        _old_scoring,
+                    ))
                 if _incompatible:
                     _notes.append((
                         f"Previous Bayesian results for {model_name} exist but were "
@@ -3234,6 +3330,13 @@ def run_unified_bayesian(
         # and carried through optuna.copy_study by the auto-migration path.
         (ENV_FINGERPRINT_ATTR, _environment),
     )
+    if _boost_policy is not None:
+        # Readable form of the boost_rounds study-name segment, and the base name the
+        # same configuration had under the previous (test-fold) booster scoring.
+        _hoist_pairs += (
+            (BOOSTING_ROUND_POLICY_ATTR, _boost_policy),
+            (PREVIOUS_POLICY_STUDY_BASE_ATTR, _prev_policy_base),
+        )
     if _space_id is not None:
         # T-51: readable form of the space segment, so a "no matching study" on resume
         # can be explained later. Never written for default runs.
@@ -3713,11 +3816,19 @@ def convert_study_to_dataframe(
             'Folds': cv_folds,
             'Optimization': 'Unified Bayesian',
             'Imbalance': imbalance_method if imbalance_method else '—',
+            # Effective value: None for a trial whose booster configuration made
+            # round selection invalid (it was fitted at its configured count).
             'early_stopping_rounds': (
-                _hoisted_es
+                None
+                if trial.user_attrs.get('round_selection_skipped')
+                else _hoisted_es
                 if _hoisted_es is not None
                 else trial.user_attrs.get('early_stopping_rounds', None)
             ),
+            'n_estimators_selected': trial.user_attrs.get('n_estimators_selected'),
+            # Final model fitted at n_estimators_fit rounds, truncated to the selected count.
+            'n_estimators_fit': trial.user_attrs.get('n_estimators_fit'),
+            'round_selection_truncated': trial.user_attrs.get('n_estimators_selected') is not None,
             'imbalance_method': imbalance_method,
             'imbalance_params': imbalance_params,
             # training_config mirrors search.py so model save/load can restore
@@ -3861,7 +3972,8 @@ def convert_study_to_dataframe(
         # Column order aligned with Grid Search: preprocessing cols early, top_vars/all_vars at end
         cols = ['Rank', 'Task', 'Model', 'Params', 'Preprocess', 'Deriv', 'Window',
                 'Poly', 'LVs', 'n_vars', 'full_vars', 'SubsetTag', 'Imbalance',
-                'early_stopping_rounds', 'trial_number', 'Folds', 'Optimization',
+                'early_stopping_rounds', 'n_estimators_selected', 'n_estimators_fit',
+                'round_selection_truncated', 'trial_number', 'Folds', 'Optimization',
                 'imbalance_method', 'imbalance_params', 'baseline_method', 'baseline_params']
         if task_type == 'one_class':
             cols.extend([
@@ -3910,7 +4022,8 @@ def convert_study_to_dataframe(
     # Preprocessing columns early, metrics in middle, top_vars/all_vars at end
     base_cols = ['Rank', 'Task', 'Model', 'Params', 'Preprocess', 'Deriv', 'Window',
                  'Poly', 'LVs', 'n_vars', 'full_vars', 'SubsetTag', 'Imbalance',
-                 'early_stopping_rounds']
+                 'early_stopping_rounds', 'n_estimators_selected', 'n_estimators_fit',
+                 'round_selection_truncated']
 
     # Performance metrics
     if task_type == 'regression':

@@ -1680,7 +1680,10 @@ TOOLTIP_CONTENT = {
         'full_vars': 'full_vars (Full Spectrum Variable Count)\n\nTotal number of wavelength variables available before any subset selection.\nCompare with n_vars to see how aggressive variable selection was.',
         'all_vars': 'all_vars (All Wavelengths Used)\n\nComma-separated list of every wavelength fed to the model after preprocessing and variable selection.\nUsed by Model Development to reconstruct the exact training spectra.',
         'top_vars': 'top_vars (Top-Importance Wavelengths)\n\nComma-separated list of the most important wavelengths (display only; does NOT change the fit).\nN/A for models that don\'t expose feature importances.',
-        'early_stopping_rounds': 'early_stopping_rounds (Boosted-Tree Early Stopping)\n\nXGBoost / LightGBM / CatBoost only. Number of consecutive rounds without validation improvement after which training stops.\nNone / blank for non-boosted models.',
+        'early_stopping_rounds': 'early_stopping_rounds (Boosting-Round Patience)\n\nXGBoost / LightGBM / CatBoost only. The number of boosting rounds is chosen once, from the pooled cross-validation curve (like the number of PLS latent variables): scanning from round 1, the scan stops after this many rounds without improvement in pooled RMSEcv (or accuracy) and keeps the best count. No fold is stopped on its own test samples.\nNone / blank for non-boosted models.',
+        'n_estimators_selected': 'n_estimators_selected (Selected Boosting Rounds)\n\nXGBoost / LightGBM / CatBoost only. The one round count chosen from the pooled CV curve. Every *cv metric on the row is reported at this count, and Params (n_estimators / iterations) carries it, so Model Development, saved models and exports refit the same model.\nBlank for non-boosted models or when round selection was off.',
+        'n_estimators_fit': 'n_estimators_fit (Boosting Rounds Fitted)\n\nXGBoost / LightGBM / CatBoost with round selection only. The final model is fitted at this (maximum) round count, the one every CV fold used, and then truncated to n_estimators_selected, so it is exactly the model the CV curve was read from.\nBlank otherwise.',
+        'round_selection_truncated': 'round_selection_truncated (Fitted, Then Truncated)\n\nTrue when the final booster was fitted at n_estimators_fit rounds and truncated to n_estimators_selected. Model Development, validation and exports rebuild it the same way.',
         'trial_number': 'trial_number (Bayesian / TPE Trial Index)\n\nOptuna trial index inside the unified-Bayesian study.\nLow numbers = early in the search; the best trials usually appear later as TPE narrows in.',
         'Folds': 'Folds (Cross-Validation Fold Count)\n\nNumber of cross-validation folds used to compute the *cv metrics on this row.\nFor LOO this reports the effective sample count.',
         'Optimization': 'Optimization (Search Method)\n\nWhich search engine produced this row — e.g., "Unified Bayesian", "Grid", "NSGA-II".',
@@ -2670,6 +2673,16 @@ def _launch_settings_snapshot(app):
         return capture_gui_settings(app)
     except Exception:
         return None
+
+
+def _round_truncation_metadata(refined_config, selected_model_config) -> dict:
+    """Booster fit-then-truncate metadata for an export: the Tab 7 refit's own values
+    when it ran a round selection, else the loaded results row's."""
+    keys = ('n_estimators_selected', 'n_estimators_fit', 'round_selection_truncated')
+    if refined_config and refined_config.get('round_selection_truncated'):
+        return {k: refined_config.get(k) for k in keys}
+    source = selected_model_config or {}
+    return {k: source.get(k) for k in keys}
 
 
 def _validation_snapshot(X, y, validation_rows, excluded_rows=()):
@@ -25725,12 +25738,22 @@ class SpectralPredictApp:
                     estimator_params.pop('max_n_components', None)
                     model = get_model(model_name, task_type=task_type)
 
-                    if estimator_params:
+                    if estimator_params and model_name == 'CatBoost':
+                        # CatBoost Params omit automatic defaults; build from them alone.
+                        from spectral_predict.models import catboost_from_row_params
+                        model = catboost_from_row_params(estimator_params, task_type)
+                    elif estimator_params:
                         try:
                             model.set_params(**estimator_params)
                         except Exception as e:
                             # Log but continue with base model
                             self._log_progress(f"    [WARN] Could not set params {estimator_params}: {e}")
+
+                    # Boosters from a round-selected row: every fit (full data and each
+                    # ensemble refit) is "fit at n_estimators_fit, truncate to the
+                    # selected count", exactly the row's model.
+                    from spectral_predict.cv_utils import round_truncated_from_row
+                    model = round_truncated_from_row(model, row, task_type)
 
                     steps.append(('model', model))
 
@@ -27942,6 +27965,8 @@ class SpectralPredictApp:
         self._pending_bayesian_models = None
         self._pending_bayesian_n_trials = None
         self._pending_analysis_settings = None
+        # "Saved trials not continued" is scoped to one launch attempt.
+        self._resume_not_continued_run_id = None
         if not self._uses_bayesian_run_state():
             return True
         # Round 12 (Codex): the Bayesian worker reads its settings only from this
@@ -28451,11 +28476,37 @@ class SpectralPredictApp:
         with ``analysis_run_id=None``) may omit it; it falls back to
         ``self.search_controller`` for them.
         """
+        # "Saved trials not continued" belongs to this launch attempt only: read it
+        # and clear it on every completion path (also reset at every launch).
+        not_continued = (
+            analysis_run_id is not None
+            and getattr(self, "_resume_not_continued_run_id", None) == analysis_run_id
+        )
+        self._resume_not_continued_run_id = None
         if analysis_run_id is None:
             return
         if controller is None:
             controller = getattr(self, "search_controller", None)
         stopped = controller is not None and controller.is_end_requested()
+        if not_continued and not (n_model_errors or stopped):
+            # The resume was accepted, but some saved trials could not be continued
+            # (the backend declined them), so this run's success is a replacement,
+            # not the saved run resumed to completion. Keep its record: it stays
+            # offered until the user deletes it. Only the in-process claim is
+            # released, exactly as for a stopped run.
+            self._log_progress(
+                "[RUN] Part of the resumed run could not continue its saved trials, so "
+                "the saved run is kept: it is offered again until you delete it."
+            )
+            try:
+                from spectral_predict.run_state import clear_resume_state, get_active_run_id
+                if get_active_run_id() == analysis_run_id:
+                    clear_resume_state()
+            except Exception as _cr_err:
+                self._log_progress(
+                    f"[RUN] Could not release the resumed run's in-memory claim: {_cr_err}"
+                )
+            return
         if n_model_errors or stopped:
             why = (
                 f"{n_model_errors} model search(es) failed"
@@ -32331,8 +32382,8 @@ class SpectralPredictApp:
     _RESUME_ISSUE_NOTICES = (
         ("resume_declined", (
             "[RUN] Resume: saved trials were NOT reused for this model; it starts over.",
-            "Resumed run: some saved trials could not be reused (different data "
-            "or software environment) — those models start over. See log.",
+            "Resumed run: some saved trials could not be reused (different data, "
+            "software environment or scoring method) — those models start over. See log.",
             "Saved trials not reused",
             "Part of the resumed run is starting over instead of continuing "
             "from its saved trials.",
@@ -32375,11 +32426,20 @@ class SpectralPredictApp:
         if spec is None:
             return
         try:
-            from spectral_predict.run_state import get_storage_url, is_resuming
+            from spectral_predict.run_state import (
+                get_active_run_id, get_storage_url, is_resuming,
+            )
         except ImportError:
             return
         if not is_resuming():
             return
+        if info.get('resume_declined') or info.get('resume_check_failed'):
+            # Saved trials were NOT continued (different data, environment or
+            # scoring method). The replacement study finishing must not complete
+            # the saved run: it stays offered until the user deletes it
+            # (PROJECT_STATUS §1 binding decision). See
+            # _complete_run_state_after_search.
+            self._resume_not_continued_run_id = get_active_run_id()
         log_prefix, status, title, lead = spec
         message = info.get('message', '')
         self._log_progress(f"{log_prefix} {message}")
@@ -41275,7 +41335,15 @@ F1 Score:  {f1:.4f}
             from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
             from sklearn.metrics import accuracy_score, roc_auc_score, precision_score, recall_score, f1_score
             from sklearn.base import clone
-            from spectral_predict.cv_utils import is_boosting_model, _fit_with_early_stopping
+            from spectral_predict.cv_utils import (
+                cross_val_boosting_rounds,
+                is_boosting_model,
+                round_selection_unsupported_reason,
+                round_truncation_from_row,
+                set_booster_rounds,
+                strip_eval_only_params,
+                truncate_booster,
+            )
 
             # Parse wavelength specification
             available_wl = run_inputs['X_original'].columns.astype(float).values
@@ -42086,7 +42154,14 @@ F1 Score:  {f1:.4f}
                                 continue
                             else:
                                 filtered_params[key] = val
-                        if filtered_params:
+                        if filtered_params and model_name == 'CatBoost':
+                            # CatBoost Params omit automatic defaults (learning rate,
+                            # leaf-estimation iterations); build from them alone so
+                            # get_model's explicit defaults do not replace those.
+                            from spectral_predict.models import catboost_from_row_params
+                            model = catboost_from_row_params(filtered_params, task_type)
+                            print(f"DEBUG: Built CatBoost from saved search parameters: {filtered_params}")
+                        elif filtered_params:
                             model.set_params(**filtered_params)
                             print(f"DEBUG: Applied saved search parameters: {filtered_params}")
                         else:
@@ -42312,11 +42387,21 @@ F1 Score:  {f1:.4f}
                 # Encode text labels ("Clean", "Contaminated", ...) and non-integer
                 # numeric labels ({0.1, 0.2}: sklearn reads them as continuous);
                 # integer-valued labels are fitted as given, as in every search
-                # (scoring.classification_fit_labels).
-                from spectral_predict.scoring import labels_are_integer_valued
+                # (scoring.classification_fit_labels). XGBoost only accepts 0..K-1, so
+                # its integer labels ({1, 2, 5}) are encoded too: the codes are the
+                # sorted labels' positions (the grid's "xgb_codes"), and the encoder
+                # decodes CV predictions, probability columns and the saved model's
+                # predictions back to the user's labels, as for text labels.
+                from spectral_predict.scoring import (
+                    classification_fit_labels,
+                    labels_are_integer_valued,
+                )
                 if (
                     not pd.api.types.is_numeric_dtype(y_series.dtype)
                     or not labels_are_integer_valued(y_series.to_numpy())
+                    or classification_fit_labels(
+                        y_series.to_numpy(), model_name=model_name
+                    ).policy == "xgb_codes"
                 ):
                     from sklearn.preprocessing import LabelEncoder
                     local_label_encoder = LabelEncoder()
@@ -42331,7 +42416,10 @@ F1 Score:  {f1:.4f}
                     print(f"\n{'='*70}")
                     print(f"CATEGORICAL LABEL ENCODING (Model Development)")
                     print(f"{'='*70}")
-                    print(f"Detected non-numeric classification labels.")
+                    print(
+                        "Detected text, non-integer, or (for XGBoost) non-0..K-1 "
+                        "classification labels."
+                    )
                     print(f"Encoding mapping:")
                     for label, code in sorted(label_mapping.items(), key=lambda x: x[1]):
                         print(f"  '{label}' -> {code}")
@@ -43135,6 +43223,10 @@ F1 Score:  {f1:.4f}
                 print(f"y classes ({len(unique_classes)}): {unique_classes.tolist()}")
             print(f"{'='*80}\n")
 
+            # Boosters are never given an eval_set (with or without round selection):
+            # remove eval-only settings before any wrapping, for CV and final fit.
+            strip_eval_only_params(pipe)
+
             # Y-Transform: wrap pipeline with TransformedTargetRegressor if requested
             # Read the widget ONCE: this value is frozen into refined_config below, so the
             # saved metadata describes the trained model, not the widget at save time.
@@ -43168,7 +43260,8 @@ F1 Score:  {f1:.4f}
 
                 _final = pipe.steps[-1][1]
                 _needs_es = (_es_rounds is not None and _es_rounds > 0 and
-                             is_boosting_model(_final))
+                             is_boosting_model(_final) and
+                             round_selection_unsupported_reason(_final) is None)
 
                 if _needs_es:
                     # Do NOT wrap with TTR — y-transform handled manually in CV loop
@@ -43219,8 +43312,49 @@ F1 Score:  {f1:.4f}
                 early_stopping_rounds > 0 and
                 is_boosting_model(final_model)
             )
+            # Boosters: choose ONE round count from the pooled CV curve (no fold sees
+            # its own test y). Each fold is fitted once, at the maximum round count;
+            # its CV predictions below are read at the selected count (no second fit).
+            # The final model is fitted at the same maximum and truncated to it.
+            # A results row records its maximum (n_estimators_fit), so an unmodified
+            # row is reproduced exactly: same folds, same curve, same count.
+            n_rounds_selected = None
+            n_rounds_max = None
+            _rounds = None
+            _rounds_skipped = None
             if use_early_stopping:
-                print(f"DEBUG: Early stopping enabled ({early_stopping_rounds} rounds) for {model_name}")
+                _rounds_skipped = round_selection_unsupported_reason(final_model)
+                if _rounds_skipped is not None:
+                    # DART / gblinear / CatBoost shrinkage: fitted at the configured count.
+                    print(f"DEBUG: boosting-round selection skipped: {_rounds_skipped}")
+                    use_early_stopping = False
+            if use_early_stopping:
+                _row_truncation = (
+                    round_truncation_from_row(run_inputs['row'])
+                    if run_inputs['row'] is not None
+                    and not run_inputs['refine_hyperparams_modified'] else None
+                )
+                if _row_truncation is not None:
+                    set_booster_rounds(pipe, _row_truncation[0])
+                _rounds_target_tf = None
+                if y_transform_active:
+                    from spectral_predict.y_transform import YTransformWrapper
+                    _rounds_target_tf = YTransformWrapper._get_transformer(y_transform)
+                _rounds = cross_val_boosting_rounds(
+                    pipe, X_raw, y_array, cv,
+                    patience=early_stopping_rounds,
+                    balanced_sample_weight=use_sample_weight_for_classification,
+                    target_transformer=_rounds_target_tf,
+                )
+                n_rounds_selected = _rounds.n_rounds
+                n_rounds_max = _rounds.max_rounds
+                # The final fit keeps the maximum round count; it is truncated to
+                # n_rounds_selected right after final_pipe.fit (see below).
+                print(
+                    f"DEBUG: {model_name} boosting rounds: {n_rounds_selected} of "
+                    f"{n_rounds_max}, chosen from the pooled CV curve "
+                    f"(patience {early_stopping_rounds})"
+                )
 
             for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X_raw, y_array)):
                 # Clone ENTIRE PIPELINE for this fold (not just model)
@@ -43233,74 +43367,14 @@ F1 Score:  {f1:.4f}
                 # Fit pipeline (preprocessing + model) and predict
                 try:
                     if use_early_stopping:
-                        X_train_transformed = X_train.copy()
-                        X_test_transformed = X_test.copy()
-                        y_train_fold = y_train
-
-                        if hasattr(pipe_fold, 'steps'):
-                            for step_name, step in pipe_fold.steps[:-1]:
-                                if hasattr(step, 'fit_resample'):
-                                    X_train_transformed, y_train_fold = step.fit_resample(
-                                        X_train_transformed, y_train_fold
-                                    )
-                                else:
-                                    step.fit(X_train_transformed, y_train_fold)
-                                    if hasattr(step, 'transform'):
-                                        X_train_transformed = step.transform(X_train_transformed)
-                                        X_test_transformed = step.transform(X_test_transformed)
-
-                            final_model_fold = pipe_fold.steps[-1][1]
-
-                            # Y-transform for early stopping: manually transform y
-                            _y_transformer = None
-                            if y_transform_active:
-                                from spectral_predict.y_transform import YTransformWrapper
-                                _y_transformer = YTransformWrapper._get_transformer(y_transform)
-                                y_train_fold = _y_transformer.fit_transform(
-                                    y_train_fold.reshape(-1, 1)).ravel()
-                                y_test_es = _y_transformer.transform(
-                                    y_test.reshape(-1, 1)).ravel()
-                            else:
-                                y_test_es = y_test
-
-                            # Per-fold balanced sample weights for sample_weight-only models
-                            # (XGBoost class_weight path — mirrors search.py:4068, 4088).
-                            # Computed AFTER any in-fold resampler so weights match resampled y.
-                            _es_sample_weight = None
-                            if use_sample_weight_for_classification:
-                                from sklearn.utils.class_weight import compute_sample_weight
-                                _es_sample_weight = compute_sample_weight(
-                                    'balanced', y_train_fold
-                                )
-
-                            _fit_with_early_stopping(
-                                final_model_fold,
-                                X_train_transformed, y_train_fold,
-                                X_test_transformed, y_test_es,
-                                early_stopping_rounds,
-                                sample_weight=_es_sample_weight,
-                            )
-                            y_pred = final_model_fold.predict(X_test_transformed)
-
-                            # Inverse-transform predictions if y-transform active
-                            if _y_transformer is not None:
-                                y_pred = _y_transformer.inverse_transform(
-                                    y_pred.reshape(-1, 1)).ravel()
-
-                            if hasattr(final_model_fold, 'predict_proba'):
-                                y_proba = final_model_fold.predict_proba(X_test_transformed)
-                                all_y_proba.append(_aligned_fold_proba(y_proba, final_model_fold))
-                        else:
-                            _fit_with_early_stopping(
-                                pipe_fold,
-                                X_train, y_train,
-                                X_test, y_test,
-                                early_stopping_rounds
-                            )
-                            y_pred = pipe_fold.predict(X_test)
-                            if hasattr(pipe_fold, 'predict_proba'):
-                                y_proba = pipe_fold.predict_proba(X_test)
-                                all_y_proba.append(_aligned_fold_proba(y_proba, pipe_fold))
+                        # This fold's predictions at the selected round count, from
+                        # the one maximum-round fit made while choosing it (y-transform
+                        # already inverted; balanced weights from the training fold).
+                        if not np.array_equal(_rounds.test_indices[fold_idx], test_idx):
+                            raise RuntimeError("CV splits changed between passes")
+                        y_pred = _rounds.fold_predictions[fold_idx]
+                        if _rounds.fold_probas is not None:
+                            all_y_proba.append(_rounds.fold_probas[fold_idx])
                     else:
                         # Per-fold balanced sample weights threaded via the 'model'
                         # step name (sklearn fit_params convention) for sample_weight-only
@@ -43412,6 +43486,19 @@ F1 Score:  {f1:.4f}
                 all_y_pred = list(_red_pred)
                 all_cv_indices = list(_samples)
                 all_y_proba = [np.vstack(_red_proba)] if _pr is not None else []
+
+            if n_rounds_selected is not None:
+                _rounds_line = (
+                    f"  Boosting rounds: {n_rounds_selected} of {n_rounds_max} (one count for "
+                    f"all folds, chosen from the pooled CV curve; patience "
+                    f"{early_stopping_rounds})\n"
+                )
+            elif _rounds_skipped is not None:
+                _rounds_line = (
+                    f"  Boosting rounds: configured count, not selected ({_rounds_skipped})\n"
+                )
+            else:
+                _rounds_line = ""
 
             # Compute mean and std across folds
             results = {}
@@ -43580,7 +43667,7 @@ Configuration:
   Features: {len(selected_wl)}
   Samples: {X_raw.shape[0]}
   CV Strategy: {cv_strategy}{f' ({n_folds} folds)' if cv_strategy != 'loo' else ''}{f' x {cv_n_repeats} repeats' if cv_strategy == 'repeated_kfold' else ''}
-  n_components: {n_components}
+{_rounds_line}  n_components: {n_components}
 
 DEBUG INFO:
   Loaded LVs from config: {run_inputs['row'].get('LVs', 'N/A') if run_inputs['row'] else 'N/A'}
@@ -43633,7 +43720,7 @@ Configuration:
   Features: {len(selected_wl)}
   Samples: {X_raw.shape[0]}
   CV Strategy: {cv_strategy}{f' ({n_folds} folds)' if cv_strategy != 'loo' else ''}{f' x {cv_n_repeats} repeats' if cv_strategy == 'repeated_kfold' else ''}
-"""
+{_rounds_line}"""
 
             # Fit final pipeline on full dataset for model persistence
             # Clone the pipeline and fit on all data
@@ -43665,6 +43752,11 @@ Configuration:
                     'balanced', y_array
                 )
             final_pipe.fit(X_raw, y_array, **_final_fit_kwargs)
+            # ── BOOSTING ROUND COUNT FOR THE FINAL MODEL: set here, once. ──
+            # Fitted at the maximum round count, truncated to the CV-selected count
+            # (works through a Pipeline and a TransformedTargetRegressor).
+            if n_rounds_selected is not None:
+                truncate_booster(final_pipe, n_rounds_selected)
 
             # --- Calibration metrics (predict on training data) ---
             cal_text = ""
@@ -43902,6 +43994,12 @@ External Validation Performance (n={n_val}):
                 'y_transform': (
                     normalize_y_transform_method(y_transform) if y_transform_active else 'none'
                 ),
+                # Boosters: this refit's own round selection (fitted at
+                # n_estimators_fit, truncated to n_estimators_selected). Saves and
+                # exports prefer these over the loaded row's values.
+                'n_estimators_selected': n_rounds_selected,
+                'n_estimators_fit': n_rounds_max if n_rounds_selected is not None else None,
+                'round_selection_truncated': n_rounds_selected is not None,
             }
             # Add coupled optimization params if present
             if run_inputs['row'] is not None and 'optuna_params' in run_inputs['row']:
@@ -44487,6 +44585,9 @@ External Validation Performance (n={n_val}):
                 row.get('early_stopping_rounds')
                 if row else None
             ),
+            # Boosters: fitted at n_estimators_fit, truncated to the selected count
+            # (this refit's own selection, else the row's); the export reproduces it.
+            **_round_truncation_metadata(cfg, row),
             # T-36: autoscale flag — exported scripts must apply UV scaling after
             # SNV/derivatives if it was active during training, else they will not
             # reproduce the saved model.

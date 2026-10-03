@@ -101,11 +101,12 @@ def test_xgboost_threads_sample_weight_via_fit_kwargs():
     assert "from sklearn.utils.class_weight import compute_sample_weight" in script
     assert "fit_kwargs['sample_weight'] = compute_sample_weight('balanced'" in script
     assert "model.fit(X_train_full, y_train_full, **fit_kwargs)" in script
-    # CV folds fit through the _fit_fold helper (early-stopping parity, #52).
-    assert (
-        "_fit_fold(fold_model, X_train_fold, y_train_fold, X_test, y_test, "
-        "EARLY_STOPPING_ROUNDS, **fit_kwargs)"
-    ) in script
+    # CV folds (and the boosting-round pre-pass) take the weights from
+    # _prepare_train_fold; no fold is fitted with an eval_set (R028).
+    assert "    return X_train_fold, y_train_fold, fit_kwargs" in script
+    assert "fold_model.fit(X_train_fold, y_train_fold, **_fold_fit_kw)" in script
+    assert "prepare_fold=_prepare_train_fold" in script
+    assert "eval_set=" not in script
 
 
 def test_mlp_does_not_get_class_weight_injected():
@@ -158,8 +159,8 @@ def test_non_xgboost_classification_does_not_emit_fit_kwargs_plumbing():
         ("SVC", {"C": 1.0}),
     ]:
         script = _generate(name, params=params)
-        # Word-boundary match: the shared _fit_fold helper's own **_fit_kwargs
-        # parameter is not the class-weight plumbing this test guards against.
+        # Word-boundary match: the shared round-selection helper's own _fit_kw
+        # name is not the class-weight plumbing this test guards against.
         assert not re.search(r"(?<!\w)fit_kwargs", script), (
             f"{name} should not emit fit_kwargs plumbing in class_weight mode "
             f"— it's pure noise when sample_weight isn't being threaded."

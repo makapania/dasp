@@ -60,6 +60,14 @@ from sklearn.base import clone
 # Set up cross-validation
 cv = {cv_constructor}
 
+# Boosters: choose ONE round count from the pooled CV curve before the loop (see
+# BOOSTING ROUNDS above). Each fold is fitted once there; the loop reports those
+# fits' predictions at the chosen count, and the count is set on `model` for the
+# final fit. (None, None) for other models: the loop fits every fold itself.
+N_BOOST_ROUNDS, BOOST_FOLD_PREDS = _choose_boosting_rounds(
+    model, X_final, y, cv, EARLY_STOPPING_ROUNDS, 'regression'
+)
+
 # Store per-fold metrics and per-sample prediction lists.
 # Collecting per-sample (not flat concatenation) matters under Repeated K-Fold,
 # where each sample appears in multiple test folds — the backend averages those
@@ -76,11 +84,14 @@ for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X_final)):
     X_train, X_test = X_final[train_idx], X_final[test_idx]
     y_train, y_test = y[train_idx], y[test_idx]
 
-    fold_model = clone(model)
-    # _fit_fold mirrors in-app cv_utils._fit_with_early_stopping: boosters
-    # early-stop on the held-out fold; non-boosters fall through to .fit().
-    _fit_fold(fold_model, X_train, y_train, X_test, y_test, EARLY_STOPPING_ROUNDS)
-    y_pred_fold = fold_model.predict(X_test).ravel()
+    if BOOST_FOLD_PREDS is not None:
+        # Booster: this fold's predictions at the selected round count, from the
+        # single fit made while choosing it.
+        y_pred_fold = np.asarray(BOOST_FOLD_PREDS[fold_idx]).ravel()
+    else:
+        fold_model = clone(model)
+        fold_model.fit(X_train, y_train)
+        y_pred_fold = fold_model.predict(X_test).ravel()
 
     for local_i, sample_idx in enumerate(test_idx):
         preds_per_sample.setdefault(int(sample_idx), []).append(float(y_pred_fold[local_i]))
@@ -121,6 +132,14 @@ from collections import Counter
 # Set up cross-validation
 cv = {cv_constructor}
 
+# Boosters: choose ONE round count from the pooled CV curve before the loop (see
+# BOOSTING ROUNDS above). Each fold is fitted once there; the loop reports those
+# fits' predictions at the chosen count, and the count is set on `model` for the
+# final fit. (None, None) for other models: the loop fits every fold itself.
+N_BOOST_ROUNDS, BOOST_FOLD_PREDS = _choose_boosting_rounds(
+    model, X_final, y, cv, EARLY_STOPPING_ROUNDS, 'classification'
+)
+
 # Use binary for 2 classes, macro otherwise (matches results tab)
 unique_classes = np.unique(y)
 average_method = 'binary' if len(unique_classes) == 2 else 'macro'
@@ -131,19 +150,22 @@ fold_f1 = []
 preds_per_sample = {{}}
 truth_per_sample = {{}}
 
-for train_idx, test_idx in cv.split(X_final, y):
+for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X_final, y)):
     X_train, X_test = X_final[train_idx], X_final[test_idx]
     y_train, y_test = y[train_idx], y[test_idx]
 
-    fold_model = clone(model)
-    # _fit_fold mirrors in-app cv_utils._fit_with_early_stopping: boosters
-    # early-stop on the held-out fold; non-boosters fall through to .fit().
-    _fit_fold(fold_model, X_train, y_train, X_test, y_test, EARLY_STOPPING_ROUNDS)
-    # .ravel() flattens (n, 1) outputs (e.g., CatBoost multiclass) to (n,) so
-    # downstream Counter majority-vote and accuracy/f1 metrics receive 1-D
-    # arrays unconditionally. No-op for the (n,) shape that sklearn classifiers
-    # return.
-    y_pred_fold = fold_model.predict(X_test).ravel()
+    if BOOST_FOLD_PREDS is not None:
+        # Booster: this fold's predictions at the selected round count, from the
+        # single fit made while choosing it.
+        y_pred_fold = np.asarray(BOOST_FOLD_PREDS[fold_idx]).ravel()
+    else:
+        fold_model = clone(model)
+        fold_model.fit(X_train, y_train)
+        # .ravel() flattens (n, 1) outputs (e.g., CatBoost multiclass) to (n,) so
+        # downstream Counter majority-vote and accuracy/f1 metrics receive 1-D
+        # arrays unconditionally. No-op for the (n,) shape that sklearn classifiers
+        # return.
+        y_pred_fold = fold_model.predict(X_test).ravel()
 
     for local_i, sample_idx in enumerate(test_idx):
         # np.ravel + [0] yields a hashable scalar so Counter (used below for

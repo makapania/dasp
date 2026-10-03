@@ -119,19 +119,31 @@ class CodeGenerator:
         self.cv_folds = model_config.get('cv_folds', _training_config.get('folds', 5))
         self.cv_strategy = model_config.get('cv_strategy', _training_config.get('cv_strategy', 'kfold'))
         self.cv_n_repeats = model_config.get('cv_n_repeats', _training_config.get('cv_n_repeats', 5))
-        # Early stopping for boosters — must mirror cv_utils._fit_with_early_stopping
-        # so exported CV reproduces in-app CV. Lives on `model_config` (set by the
-        # GUI export path from the result row) and falls back to training_config
-        # for completeness. None or <=0 means no early stopping.
+        # Booster round-selection patience — the exported CV chooses ONE round
+        # count from the pooled CV curve exactly as cv_utils.cross_val_boosting_rounds
+        # does in-app. Lives on `model_config` (set by the GUI export path from the
+        # result row) and falls back to training_config for completeness. None or
+        # <=0 means the configured round count is used as is.
+        from .cv_utils import parse_bool_cell, parse_count_cell
+
         _es_raw = model_config.get(
             'early_stopping_rounds',
             _training_config.get('early_stopping_rounds', None),
         )
-        try:
-            _es_int = int(_es_raw) if _es_raw is not None else None
-        except (TypeError, ValueError):
-            _es_int = None
-        self.early_stopping_rounds = _es_int if (_es_int and _es_int > 0) else None
+        # Positive integer (int, integral float or digit string) or None; NaN, inf,
+        # bools and fractions mean no round selection.
+        self.early_stopping_rounds = parse_count_cell(_es_raw)
+        # Boosters with round selection: the in-app final model was fitted at
+        # n_estimators_fit rounds and truncated to n_estimators_selected.
+        # Parsed with the same rules as cv_utils.round_truncation_from_row; an
+        # inconsistent pair (not 1 <= selected <= fit) means no truncation.
+        self.n_estimators_fit = None
+        self.n_estimators_selected = None
+        if parse_bool_cell(model_config.get('round_selection_truncated')):
+            _fit = parse_count_cell(model_config.get('n_estimators_fit'))
+            _sel = parse_count_cell(model_config.get('n_estimators_selected'))
+            if _fit is not None and _sel is not None and _sel <= _fit:
+                self.n_estimators_fit, self.n_estimators_selected = _fit, _sel
         self.imbalance_method = model_config.get('imbalance_method', None)
         if self.task_type == 'one_class':
             # Imbalance handling does not apply to one-class models: they fit on
@@ -245,6 +257,9 @@ class CodeGenerator:
 
         # 8. Model instantiation
         sections.append(self._render_model())
+        if not self.options.include_cross_validation and self._is_booster_export():
+            # Round-count helpers (eval-only cleanup, final truncation).
+            sections.append(self._render_fit_fold_helper())
 
         # Metric helpers (_lins_ccc / _one_class_metrics): used by both the CV
         # and final-model blocks, so emitted even when CV is disabled.
@@ -254,10 +269,9 @@ class CodeGenerator:
 
         # 9. Cross-validation
         if self.options.include_cross_validation:
-            # Per-fold fit helper: mirrors cv_utils._fit_with_early_stopping so
-            # the exported CV reproduces the in-app CV bit-for-bit on boosters.
-            # Falls through to plain fit() for non-boosters (no behavior change
-            # for PLS/Ridge/Lasso/RandomForest/SVM/MLP/etc.).
+            # Boosting-round selection helpers: mirror cv_utils so the exported
+            # CV picks the same single round count as the app. No-op for
+            # non-boosters (PLS/Ridge/Lasso/RandomForest/SVM/MLP/etc.).
             sections.append(self._render_fit_fold_helper())
             sections.append(self._render_cross_validation())
             sections.append(self._render_metrics())
@@ -390,7 +404,7 @@ class CodeGenerator:
         # Model and cross-validation
         section_num += 1
         cells.append(self._make_markdown_cell(f"## {section_num}. Model Training and Evaluation"))
-        # _fit_fold helper must live in the same cell so the CV loop can call it.
+        # The round-selection helpers must live in the same cell as the CV loop.
         # See _render_fit_fold_helper for the in-app parity rationale.
         model_cv_code = (
             self._render_model() + '\n' +
@@ -404,6 +418,10 @@ class CodeGenerator:
                 self._render_cross_validation() + '\n' +
                 self._render_metrics()
             )
+        elif self._is_booster_export():
+            # Round-count helpers (eval-only cleanup, final truncation), as in
+            # generate_script.
+            model_cv_code += '\n' + self._render_fit_fold_helper()
         cells.append(self._make_code_cell(model_cv_code))
 
         # Final model
@@ -988,7 +1006,13 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
             )
         else:
             default_key = self._resolve_default_param_key()
-            params_full = DEFAULT_PARAMS.get(default_key, {}).copy()
+            if model_class.startswith('CatBoost') and params:
+                # CatBoost Params omit automatic defaults (learning rate, leaf-
+                # estimation iterations): injecting DEFAULT_PARAMS would export a
+                # different model than the one scored. Use the stored params only.
+                params_full = {}
+            else:
+                params_full = DEFAULT_PARAMS.get(default_key, {}).copy()
             params_full.update(params)
 
             # Per-library balanced-loss kwarg name (None = no constructor knob;
@@ -1033,12 +1057,37 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
                 # Don't write catboost_info/ into the cwd (fails when unwritable).
                 params_full.setdefault('allow_writing_files', False)
             if model_class.startswith('LightGBM'):
-                # LightGBM does not allow both n_estimators and num_iterations
-                if 'n_estimators' in params_full and 'num_iterations' in params_full:
-                    params_full.pop('num_iterations', None)
-                # Drop legacy aliases if present alongside n_estimators
-                if 'n_estimators' in params_full and 'num_boost_round' in params_full:
-                    params_full.pop('num_boost_round', None)
+                # LightGBM rejects several round aliases at once. An alias overrides
+                # n_estimators at fit time, so resolve the effective count the way
+                # LightGBM does (num_iterations wins) before dropping the aliases.
+                from spectral_predict.cv_utils import _LGBM_ROUND_ALIASES
+
+                _aliases = {
+                    k: params_full[k] for k in _LGBM_ROUND_ALIASES
+                    if params_full.get(k) is not None
+                }
+                if _aliases:
+                    if 'num_iterations' in _aliases:
+                        _effective = _aliases['num_iterations']
+                    elif len({int(v) for v in _aliases.values()}) == 1:
+                        _effective = next(iter(_aliases.values()))
+                    else:
+                        raise ValueError(f"Conflicting LightGBM round-count aliases: {_aliases}")
+                    for _alias in _aliases:
+                        params_full.pop(_alias, None)
+                    params_full['n_estimators'] = int(_effective)
+            if self.n_estimators_fit is not None and self._is_booster_export():
+                # Round selection: the final model is fitted at the scored (maximum)
+                # count and truncated to the selected one after the fit, as in-app.
+                if model_class.startswith('CatBoost'):
+                    _key = next(
+                        (k for k in ('iterations', 'n_estimators', 'num_boost_round', 'num_trees')
+                         if k in params_full),
+                        'iterations',
+                    )
+                    params_full[_key] = self.n_estimators_fit
+                else:
+                    params_full['n_estimators'] = self.n_estimators_fit
             if model_class.startswith('XGBoost'):
                 # XGBoost does not allow both n_estimators and num_boost_round
                 if 'n_estimators' in params_full and 'num_boost_round' in params_full:
@@ -1087,8 +1136,8 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
         (transform fitted on each training set's y, predictions inverse-transformed).
         For boosters with early stopping it transforms the training and held-out fold
         targets by hand. ``YTransformRegressor`` reproduces both: ``fit`` matches the
-        TTR, and ``_fit_fold`` routes early stopping through ``_fit_with`` so the
-        eval set is transformed with the training fold's transformer.
+        TTR, and the boosting-round helper reads each fold's staged predictions through
+        its fitted ``transformer_`` (inverse-transformed to original units).
         """
         if self.y_transform == 'none':
             return ''
@@ -1591,80 +1640,194 @@ model = Pipeline([('pls', pls), ('scaler', StandardScaler()), ('lr', lr)])
         )
         return code
 
+    def _is_booster_export(self) -> bool:
+        """True for XGBoost / LightGBM / CatBoost exports."""
+        return self._resolve_model_class_name().startswith(('XGBoost', 'LightGBM', 'CatBoost'))
+
+    def _render_final_round_truncation(self) -> str:
+        """Truncate the fitted final booster to the selected round count (in-app parity)."""
+        if not self._is_booster_export():
+            return ''
+        selected = self.n_estimators_selected
+        return f'''
+# Boosters: the final model is the scored configuration fitted at its maximum
+# round count, then truncated to the round count chosen from the pooled CV curve
+# (N_BOOST_ROUNDS from the cross-validation above, else the count recorded in
+# the results row) - exactly the in-app model.
+_selected_rounds = globals().get('N_BOOST_ROUNDS') or {selected!r}
+if _selected_rounds:
+    truncate_booster(model, _selected_rounds)
+    print(f"Final model truncated to {{_selected_rounds}} boosting rounds")
+'''
+
     def _render_fit_fold_helper(self) -> str:
-        """Render the per-fold fit helper that mirrors cv_utils._fit_with_early_stopping.
+        """Render the boosting-round selection helpers used by the exported CV.
 
-        Why this exists
-        ---------------
-        In-app CV calls ``cv_utils._fit_with_early_stopping(model, X_train,
-        y_train, X_test, y_test, early_stopping_rounds)`` for boosting models
-        (LightGBM/XGBoost/CatBoost) at ``search.py:_run_single_fold`` and
-        again from the GUI refined-model path. That fits each fold with
-        ``eval_set=[(X_test, y_test)]`` and an early-stopping callback. Without
-        the same wiring on the export side, the notebook trains the full
-        ``n_estimators`` and produces different per-fold predictions than the
-        in-app run on borderline samples (one-class flips at the boundary).
+        In-app CV chooses a booster's round count ONCE from the pooled CV curve
+        (``cv_utils.cross_val_boosting_rounds``): each fold is fitted once with the
+        maximum round count and no eval_set, its test rows are predicted at every
+        round count, and the count with the best pooled RMSECV / accuracy is kept.
+        The export emits the same primitives (their source is copied from
+        ``cv_utils`` so the two cannot drift) plus ``_choose_boosting_rounds``,
+        which every CV template calls before its loop. It returns the selected
+        count and each fold's predictions at that count, which the CV loop reports
+        instead of fitting the fold again, and sets the count on ``model`` for the
+        final fit.
 
-        For non-boosters this helper falls through to plain ``model.fit(...)``,
-        which is a no-op relative to the previous template behavior.
-
-        Skipped when ``early_stopping_rounds`` is ``None`` or ``<= 0`` —
-        the helper still exists so the CV loop call site is uniform, but its
-        body just calls plain fit. Keeps codegen branching minimal.
+        Non-boosters, ``EARLY_STOPPING_ROUNDS = 0`` and booster configurations where
+        prefix selection is invalid (DART, gblinear, CatBoost shrinkage) make
+        ``_choose_boosting_rounds`` return ``(None, None)``: the CV loop then fits
+        every fold normally.
         """
+        import inspect
+
+        from spectral_predict import cv_utils as _cvu
+
         esr = self.early_stopping_rounds if self.early_stopping_rounds else 0
-        # With a Y-transform the wrapper fits its transformer on the training fold and
-        # re-enters _fit_fold with transformed train/eval targets (app ES path).
-        y_transform_branch = (
-            "    if isinstance(_model, YTransformRegressor):\n"
-            "        _model._fit_with(\n"
-            "            _fit_fold, _X_tr, _y_tr, _X_val, _y_val, _esr, **_fit_kwargs\n"
-            "        )\n"
-            "        return\n"
-            if self.y_transform != 'none'
-            else ''
+        copied = "\n\n".join(
+            inspect.getsource(fn)
+            for fn in (
+                _cvu._lgbm_round_aliases,
+                _cvu.booster_max_rounds,
+                _cvu.set_booster_rounds,
+                _cvu.strip_eval_only_params,
+                _cvu.round_selection_unsupported_reason,
+                _cvu._final_estimator,
+                _cvu.truncate_booster,
+                _cvu._catboost_staged_raw,
+                _cvu._catboost_staged,
+                _cvu.booster_staged_predict,
+                _cvu.staged_labels,
+                _cvu._align_proba,
+                _cvu._stage_fold,
+                _cvu.pooled_round_curve,
+                _cvu.pooled_round_logloss,
+                _cvu.select_n_rounds,
+                _cvu._select_from_staged,
+            )
+        )
+        constants = "\n".join(
+            f"{name} = {getattr(_cvu, name)!r}"
+            for name in (
+                "_CATBOOST_ROUND_KEYS",
+                "_LGBM_ROUND_ALIASES",
+                "_LGBM_EARLY_STOP_KEYS",
+                "_LGBM_BOOSTING_KEYS",
+                "_CATBOOST_EVAL_KEYS",
+            )
         )
         return f'''
 # =============================================================================
-# PER-FOLD FIT HELPER (mirrors in-app cv_utils._fit_with_early_stopping)
+# BOOSTING ROUNDS (matches in-app cv_utils.cross_val_boosting_rounds)
 # =============================================================================
-# Boosting models (LightGBM/XGBoost/CatBoost) early-stop on the held-out fold
-# when EARLY_STOPPING_ROUNDS > 0, matching the in-app CV path. Non-boosters
-# fall through to plain .fit().
+# Boosters (LightGBM/XGBoost/CatBoost): the number of boosting rounds is chosen
+# ONCE from the pooled cross-validation curve, like the number of PLS latent
+# variables. Each fold is fitted once, with the maximum round count and no
+# eval_set, so a fold never sees its own test samples. Its test rows are
+# predicted at every round count, the predictions are pooled across folds, and
+# the count with the lowest pooled RMSECV (regression) or highest pooled
+# accuracy (classification; exact ties go to the lower pooled log-loss) is kept.
+# EARLY_STOPPING_ROUNDS is the patience: the scan of the pooled curve stops
+# after that many rounds without improvement. 0 keeps the configured count.
+# Non-boosters are unaffected.
 
+import logging
+import warnings
+from typing import Any, Dict, List, Optional
+from sklearn.base import clone, is_classifier
+
+logger = logging.getLogger("spectral_export")
 EARLY_STOPPING_ROUNDS = {esr}
 
-def _fit_fold(_model, _X_tr, _y_tr, _X_val, _y_val, _esr, **_fit_kwargs):
-{y_transform_branch}    if not _esr or _esr <= 0:
-        _model.fit(_X_tr, _y_tr, **_fit_kwargs)
-        return
-    _cls = type(_model).__name__
-    if _cls in ('LGBMClassifier', 'LGBMRegressor'):
-        import lightgbm as _lgb
-        _model.fit(
-            _X_tr, _y_tr,
-            eval_set=[(_X_val, _y_val)],
-            callbacks=[
-                _lgb.early_stopping(stopping_rounds=_esr, verbose=False),
-                _lgb.log_evaluation(period=0),
-            ],
-            **_fit_kwargs,
-        )
-    elif _cls in ('XGBClassifier', 'XGBRegressor'):
-        _model.set_params(early_stopping_rounds=_esr)
-        _model.fit(_X_tr, _y_tr, eval_set=[(_X_val, _y_val)], verbose=False, **_fit_kwargs)
-    elif _cls in ('CatBoostClassifier', 'CatBoostRegressor'):
-        if _cls == 'CatBoostClassifier':
-            _model.set_params(eval_metric='Accuracy')
-        _model.fit(
-            _X_tr, _y_tr,
-            eval_set=(_X_val, _y_val),
-            early_stopping_rounds=_esr,
-            verbose=0,
-            **_fit_kwargs,
-        )
-    else:
-        _model.fit(_X_tr, _y_tr, **_fit_kwargs)
+try:
+    from xgboost import XGBRegressor, XGBClassifier
+    XGBOOST_MODELS = (XGBRegressor, XGBClassifier)
+except ImportError:
+    XGBOOST_MODELS = ()
+try:
+    from lightgbm import LGBMRegressor, LGBMClassifier
+    LIGHTGBM_MODELS = (LGBMRegressor, LGBMClassifier)
+except ImportError:
+    LIGHTGBM_MODELS = ()
+try:
+    from catboost import CatBoostRegressor, CatBoostClassifier
+    CATBOOST_MODELS = (CatBoostRegressor, CatBoostClassifier)
+    CATBOOST_AVAILABLE = True
+except ImportError:
+    CATBOOST_MODELS = ()
+    CATBOOST_AVAILABLE = False
+{constants}
+
+
+def _get_model_from_pipeline(m):
+    return m.steps[-1][1] if hasattr(m, 'steps') else m
+
+
+def _model_is_classifier(m):
+    return is_classifier(_get_model_from_pipeline(m))
+
+
+def is_boosting_model(m):
+    return isinstance(m, XGBOOST_MODELS + LIGHTGBM_MODELS + CATBOOST_MODELS)
+
+
+{copied}
+
+def _choose_boosting_rounds(model, X, y, cv, patience, task, prepare_fold=None):
+    """Pick ONE boosting-round count from the pooled CV curve.
+
+    prepare_fold(X_train, y_train) -> (X_train, y_train, fit kwargs) applies the
+    same in-fold resampling / weighting as the CV loop below. Each fold is fitted
+    once, at the maximum round count, choosing its own automatic defaults.
+    Returns (count, per-fold predictions at that count); the final model is then
+    fitted at the maximum and truncated (see TRAIN FINAL MODEL). (None, None) when
+    no selection applies.
+    """
+    final = _final_estimator(model)
+    if not patience or patience <= 0 or not is_boosting_model(final):
+        return None, None
+    reason = round_selection_unsupported_reason(final)
+    if reason is not None:
+        print(f"Boosting-round selection skipped: {{reason}}; the configured count is used.")
+        return None, None
+    y = np.asarray(y)
+    is_clf = task == 'classification'
+    max_rounds = booster_max_rounds(model)
+    classes = np.unique(y) if is_clf else None
+    staged_out, proba_out, test_out = [], [], []
+    for train_idx, test_idx in cv.split(X, y):
+        X_tr, y_tr, _fit_kw = X[train_idx], y[train_idx], {{}}
+        if prepare_fold is not None:
+            X_tr, y_tr, _fit_kw = prepare_fold(X_tr, y_tr)
+        fold_model = clone(model)
+        strip_eval_only_params(fold_model)
+        fold_model.fit(X_tr, y_tr, **_fit_kw)
+        # A Y-transform wrapper fits its transformer on the training fold; staged
+        # predictions come back through it in original units.
+        fitted_tt = getattr(fold_model, 'transformer_', None)
+        inner = getattr(fold_model, 'regressor_', fold_model)
+        X_te = X[test_idx]
+        if hasattr(inner, 'steps'):
+            for _, step in inner.steps[:-1]:
+                if step is None or step == 'passthrough' or hasattr(step, 'fit_resample'):
+                    continue
+                X_te = step.transform(X_te)
+        staged, proba = _stage_fold(_final_estimator(inner), X_te, max_rounds, classes, fitted_tt)
+        staged_out.append(staged)
+        if is_clf:
+            proba_out.append(proba)
+        test_out.append(np.asarray(test_idx))
+    n_rounds, _ = _select_from_staged(
+        staged_out, proba_out if is_clf else None, test_out, y, classes, patience
+    )
+    print(f"Boosting rounds: {{n_rounds}} of {{max_rounds}} "
+          f"(one count for all folds, pooled CV curve, patience {{patience}})")
+    return n_rounds, [s[n_rounds - 1] for s in staged_out]
+
+
+# Boosters are never given an eval_set: remove eval-only settings (early stopping)
+# for the CV and the final fit.
+strip_eval_only_params(model)
 '''
 
     def _render_cross_validation(self) -> str:
@@ -1705,7 +1868,22 @@ def _fit_fold(_model, _X_tr, _y_tr, _X_val, _y_val, _esr, **_fit_kwargs):
         return get_metrics_template(self.task_type, self.cv_folds)
 
     def _render_final_model(self) -> str:
-        """Render final model training code."""
+        """Render final model training code (boosters: fit, then truncate)."""
+        body = self._render_final_model_body()
+        truncation = self._render_final_round_truncation()
+        if not truncation:
+            return body
+        # Truncate right after the final fit, BEFORE any calibration prediction or
+        # metric, so everything the script reports describes the truncated model.
+        import re
+
+        match = re.search(r"^model\.fit\(.*\)[ \t]*$", body, flags=re.MULTILINE)
+        if match is None:
+            raise ValueError("Final-model template has no top-level model.fit(...) line")
+        return body[: match.end()] + "\n" + truncation + body[match.end():]
+
+    def _render_final_model_body(self) -> str:
+        """Render the final model fit."""
         if self.imbalance_method:
             return self._render_final_model_with_imbalance()
 
@@ -1943,7 +2121,7 @@ def _regression_resample(X_vals, y_vals, method_name, params):
         # is the model under imbalance_method='class_weight'. Other classifiers
         # bake balanced loss into __init__ kwargs and need a plain fit() call.
         # Indentation discipline: sample_weight_block_cv prefixes 4 spaces (lands
-        # inside the for-loop body); sample_weight_block_final prefixes 0 spaces
+        # inside the _prepare_train_fold body); sample_weight_block_final prefixes 0 spaces
         # (module-level). Don't normalize prefixes when refactoring.
         sample_weight_import = (
             'from sklearn.utils.class_weight import compute_sample_weight\n'
@@ -1954,9 +2132,9 @@ def _regression_resample(X_vals, y_vals, method_name, params):
             "    fit_kwargs = {}\n"
             "    if IMBALANCE_METHOD == 'class_weight':\n"
             "        fit_kwargs['sample_weight'] = compute_sample_weight('balanced', y_train_fold)\n"
-            if xgb_sample_weight else ""
+            "    return X_train_fold, y_train_fold, fit_kwargs\n"
+            if xgb_sample_weight else "    return X_train_fold, y_train_fold, {}\n"
         )
-        cv_fit_kwargs_spread = ", **fit_kwargs" if xgb_sample_weight else ""
 
         if self.task_type == 'classification':
             return f'''
@@ -1974,6 +2152,26 @@ cv = {cv_constructor}
 unique_classes = np.unique(y)
 average_method = 'binary' if len(unique_classes) == 2 else 'macro'
 
+
+def _prepare_train_fold(X_train, y_train):
+    """In-fold imbalance handling (training rows only)."""
+    X_train_fold, y_train_fold = X_train, y_train
+    if IMBALANCE_METHOD in ['smote', 'adasyn', 'borderline_smote', 'random_undersampler',
+                            'tomek_links', 'smote_tomek', 'smote_enn']:
+        resampler = _get_classification_resampler(IMBALANCE_METHOD, IMBALANCE_PARAMS)
+        if resampler is not None:
+            X_train_fold, y_train_fold = resampler.fit_resample(X_train, y_train)
+{sample_weight_block_cv}
+
+# Boosters: choose ONE round count from the pooled CV curve before the loop (see
+# BOOSTING ROUNDS above). Each fold is fitted once there; the loop reports those
+# fits' predictions at the chosen count, and the count is set on `model` for the
+# final fit. (None, None) for other models: the loop fits every fold itself.
+N_BOOST_ROUNDS, BOOST_FOLD_PREDS = _choose_boosting_rounds(
+    model, {x_var}, y, cv, EARLY_STOPPING_ROUNDS, 'classification',
+    prepare_fold=_prepare_train_fold,
+)
+
 # Per-sample prediction lists — under Repeated K-Fold each sample appears in
 # multiple test folds; majority-vote reduction before scoring matches the
 # backend (cv_utils.cross_val_predict_pooled).
@@ -1982,22 +2180,21 @@ fold_f1 = []
 preds_per_sample = {{}}
 truth_per_sample = {{}}
 
-for train_idx, test_idx in cv.split({x_var}, y):
+for fold_i, (train_idx, test_idx) in enumerate(cv.split({x_var}, y)):
     X_train, X_test = {x_var}[train_idx], {x_var}[test_idx]
     y_train, y_test = y[train_idx], y[test_idx]
 
-    # Apply imbalance handling inside the fold
-    X_train_fold, y_train_fold = X_train, y_train
-    if IMBALANCE_METHOD in ['smote', 'adasyn', 'borderline_smote', 'random_undersampler',
-                            'tomek_links', 'smote_tomek', 'smote_enn']:
-        resampler = _get_classification_resampler(IMBALANCE_METHOD, IMBALANCE_PARAMS)
-        if resampler is not None:
-            X_train_fold, y_train_fold = resampler.fit_resample(X_train, y_train)
+    if BOOST_FOLD_PREDS is not None:
+        # Booster: this fold's predictions at the selected round count, from the
+        # single fit made while choosing it.
+        y_pred_fold = np.asarray(BOOST_FOLD_PREDS[fold_i]).ravel()
+    else:
+        # Apply imbalance handling inside the fold
+        X_train_fold, y_train_fold, _fold_fit_kw = _prepare_train_fold(X_train, y_train)
 
-    fold_model = clone(model)
-{sample_weight_block_cv}    # _fit_fold mirrors in-app cv_utils._fit_with_early_stopping: boosters
-    # early-stop on the held-out fold; non-boosters fall through to .fit().
-    _fit_fold(fold_model, X_train_fold, y_train_fold, X_test, y_test, EARLY_STOPPING_ROUNDS{cv_fit_kwargs_spread})
+        fold_model = clone(model)
+        fold_model.fit(X_train_fold, y_train_fold, **_fold_fit_kw)
+        y_pred_fold = fold_model.predict(X_test).ravel()
     # .ravel() flattens (n, 1) outputs (e.g., CatBoost multiclass) to (n,) so
     # downstream Counter majority-vote and accuracy/f1 metrics receive 1-D
     # arrays unconditionally. No-op for the (n,) shape that sklearn classifiers
@@ -2007,7 +2204,6 @@ for train_idx, test_idx in cv.split({x_var}, y):
     # path bypasses templates/validation.py entirely (the dispatcher at
     # _render_cross_validation routes here whenever imbalance_method is set),
     # so it needs the same shape coercion at this site.
-    y_pred_fold = fold_model.predict(X_test).ravel()
 
     for local_i, sample_idx in enumerate(test_idx):
         preds_per_sample.setdefault(int(sample_idx), []).append(y_pred_fold[local_i])
@@ -2043,6 +2239,40 @@ from sklearn.base import clone
 
 cv = {cv_constructor}
 
+
+def _prepare_train_fold(X_train, y_train):
+    """In-fold imbalance handling (training rows only)."""
+    X_train_fold, y_train_fold = X_train, y_train
+    sample_weight = None
+
+    if IMBALANCE_METHOD in ['undersample', 'oversample', 'smogn', 'smotetomek']:
+        X_train_fold, y_train_fold = _regression_resample(X_train, y_train, IMBALANCE_METHOD, IMBALANCE_PARAMS)
+    elif IMBALANCE_METHOD in ['binning', 'rare_boost', 'balanced']:
+        sample_weight = _compute_regression_weights(y_train, IMBALANCE_METHOD, IMBALANCE_PARAMS)
+
+    fit_kwargs = {{}}
+    if sample_weight is not None:
+        if hasattr(model, 'named_steps'):
+            if 'model' in model.named_steps:
+                fit_kwargs['model__sample_weight'] = sample_weight
+            elif 'lr' in model.named_steps:
+                fit_kwargs['lr__sample_weight'] = sample_weight
+            else:
+                fit_kwargs['sample_weight'] = sample_weight
+        else:
+            fit_kwargs['sample_weight'] = sample_weight
+    return X_train_fold, y_train_fold, fit_kwargs
+
+
+# Boosters: choose ONE round count from the pooled CV curve before the loop (see
+# BOOSTING ROUNDS above). Each fold is fitted once there; the loop reports those
+# fits' predictions at the chosen count, and the count is set on `model` for the
+# final fit. (None, None) for other models: the loop fits every fold itself.
+N_BOOST_ROUNDS, BOOST_FOLD_PREDS = _choose_boosting_rounds(
+    model, {x_var}, y, cv, EARLY_STOPPING_ROUNDS, 'regression',
+    prepare_fold=_prepare_train_fold,
+)
+
 # Per-sample prediction lists — under Repeated K-Fold each sample appears in
 # multiple test folds; average repeated predictions before scoring so pooled
 # RMSE/R²/MAE match the backend (cv_utils.cross_val_predict_pooled).
@@ -2052,35 +2282,21 @@ fold_mae = []
 preds_per_sample = {{}}
 truth_per_sample = {{}}
 
-for train_idx, test_idx in cv.split({x_var}):
+for fold_i, (train_idx, test_idx) in enumerate(cv.split({x_var})):
     X_train, X_test = {x_var}[train_idx], {x_var}[test_idx]
     y_train, y_test = y[train_idx], y[test_idx]
 
-    # Apply imbalance handling inside the fold
-    X_train_fold, y_train_fold = X_train, y_train
-    sample_weight = None
+    if BOOST_FOLD_PREDS is not None:
+        # Booster: this fold's predictions at the selected round count, from the
+        # single fit made while choosing it.
+        y_pred_fold = np.asarray(BOOST_FOLD_PREDS[fold_i]).ravel()
+    else:
+        # Apply imbalance handling inside the fold
+        X_train_fold, y_train_fold, fit_kwargs = _prepare_train_fold(X_train, y_train)
 
-    if IMBALANCE_METHOD in ['undersample', 'oversample', 'smogn', 'smotetomek']:
-        X_train_fold, y_train_fold = _regression_resample(X_train, y_train, IMBALANCE_METHOD, IMBALANCE_PARAMS)
-    elif IMBALANCE_METHOD in ['binning', 'rare_boost', 'balanced']:
-        sample_weight = _compute_regression_weights(y_train, IMBALANCE_METHOD, IMBALANCE_PARAMS)
-
-    fold_model = clone(model)
-    fit_kwargs = {{}}
-    if sample_weight is not None:
-        if hasattr(fold_model, 'named_steps'):
-            if 'model' in fold_model.named_steps:
-                fit_kwargs['model__sample_weight'] = sample_weight
-            elif 'lr' in fold_model.named_steps:
-                fit_kwargs['lr__sample_weight'] = sample_weight
-            else:
-                fit_kwargs['sample_weight'] = sample_weight
-        else:
-            fit_kwargs['sample_weight'] = sample_weight
-    # _fit_fold mirrors in-app cv_utils._fit_with_early_stopping: boosters
-    # early-stop on the held-out fold; non-boosters fall through to .fit().
-    _fit_fold(fold_model, X_train_fold, y_train_fold, X_test, y_test, EARLY_STOPPING_ROUNDS, **fit_kwargs)
-    y_pred_fold = fold_model.predict(X_test).ravel()
+        fold_model = clone(model)
+        fold_model.fit(X_train_fold, y_train_fold, **fit_kwargs)
+        y_pred_fold = fold_model.predict(X_test).ravel()
 
     for local_i, sample_idx in enumerate(test_idx):
         preds_per_sample.setdefault(int(sample_idx), []).append(float(y_pred_fold[local_i]))
