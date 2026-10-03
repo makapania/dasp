@@ -743,6 +743,110 @@ producing that fold's score (booster early stopping on the test fold R028/R003/R
 the scored fold R002/R021). Rule now in CLAUDE.md. Also: the 2026-09-28 reviews were Claude-only; Codex gpt-6-astra
 and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before any fix starts.
 
+## 2026-10-02 - fix/contaminant-maths (QW3, QW6, R024, R025, R075, R113, R114): gotchas
+- **EPO must not centre the nuisance library.** `EstimatedEPO`, `MultiGroupEPO` and `interference.EPO` all
+  column-centred D before the SVD. When the rows share one contaminant shift (mean diff + noise copies,
+  bootstrapped mean diffs, equal-dose groups, one shape at several levels) centring subtracts the contaminant and the
+  SVD returns jitter. Now: SVD of the uncentred D, `P = I - VV^T`, `transform = X @ P` (a spectrum). `bootstrap` was
+  removed outright: uncentred, its 2nd+ directions are sampling jitter = analyte variation.
+- **Uncentred multi-group D needs a rank rule.** With k = n_groups, two groups sharing one contaminant give a 2nd
+  direction that is the difference of their mean ANALYTE levels; projecting it out kept 0.35% of the analyte.
+  `MultiGroupEPO` now keeps a direction only if S_k^2 > 9 x the expected sampling energy of the mean differences
+  (`sum var_g/n_g + var_ref/n_ref`). A factor of 4 (2 SE) flagged a same-population group ~1 in 20 when its spread
+  lies along one direction (the analyte), so 9 (3 SE).
+- **`interference.EPO` padded its basis with null-space vectors** when the library rank < n_components (it computed
+  `S_truncated` and never used it). Harmless-looking with the old centred library; with an uncentred rank-1 library it
+  projected out arbitrary directions. Now capped at the library rank with a warning; tests that asked for 2-3
+  components from the rank-1 fixture library now use a random library.
+- **numpy 2.5 `np.linalg.pinv` default cutoff kept the ~1e-14 singular value left by mean-centring** (trace of
+  `X X^+` was 79.05 for rank 79) and broke `T = X W` in DOSC at the 1e-4 level. Pass
+  `rcond=max(shape)*eps` explicitly.
+- **OSC/DOSC replaced** (Fearn 2000 / Westerhuis et al. 2001): removed scores satisfy t'y = 0 to ~1e-15; weights and
+  loadings are stored and replayed; output is `X - T P'` on the original scale. Old OSC removed the first PLS loading
+  (corr(t,y) 0.98 on the bench); old DOSC's replayed scores correlated 0.2 with y.
+- **Corrected EPO spectra are projections, not "decontaminated" spectra.** A clean spectrum also loses its own
+  projection on the contaminant direction (baseline overlap), so its level drops a few percent. Tests assert
+  `X @ P` and "not centred", not "clean spectra unchanged".
+- **GUI:** `self.X_train` / `self.wavelengths` are never assigned anywhere, so the Interference Application page's
+  "Load from Import Tab" always said "no data". It now reads `self.X` / `self.y` (aligned by sample label). The same
+  dead attributes are still read by the Diagnostics sub-tab (GUI ~57351, ~61000, ~61050); not fixed here.
+- Repo line endings are mixed: the GUI and the test files are stored CRLF, `src/` modules LF. Python rewrites with
+  default newline handling turned the whole GUI diff into 124k lines; write CRLF files back with `newline=''`.
+
+## 2026-10-02 - fix/contaminant-maths round 2 (Codex BLOCK / GLM merge-with-fixes on 0205c32)
+- **Pickles.** Old fitted EstimatedEPO/MultiGroupEPO (have `X_mean_`, no `fit_version_`) silently changed output;
+  old OSC/DOSC raised NotFittedError. Now every fit stamps `fit_version_ = 2`; objects without it replay the old
+  transform exactly (with a warning) so saved downstream models keep their predictions. Verified cross-process:
+  fitted with f6a2287 code, unpickled with the branch, max |old - new| <= 9e-16 for all six classes and an
+  OSC+PLS pipeline.
+- **interference.EPO needs two library kinds.** Uncentred SVD is right only for difference/pure-interferent
+  libraries. A library of whole spectra (one sample at several moisture levels) contains the analyte; uncentred,
+  its first direction IS the analyte (kept 0.33% analyte, 99.7% moisture). `library_type='samples'` (default,
+  = differences from the library mean, the old behaviour) vs `'differences'` (uncentred). GUI Application page
+  asks which; preprocess.py passes `library_type` through.
+- **MultiContaminantAnalyzer joint projection** took the numerical rank of the union of per-group directions, so
+  two groups sharing one contaminant removed their analyte sampling difference too (analyte kept 0.02%). It now
+  delegates to MultiGroupEPO (`joint_epo_`).
+- **MultiGroupEPO automatic count replaced** (the 9x summed-energy rule was not a per-direction test and diluted
+  a contaminant in one of k groups). Now: rows weighted by 1/sqrt(1/n_g + 1/n_ref); sequential test of the largest
+  remaining squared singular value against a bootstrap of the POOLED within-group residuals (randomly signed,
+  rescaled sqrt(n/(n-1))), with a small-sample factor F_{1-a}(1,df)/chi2_{1-a}(1), df = N - groups - 1; alpha 0.01,
+  999 draws, seed 0. Two failed variants, for the record: label permutation across all spectra lost power when
+  a real contaminant was present (it inflates the null; Codex blank-group case 0.01); a sign-flip of each
+  group's OWN residuals was anti-conservative at n=5 (false positives 5-7%). Needs >= 2 spectra per group for
+  auto, else `n_total_components`. Rates (200 runs, analyte swing ~1, constant dose, old 9x -> new):
+  all-groups dose 0.2: n=5 0.05->0.04, n=10 0.01->0.01, n=40 0.91->1.00; dose 0.5: n=5 0.48->0.28, n=10 1->1;
+  one of k groups: k=2 n=5 d=0.5 0.07->0.12, d=1 0.98->1.00; k=2 n=10 d=0.5 0.30->0.91; k=4 n=5 d=1 0.37->0.96;
+  k=4 n=10 d=0.5 0.00->0.11; false positives 0-2% old, 0-1.5% new; Codex blank-group case 0.21->0.94. A
+  contaminant smaller than the group means' sampling spread along their noisiest direction (the analyte, at
+  small n) is not detectable by any data-driven direction test; the Apply page has an override.
+- **GUI:** Restore/Apply now rebuild `validation_X` from `self.X` by the cached validation IDs (minimal, so
+  fix/gui-dataset-state's `_install_dataset` can absorb it); Restore also checks a content fingerprint (an
+  in-place edit kept object identity); EPO "directions to remove" (auto/1-5) and an unpaired-groups caution;
+  "auto found nothing" is an information dialog with the override hint. Pairing is NOT offered: the loaders
+  discard contaminated-group sample names and the combined import has no specimen-ID column.
+
+## 2026-10-02 - fix/contaminant-maths round 3 (Codex BLOCK / GLM merge-with-fixes on a5b17f2)
+- **The pooled residual bootstrap assumed one within-group covariance.** With identical means and no
+  contaminant it removed a direction in 25% of runs (reference n=50 SD1 vs group n=5 SD4) and 34%
+  (reference n=5 SD4 vs two groups n=50 SD1), 400 runs each. Replaced by a per-group bootstrap: each
+  group's mean error is drawn from its OWN residuals (rescaled sqrt(n/(n-1)), random signs), one shared
+  reference draw per replicate, and each group's error multiplied by sqrt(df/chi2_df), df = n_g - 1 (a
+  Behrens-Fisher-type predictive; the global F/chi2 factor and a min-Welch-df factor were dropped - the
+  latter made any 2-spectrum group veto everything). False positives at alpha 0.01, 400 runs: Codex
+  heteroscedastic cases 0.5% / 1.5% / 0.25% (10/10/10, ref SD4) / 0.25% (equal SD 50 vs 5); GLM grid k=2-4,
+  n=2-40: 0-1.25% (0% at n<=5: conservative). Pooled a5b17f2 on the same cells: 25% / 34% / 4.5% / 1.75%,
+  grid 0.5-2.75%.
+- **Cost: power at small n.** Detection (400 runs; among hits, median contaminant energy removed):
+  all groups, dose 0.5: n=5 0.03 (75%), n=10 0.97 (97%); dose 0.2: n=40 0.99 (95%), n<=10 <=0.02. One of
+  k groups: k=2 n=10 d=0.5 0.48 (94%); k=2 n=5 d=1 0.43 (97%); k=4 n=5 d=1 0.04; k=4 n=10 d=1 1.00 (99%).
+  The pooled version found far more at n=5 (k=4 n=5 d=1: 0.96) but at the false-positive cost above. With
+  groups of 2-3 spectra the test essentially never removes anything; a 2-spectrum blank group makes the
+  max statistic too heavy-tailed to find a clear contaminant elsewhere (Codex blank case 0.94 -> 0.01).
+  Accepted because the GUI count is now advisory and has a manual choice.
+- Benchmark "hits" now report removal quality too: low-power cells' hits remove 13-40% of the contaminant
+  (Codex saw 22% for n=5 dose 0.2), so a bare detection rate overstated usefulness.
+- Other fixes: `__setstate__` migrates constructor params of old MultiGroupEPO (alpha/n_resamples/
+  random_state) and interference.EPO (library_type = 'samples' iff old center=True, matching what the old
+  code did) so clone/refit work without stamping fit_version_; Apply/Restore clear an unrebuildable holdout
+  (`_reset_validation_set`); MultiContaminantAnalyzer warns and falls back to all group directions for
+  singleton groups and no longer hides "removes nothing"; analyze_multiple_contaminants keeps partial
+  results with a GUI-worded note; zero-capacity (one wavelength) no longer IndexErrors; failed fits leave no
+  half-fitted state; bootstrap chunks sized to ~64 MB.
+- 0205c32 (round 1) never left this branch, so pickles fitted by it (corrected method, no fit_version_)
+  would wrongly take the legacy path; no action: only f6a2287-and-earlier pickles exist in the wild.
+
+## 2026-10-02 - fix/contaminant-maths round 4 (final review)
+- Known limit, documented rather than fixed: the per-group bootstrap randomly sign-flips residuals, which
+  symmetrises them, so SKEWED groups with very different spreads are anti-conservative (Codex: lognormal
+  null, n 50/10, SD 1/4 -> 9.4% false removals at alpha 0.01, each erasing the analyte; exponential 3.8%;
+  `test_auto_rank_skewed_heteroscedastic_null_rate` reproduces 18/200 and bounds it at <= 30/200).
+  Dialog, docstrings, UserGuide and the Apply caution now say the p-values are approximate, can be wrong
+  both ways (one contaminated group of four at n=10, dose 0.5: ~6.5% detection), and that groups of 2-3
+  need a manual count. The advisory dialog adds a warning when a group's residual scores along the
+  suggested direction have |skewness| > 1 (n >= 8) - a hint, not a test.
+- tests/gui/conftest.py `_suppress_dialogs` now also patches tkinter.simpledialog.askinteger/askstring/
+  askfloat (return None); no existing test used the real dialogs.
 ## 2026-10-02 - Ensemble CV fix (branch fix/ensemble-cv; R002, R018, R021, R105)
 - **R018 masked R002.** With string specimen IDs every GUI ensemble died on `y_filtered[train_idx]` (pandas 3 label
   lookup), so the inflated R2CV was only visible on RangeIndex data. Fixing the indexing alone would have published
@@ -902,6 +1006,83 @@ the same folds, as for PLS LV selection. Implemented on branch fix/booster-early
 - **Screenshot capture:** in a DPI-unaware process, `ImageGrab.grab(window=hwnd)` returns the pre-stretch logical
   bitmap, which hides the blur. Grab the full screen, which comes back in physical pixels, and crop it by
   `full.width / winfo_screenwidth()`.
+
+## 2026-10-02 - fix/readers: OPUS block priority (R017) and one ASCII reader (R062)
+- **brukeropus gotchas.** `OPUSFile.__getattr__` returns None (not AttributeError) for any absent name, so
+  `hasattr(opus_file, 'a')` is always True; trust `data_keys` (1-D blocks only; `series_keys` are 2-D). A non-OPUS file
+  does not raise in `read_opus`: it returns `is_opus=False`, and `__getattr__` then recurses on `self.params`
+  (RecursionError, which `hasattr` does not catch). The reader now checks `is_opus` first and takes the first usable
+  block in `OPUS_BLOCK_PRIORITY` (a, t, r, other processed types, then sm, then rf, with a UserWarning for sm/rf);
+  metadata `opus_block` records the key. No real OPUS fixture exists in the repo or example/; tests use fakes.
+- **Wrapper merge order.** io.py's vendor wrappers built `{normalised keys..., **file_metadata}`, so reader keys won.
+  OPUS data_type became the raw 'transmittance'/'reference'. PerkinElmer file_format became 'sp' and x_unit the
+  non-canonical 'wavenumber_cm-1', which the GUI's `_apply_x_unit_metadata` treats as nm (read_sp_dir passed it
+  through as well). Reader keys now go first, and the PerkinElmer reader emits 'cm-1'/'nm'.
+- **ASCII.** The later `read_ascii_spectra` (pd.read_csv, header=0, no folders) shadowed the folder-aware one, and
+  five tests asserted the lost first row (2001 -> 2000). There is now one implementation. The delimiter comes from the
+  first fully numeric row (the old folder parser chose it from the first line, so a heading with more spaces than
+  tabs over tab-separated data picked ' ' and then parsed nothing). Lines before that row are the header. Files are opened as utf-8-sig so a BOM does not turn row 1 into a
+  header. The x unit is taken only from explicit unit tokens in the headings, because our own writer labels x
+  "Wavelength" whatever its unit. `_parse_ascii_file` now returns `(df, info)` and raises. Unknown kwargs raise
+  TypeError (they used to go to pd.read_csv; no caller passes any).
+- **Review round 1 (Codex BLOCK, GLM merge-with-fixes).** The pipeline data_type decides whether the GUI offers a
+  log: 'reflectance' gets A = log10(1/R). So every OPUS block that is already logged or linear in concentration
+  (logr = -log R, KM, ATR, PAS, Raman, emission, aria) must map to 'absorbance'; mapping logr to 'reflectance'
+  logged it twice. "4000,5,0,123" (decimal comma + comma delimiter) splits into four integers and silently gave
+  x=4000, y=5; such files are now refused (decimal='.' overrides). pd.read_csv's header=0 path had tolerated text
+  columns, inline '#' comments and `decimal=','`; the hand parser must keep all three. The GUI never shows
+  warnings.warn or print output: reader problems the user must see go in `metadata['import_warnings']`, which
+  `_show_import_warnings` puts in a dialog (OPUS/ASCII/PerkinElmer main import only). PerkinElmer .sp has no unit
+  field in specio; ranges up to 3300 (the Lambda UV/Vis/NIR limit) are ambiguous and now default to nm at 40%
+  with a warning. `read_sp_dir` globbed `*.sp` + `*.SP`, which on Windows lists every file twice.
+- **Review round 2.** `data_type` is a physical ordinate type, not a "may log" flag: the GUI uses it for
+  10**-x conversion, plot labels, the absorbance-only Auto Bone FTIR gate and saved-model compatibility. Readers
+  now report a third type, 'other' (`io.OTHER_DATA_TYPE`), for Kubelka-Munk, photoacoustic, Raman, emission and
+  raw single-channel spectra; `source_data_type` names it. Log-reflectance and ATR stay 'absorbance'
+  (absorbance-equivalent). The GUI offers no conversion for 'other' (main tab, prediction, both CT modes), and
+  saves `source_data_type`/`data_type_converted_from` with models. The prediction and CT import paths used to
+  re-run `detect_spectral_data_type` on values and drop reader metadata (an OPUS logr spectrum became
+  "reflectance, 100%"); `_resolve_loaded_data_type` now prefers the reader's type, and every active import path
+  calls `_show_import_warnings`. CT conversions used the main tab's `source_data_type`/`data_value_scale`;
+  `_convert_with_source` swaps in the data's own. ASCII: every delimiter x decimal reading is scored on how many
+  lines give numeric x/y; ties must agree or the file is refused. The decimal-comma guard looks only at x/y and
+  the next field, plus leading-zero tokens (thousands groups). Fields are split with the csv module (quotes).
+- **Review round 3.** More loaders re-detected the type from values: contamination, Multi-Model Comparison
+  (including a validation-set source, which must take the main tab's current type), the CT wizard's
+  primary/satellite loads and CT's "use as working data" handoff (must keep Mode B's type after conversion).
+  `_load_spectra_from_directory[_as_df]` return arrays only, so they leave the reader metadata in
+  `self._last_dir_load_metadata`. Compatibility: `model_io.check_data_type_compatibility` compares
+  `source_data_type` when the pipeline types agree (Raman vs KM are both 'other'); legacy models without a
+  source type, and converted data, are compared on the type alone; CT prediction now runs the check too.
+  `_convert_with_source` now takes and returns the per-dataset value scale (resetting it to 1.0 broke % round
+  trips). Tie comparison must be NaN-aware. The comma-ambiguity guard is per row (one competing row refuses the
+  file) and covers thousands groups. Ensemble saves carry the ordinate keys into every base model.
+- **Review round 4 (final).** Coordinator decision: comma-delimited files default to the decimal-point reading
+  (decimal commas inside comma-delimited data are not valid CSV). Rows that also fit a decimal-comma or
+  thousands split only warn (import_warnings, so the GUI shows it); the file is refused only when that split
+  explains an inconsistency (differing field counts, repeated x, leading zeros). Round 3's per-row refusal
+  rejected real files (integer nm or Raman shift + integer counts + a float column). A point-decimal third
+  field can never be half of a decimal-comma pair. Contaminant groups now keep their own type/source/scale;
+  a group whose stated type differs from the clean data (or is 'other') is refused, and conversion refuses
+  while any group mismatches. `_loaded_value_scale` honours a carried scale before looking at the type, so
+  converted % reflectance converts back to %. Source labels are canonicalised (`io.canonical_source_data_type`;
+  Omnic 'Log(1/R)' == OPUS 'log_reflectance'). PowerShell 5.1 mangles `"` inside native-command arguments:
+  write commit messages to a file and use `git commit -F`.
+- **Review round 5 (final).** Contaminant compatibility: the non-convertible policy runs before any equality
+  check ('other' matches only 'other' with the same canonical source, so Kubelka-Munk vs Raman is refused); stored
+  groups are re-validated when clean data loads (with an offer to remove offenders) and again before
+  difference analysis / automated detection; combined-file groups get their own records with a scale decided
+  from the whole file; empty groups are rejected and `_contam_convert_data_type` computes every array before
+  committing. ASCII folder summaries now keep every number-format (decimal-comma) warning in full and summarise
+  other kinds per category with all files named; exponent fragments ("4,123E+3,0,123") count as warning-only
+  evidence; a leading zero refuses only when a competing split exists ("0400,0.5" loads, "1,000,0.123" refuses).
+  Note: the GUI's transmittance and reflectance formulas are the same number (-log10 T == log10(1/T)), so
+  passing the carried source into contamination conversion is bookkeeping, not a value change. Deferred by the
+  coordinator (see PROJECT_STATUS Follow-Ups): CSV/reference implicit-index shift and ASD-text decimal-comma
+  misreads, both pre-existing.
+- **Tooling gotcha.** The Bash tool's heredocs turned `\b` and `\n` inside Python string literals into real
+  control characters (a backspace ended up in a regex). Write code containing backslashes with the Write/Edit
+  tools, not via heredoc.
 
 ## 2026-10-02 - fix/preexisting-test-export: export metric helpers + multiclass fake Thread
 

@@ -1109,20 +1109,35 @@ PCA can separate contaminated from uncontaminated samples:
 
 When pure contaminant spectra are unavailable, EstimatedEPO builds a "pseudo-interferent library" from group differences.
 
-**Algorithm:**
-1. Compute difference vectors between groups
-2. Use PCA or bootstrap to build interferent library
-3. Apply standard EPO with estimated library
+**Algorithm (Roger et al. 2003 EPO on an estimated nuisance matrix):**
+1. Build the nuisance-difference matrix D from the groups (uncentred)
+2. Take its leading right singular vectors V
+3. Return `X @ (I - V V^T)`: spectra on the original scale
 
 **Estimation Methods:**
-- `mean_diff`: Single difference between group means
-- `pca_diff`: PCA on concatenated groups
-- `bootstrap`: Multiple bootstrap difference vectors
+- `mean_diff` (default): one row, contaminated mean minus clean mean
+- `pca_diff`: paired differences, row i = the same specimen contaminated minus clean;
+  needs `fit_groups(..., paired=True)` (falls back to `mean_diff` when unpaired)
+- (`bootstrap` was removed: it projected out sampling jitter, i.e. the analyte)
+
+With unpaired groups the removed direction also contains any real chemical difference
+between the groups; use groups that differ only by the contaminant, or paired spectra.
+`MultiGroupEPO` handles several contaminant groups and suggests how many directions to
+remove with a bootstrap test against sampling variation. Treat the count as a
+suggestion: its p-values assume roughly symmetric within-group variation (skewed groups
+with very different spreads can produce a spurious direction; 9.4% false removals at
+alpha 0.01 in a lognormal test), and it can miss a contaminant confined to one of several
+groups (groups of 10, one contaminated group out of four at a moderate dose: detected
+~6.5% of the time). Groups of 2-3 spectra need a manual count.
 
 ```python
-epo = EstimatedEPO(n_components=2, estimation_method='pca_diff')
+epo = EstimatedEPO()  # mean_diff
 epo.fit_groups(X_contaminated, X_uncontaminated)
 X_corrected = epo.transform(X_all)
+
+# Paired spectra: the same specimens without (X_clean) and with (X_treated) the contaminant
+epo_paired = EstimatedEPO(n_components=2, estimation_method='pca_diff')
+epo_paired.fit_groups(X_treated, X_clean, paired=True)
 ```
 
 **ContaminantGLSW:**

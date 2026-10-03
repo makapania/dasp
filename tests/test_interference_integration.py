@@ -104,8 +104,9 @@ class TestComplexPipelines:
             ('ridge', Ridge(alpha=10.0))
         ])
 
-        # Fit with EPO interferent library
-        pipeline.fit(self.X, self.y, epo__X_interferents=self.X_moisture)
+        # Fit with EPO interferent library (rank 1: warns that one component is used)
+        with pytest.warns(UserWarning, match="spans only 1 direction"):
+            pipeline.fit(self.X, self.y, epo__X_interferents=self.X_moisture)
 
         # Predict
         y_pred = pipeline.predict(self.X)
@@ -114,10 +115,14 @@ class TestComplexPipelines:
         assert y_pred.shape[0] == self.n_samples
         assert not np.any(np.isnan(y_pred))
 
-        # Check EPO removed moisture
+        # Check EPO removed moisture. The moisture library is one spectral shape
+        # at ten levels, so it spans a single direction: EPO uses one component
+        # rather than padding with an arbitrary second one.
         epo_fitted = pipeline.named_steps['epo']
         assert hasattr(epo_fitted, 'P_orth_')
-        assert epo_fitted.n_components_ == 2
+        assert epo_fitted.n_components_ == 1
+        moisture_shape = self.X_moisture[-1] / np.linalg.norm(self.X_moisture[-1])
+        np.testing.assert_allclose(moisture_shape @ epo_fitted.P_orth_, 0.0, atol=1e-10)
 
     def test_dosc_osc_comparison(self):
         """Test that DOSC and OSC produce similar results."""

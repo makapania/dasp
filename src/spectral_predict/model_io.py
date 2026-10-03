@@ -923,11 +923,59 @@ def predict_with_model(
     return predictions
 
 
+def check_data_type_compatibility(
+    model_metadata: Dict[str, Any],
+    prediction_data_type: Optional[str],
+    prediction_source_data_type: Optional[str] = None,
+) -> Optional[str]:
+    """Warn when prediction data is not the ordinate type a model was trained on.
+
+    Compares the pipeline data types ('absorbance', 'reflectance', 'other'). When
+    they agree, it also compares the source types (what the files held, e.g.
+    'raman' vs 'kubelka_munk', both 'other'), but only when both are known: models
+    saved before source types were recorded, data whose source is unknown, and
+    data that was converted after loading (``data_type_converted_from`` set) are
+    compared on the pipeline type alone.
+
+    Args:
+        model_metadata: The model's saved metadata.
+        prediction_data_type: Pipeline type of the prediction data, or None.
+        prediction_source_data_type: Source type of the prediction data, or None.
+
+    Returns:
+        A warning message, or None when compatible or not checkable.
+    """
+    model_type = model_metadata.get('data_type')
+    if not prediction_data_type or not model_type:
+        return None
+    if prediction_data_type.lower() != model_type.lower():
+        return (
+            f"Model trained on {model_type.upper()} data, "
+            f"but prediction data is {prediction_data_type.upper()}."
+        )
+    from spectral_predict.io import canonical_source_data_type
+
+    # Readers name the same ordinate differently (OPUS 'log_reflectance', Omnic
+    # 'Log(1/R)'), so compare canonical names
+    model_source = canonical_source_data_type(model_metadata.get('source_data_type'))
+    if model_metadata.get('data_type_converted_from'):
+        model_source = None
+    prediction_source = canonical_source_data_type(prediction_source_data_type)
+    if model_source and prediction_source and model_source != prediction_source:
+        return (
+            f"Model trained on {model_source.replace('_', ' ').upper()} data, but "
+            f"prediction data is {prediction_source.replace('_', ' ').upper()} "
+            f"(both {model_type.lower()})."
+        )
+    return None
+
+
 def predict_with_uncertainty(
     model_dict: Dict[str, Any],
     X_new: Union[pd.DataFrame, np.ndarray],
     validate_wavelengths: bool = True,
-    prediction_data_type: Optional[str] = None
+    prediction_data_type: Optional[str] = None,
+    prediction_source_data_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Make predictions with a loaded model and compute uncertainty estimates.
@@ -946,8 +994,11 @@ def predict_with_uncertainty(
     validate_wavelengths : bool, default=True
         Whether to validate wavelengths match model requirements
     prediction_data_type : str, optional
-        Type of prediction data ('absorbance' or 'reflectance'). If provided and differs
-        from model's training data type, a warning will be included in the result.
+        Type of prediction data ('absorbance', 'reflectance' or 'other'). If provided and
+        differs from model's training data type, a warning will be included in the result.
+    prediction_source_data_type : str, optional
+        What the prediction file held (e.g. 'raman', 'kubelka_munk'); see
+        ``check_data_type_compatibility``.
 
     Returns
     -------
@@ -993,15 +1044,9 @@ def predict_with_uncertainty(
     task_type = metadata.get('task_type', 'regression')
 
     # Check for data type mismatch
-    data_type_warning = None
-    model_data_type = metadata.get('data_type')
-
-    if prediction_data_type and model_data_type:
-        if prediction_data_type.lower() != model_data_type.lower():
-            data_type_warning = (
-                f"Model trained on {model_data_type.upper()} data, "
-                f"but prediction data is {prediction_data_type.upper()}."
-            )
+    data_type_warning = check_data_type_compatibility(
+        metadata, prediction_data_type, prediction_source_data_type
+    )
 
     # Multi-class class-modeling (SIMCA): predict_with_model already returns the
     # per-sample decision schema (p-values + accept matrix + accepted class sets
@@ -1671,6 +1716,9 @@ def _convert_to_serializable(obj):
     return _json_serializer(obj)
 
 
+_ORDINATE_METADATA_KEYS = ('data_type', 'source_data_type', 'data_type_converted_from')
+
+
 def save_ensemble(ensemble: Any, filepath: str, metadata: Dict[str, Any]) -> None:
     """
     Save an ensemble model to a .dasp file.
@@ -1693,6 +1741,8 @@ def save_ensemble(ensemble: Any, filepath: str, metadata: Dict[str, Any]) -> Non
         - 'use_full_spectrum_preprocessing': Boolean for derivative+subset case
         - 'full_wavelengths': Full wavelength list if using derivative+subset
         - 'window': Savgol window size (if applicable)
+        - 'data_type', 'source_data_type', 'data_type_converted_from': ordinate type of
+          the training data (optional; copied into every base model's metadata)
         - 'X_train': Training data for applicability domain (optional)
         - 'cv_residuals', 'cv_predictions', 'cv_actuals': CV data for uncertainty (optional)
 
@@ -1770,6 +1820,11 @@ def save_ensemble(ensemble: Any, filepath: str, metadata: Dict[str, Any]) -> Non
                 'n_samples': metadata.get('n_training_samples', 0),
                 'ensemble_parent': True,  # Flag to indicate this is from an ensemble
             }
+            # The ordinate type the ensemble was trained on, so each base model file
+            # also identifies the data it expects
+            for key in _ORDINATE_METADATA_KEYS:
+                if key in metadata:
+                    base_metadata[key] = metadata[key]
 
             # Save individual model with all metadata and optional training data
             save_model(
