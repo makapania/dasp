@@ -4,7 +4,7 @@
 
 ## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-27)
 
-### 0. IN PROGRESS (2026-10-02): Wave 1 + Wave 2 fixes, 9 of 11 branches merged — HAND-OFF
+### 0. IN PROGRESS (2026-10-02): Wave 1 + Wave 2 fixes, 10 of 11 branches merged — HAND-OFF
 Every Wave 1/2 item was cross-checked by Codex gpt-6-astra and GLM 5.3 before fixing. User decisions: booster tree
 count = one value from the pooled CV curve; chemometrics validation conventions (CLAUDE.md).
 **Merged:** #83 fix/ct-honest-labels; #84 fix/ensemble-cv (wrappers now in `model_wrappers.py`); #85 feat/dpi-fonts; #86 fix/contaminant-maths (QW3, QW6; auto EPO count
@@ -15,7 +15,8 @@ carried through every tab; comma files dot-decimal + warning).
 encoders decode only when owned); #89 fix/ytransform-save (Tab 7 saves/exports the trained model: Y-transform,
 bias correction bound by token, frozen refit inputs, atomic RefinedState); #90 fix/preexisting-test-export (multiclass GUI test fake Thread;
 code export without CV / imbalance / plot fixes; PLS + regression imbalance sample_weight still open); #91 fix/classification-metrics (one label rule
-`scoring.classification_fit_labels` in every engine; pooled CV metrics; regression FoM).
+`scoring.classification_fit_labels` in every engine; pooled CV metrics; regression FoM); #92 fix/gui-dataset-state (calibration-identity crash-resume
+gate, transactional reconcile, missing-aware duplicate IDs). **QW4 (holdout direction) is now unblocked.**
 **Reviewers:** Codex is reset but reserved for MAJOR checks only (user, 2026-10-03); routine confirms use GLM 5.3 + DeepSeek (deepseek-flash; Pro only if the
 user says "pro") stand in. opencode prompts must forbid shell redirection, writes, and reads outside the repo, and
 demand a verdict even if a tool call is rejected. Merge rule: well-reviewed PR → merge origin/main into branch, test,
@@ -24,9 +25,6 @@ demand a verdict even if a tool call is rejected. Merge rule: well-reviewed PR �
 - `fix/booster-early-stopping` — round 3 in progress (Codex r3 BLOCK: export metrics before truncation; CatBoost auto
   LR replaced by 0.1 in rebuild/export; sanitize None breaks clone; resume flag; ensemble rebuild via truncation).
   Reconcile with fix/ytransform-save: Tab 7 y-transform k read off transformed-y curve vs final fit on raw y (~41998).
-- `fix/gui-dataset-state` 77063e1 — round in progress (Codex BLOCK: transactional reconcile, shared calibration-prep
-  function for digest+worker, lossless int targets, object-y canonicalisation, framed digest + counts, strict
-  record schema, dotted IDs → "can't verify", MultiIndex NaN dedupe). QW4 (holdout direction) waits for this.
 - `perf/thread-budget` c53c6f2 — GLM r2 MWF (GA candidate pool lacks CatBoost-serial rule; `native_thread_limit`
   cross-API restore via `restore_original_limits()` clobbers other APIs; stricter nested exit never re-loosens);
   DeepSeek r2 pending; then fix round + merge main.
