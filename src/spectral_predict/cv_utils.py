@@ -1445,6 +1445,8 @@ class BoostingRoundsCV:
         classes: Sorted class labels (classifiers only).
         fold_models: Per fold, the fitted (pipeline) clone when ``keep_models`` was set;
             its booster holds ``max_rounds`` rounds, use :func:`booster_predict_at`.
+        fold_target_transformers: Per fold, the fitted target transformer (or None)
+            when ``keep_models`` was set; the fold model predicts in its space.
         fit_times: Per fold fit time in seconds.
     """
 
@@ -1458,6 +1460,7 @@ class BoostingRoundsCV:
     classes: Optional[np.ndarray] = None
     fold_models: Optional[list] = None
     fit_times: List[float] = field(default_factory=list)
+    fold_target_transformers: Optional[list] = None
 
 
 def _fit_fold_full_rounds(
@@ -1477,8 +1480,9 @@ def _fit_fold_full_rounds(
     weights are recomputed as balanced weights on the resampled y (unchanged
     behaviour of the previous helper). ``balanced_sample_weight`` computes balanced
     class weights from the (post-resampling) training y alone. ``target_transformer``
-    (regression only) is cloned, fitted on the training y and used for the booster
-    fit, as TransformedTargetRegressor would.
+    (regression only) is cloned, fitted on the training y and applied BEFORE the
+    pipeline steps (samplers included), exactly as TransformedTargetRegressor fits
+    the final model.
 
     Returns:
         (fitted pipeline clone, fitted final estimator, transformed X_test,
@@ -1488,6 +1492,10 @@ def _fit_fold_full_rounds(
     final = _get_model_from_pipeline(model_clone)
     strip_eval_only_params(final)
     Xt_train, Xt_test, yt_train = X_train, X_test, y_train
+    fitted_tt = None
+    if target_transformer is not None:
+        fitted_tt = clone(target_transformer)
+        yt_train = np.ravel(fitted_tt.fit_transform(np.asarray(yt_train).reshape(-1, 1)))
     sw = sample_weight_train
     if hasattr(model_clone, "steps"):
         for _, step in model_clone.steps[:-1]:
@@ -1508,10 +1516,6 @@ def _fit_fold_full_rounds(
 
         sw = compute_sample_weight("balanced", yt_train)
     fit_kwargs = {"sample_weight": sw} if sw is not None else {}
-    fitted_tt = None
-    if target_transformer is not None:
-        fitted_tt = clone(target_transformer)
-        yt_train = np.ravel(fitted_tt.fit_transform(np.asarray(yt_train).reshape(-1, 1)))
     final.fit(Xt_train, yt_train, **fit_kwargs)
     return model_clone, final, Xt_test, fitted_tt
 
@@ -1589,6 +1593,7 @@ def cross_val_boosting_rounds(
     test_indices: List[np.ndarray] = []
     train_indices: List[np.ndarray] = []
     models: list = []
+    fold_tts: list = []
     fit_times: List[float] = []
     for train_idx, test_idx in cv.split(X, y):
         sw_train = sample_weight[train_idx] if sample_weight is not None else None
@@ -1611,6 +1616,7 @@ def cross_val_boosting_rounds(
         train_indices.append(np.asarray(train_idx))
         if keep_models:
             models.append(fitted)
+            fold_tts.append(fitted_tt)
 
     n_rounds, curve = _select_from_staged(
         staged_out, proba_out if is_clf else None, test_indices, y, classes, patience
@@ -1626,6 +1632,7 @@ def cross_val_boosting_rounds(
         classes=classes,
         fold_models=models if keep_models else None,
         fit_times=fit_times,
+        fold_target_transformers=fold_tts if keep_models else None,
     )
 
 
@@ -1741,8 +1748,14 @@ def uses_round_selection(model, early_stopping_rounds: Optional[int], warn: bool
     return True
 
 
-def _predict_with_fold_model(fitted, X: np.ndarray, n_rounds: int) -> np.ndarray:
-    """Predict with a fitted fold clone (pipeline or booster) at ``n_rounds`` rounds."""
+def _predict_with_fold_model(
+    fitted, X: np.ndarray, n_rounds: int, target_transformer=None
+) -> np.ndarray:
+    """Predict with a fitted fold clone (pipeline or booster) at ``n_rounds`` rounds.
+
+    ``target_transformer`` is that fold's fitted y transformer: predictions are
+    inverse-transformed to the original y scale.
+    """
     final = _get_model_from_pipeline(fitted)
     Xt = X
     if hasattr(fitted, "steps"):
@@ -1750,7 +1763,10 @@ def _predict_with_fold_model(fitted, X: np.ndarray, n_rounds: int) -> np.ndarray
             if step is None or step == "passthrough" or hasattr(step, "fit_resample"):
                 continue
             Xt = step.transform(Xt)
-    return booster_predict_at(final, Xt, n_rounds)
+    pred = booster_predict_at(final, Xt, n_rounds)
+    if target_transformer is not None:
+        pred = np.ravel(target_transformer.inverse_transform(np.asarray(pred).reshape(-1, 1)))
+    return pred
 
 
 def _weight_param_name(model) -> str:
@@ -1911,7 +1927,10 @@ def cross_validate_with_early_stopping(
         if return_train_score:
             train_idx = res.train_indices[fold_i]
             y_train_pred = _predict_with_fold_model(
-                res.fold_models[fold_i], X_arr[train_idx], res.n_rounds
+                res.fold_models[fold_i],
+                X_arr[train_idx],
+                res.n_rounds,
+                target_transformer=res.fold_target_transformers[fold_i],
             )
             for name, scorer in scoring_dict.items():
                 results[f"train_{name}"].append(

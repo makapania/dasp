@@ -4894,6 +4894,20 @@ def _run_single_config(
     # Generators get consumed; we need the test indices for repeated-CV pooling.
     splits = list(cv_splitter.split(X, y))
 
+    # Label policy (scoring.classification_fit_labels): XGBoost only accepts 0..K-1,
+    # so integer labels that are not 0..K-1 ({1, 2, 5}) are fitted as codes; every
+    # prediction and probability column is decoded back to the user's labels before
+    # metrics and pooling (as in compute_validation_metrics_for_top_models). Codes
+    # are the sorted labels' positions, so stratified splits and every metric are
+    # unchanged by the re-coding.
+    y_fit = y
+    xgb_label_classes = None
+    if task_type == "classification" and model_name == "XGBoost":
+        _fit_labels = classification_fit_labels(y, model_name="XGBoost")
+        if _fit_labels.policy == "xgb_codes":
+            y_fit = _fit_labels.y_fit
+            xgb_label_classes = np.asarray(_fit_labels.label_classes)
+
     # Boosters (R028): never given an eval_set, so eval-only settings are removed for
     # the folds and the final fit alike. Each fold fits the maximum round count and
     # chooses its own automatic defaults; configurations where round selection is
@@ -4909,7 +4923,7 @@ def _run_single_config(
             _run_single_fold(
                 pipe,
                 X,
-                y,
+                y_fit,
                 train_idx,
                 test_idx,
                 task_type,
@@ -4929,7 +4943,7 @@ def _run_single_config(
             delayed(_run_single_fold)(
                 pipe,
                 X,
-                y,
+                y_fit,
                 train_idx,
                 test_idx,
                 task_type,
@@ -4961,8 +4975,14 @@ def _run_single_config(
     n_rounds_selected = None
     if "staged" in cv_metrics[0]:
         cv_metrics, n_rounds_selected = _finalize_boosting_folds(
-            cv_metrics, y, task_type, is_binary_classification, early_stopping_rounds
+            cv_metrics, y_fit, task_type, is_binary_classification, early_stopping_rounds
         )
+    if xgb_label_classes is not None:
+        # XGBoost codes -> user labels. Probability columns are already in sorted
+        # class order, which the codes preserve.
+        for m in cv_metrics:
+            m["y_test"] = xgb_label_classes[np.asarray(m["y_test"], dtype=int)]
+            m["y_pred"] = xgb_label_classes[np.asarray(m["y_pred"], dtype=int)]
 
     # Pool predictions per sample so repeated-CV (RepeatedKFold/RepeatedStratifiedKFold)
     # produces one prediction per sample before scoring. Under plain K-Fold / LOO
@@ -5126,7 +5146,19 @@ def _run_single_config(
         if n_rounds_selected is not None:
             pipe = clone(pipe)
             _max_rounds = booster_max_rounds(pipe)
-        pipe.fit(X, y)
+        # class_weight for sample_weight-only classifiers (XGBoost): the folds were
+        # fitted with balanced weights from their training y, so the final model is
+        # fitted with balanced weights from the full calibration y (class_weight
+        # adds no resampler, so the weights match the rows the model sees).
+        final_fit_kwargs = {}
+        if use_sample_weight_for_classification:
+            from sklearn.utils.class_weight import compute_sample_weight
+
+            _sw_key = (
+                f"{pipe.steps[-1][0]}__sample_weight" if hasattr(pipe, "steps") else "sample_weight"
+            )
+            final_fit_kwargs[_sw_key] = compute_sample_weight("balanced", y_fit)
+        pipe.fit(X, y_fit, **final_fit_kwargs)
         if n_rounds_selected is not None:
             truncate_booster(pipe, n_rounds_selected)
             n_rounds_fit = _max_rounds  # set only once the truncated model exists
@@ -5148,6 +5180,8 @@ def _run_single_config(
         # Compute calibration metrics (training data performance)
         y_pred_cal = pipe.predict(X)
         y_pred_cal = np.ravel(y_pred_cal)  # Ensure 1D for metrics
+        if xgb_label_classes is not None:
+            y_pred_cal = xgb_label_classes[y_pred_cal.astype(int)]
 
         if task_type == "regression":
             # Same FoM function as CV and external validation. Only RMSE, R2
@@ -5167,8 +5201,11 @@ def _run_single_config(
             y_proba_cal = None
             if hasattr(pipe, "predict_proba"):
                 try:
+                    _model_classes = getattr(pipe, "classes_", None)
+                    if xgb_label_classes is not None and _model_classes is not None:
+                        _model_classes = xgb_label_classes[np.asarray(_model_classes, dtype=int)]
                     y_proba_cal = align_proba_to_classes(
-                        pipe.predict_proba(X), getattr(pipe, "classes_", None), cal_classes
+                        pipe.predict_proba(X), _model_classes, cal_classes
                     )
                 except (AttributeError, NotImplementedError) as e:
                     logger.debug(f"Calibration predict_proba unavailable: {e}")

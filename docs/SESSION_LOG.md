@@ -1282,6 +1282,17 @@ New primitives in `cv_utils`: `cross_val_boosting_rounds` (fit each fold at max 
 predictions; pick one count from pooled RMSECV, or pooled accuracy with pooled log-loss as exact-tie breaker),
 `booster_staged_predict`, `select_n_rounds` (`early_stopping_rounds` = patience of the scan), `set_booster_rounds`.
 Gotchas worth knowing:
+- **Final review (Codex BLOCK / DeepSeek MERGE-WITH-FIXES on 5ec39e5):** (1) the grid final R->k refit fitted
+  XGBoost without the balanced class weights CV used (calibration F1 0.000 vs 0.625 on rebuild); it now passes
+  `compute_sample_weight('balanced', y)` and the weighted-grid test compares calibration metrics with the
+  validation rebuild. (2) #91 left integer labels {1,2,5} un-encoded in the grid, and XGBoost refuses them:
+  `_run_single_config` now fits codes (`classification_fit_labels(..., 'XGBoost')`) and decodes y_test/y_pred,
+  calibration predictions and probability class order. (3) With a TTR, `cross_validate_with_early_stopping`
+  train scores used the fold model's transformed-space predictions; `BoostingRoundsCV.fold_target_transformers`
+  now keeps each fold's transformer and `_predict_with_fold_model` inverse-transforms. (5) `_fit_fold_full_rounds`
+  applies the target transformer BEFORE in-fold samplers, as the final TransformedTargetRegressor does.
+  Still open (pre-existing, not changed): regression sample weighters (`imbalance` step with `sample_weight_`)
+  weight the CV folds, but neither the grid final refit nor the validation rebuild applies them.
 - **Merge of main 6f63216 (PR #90 export helpers, PR #91 label policy / pooled metrics):** study names put
   `|labels=raw1` AFTER `|boost_rounds=`; the booster old-scoring notice matches the previous base both with and
   without the `|labels=` segment (a post-#91, pre-fix LightGBM/CatBoost study on raw labels would otherwise

@@ -319,13 +319,93 @@ def test_cross_validate_reports_selected_rounds():
     assert len(out["test_score"]) == 4 and len(out["train_score"]) == 4
 
 
+@pytest.mark.parametrize(
+    ("n_estimators", "learning_rate", "expect_truncated"),
+    [(150, 0.5, True), (8, 0.05, False)],
+    ids=["k<R", "k=R"],
+)
+def test_cross_validate_ttr_train_scores_are_on_the_original_scale(
+    n_estimators, learning_rate, expect_truncated
+):
+    """Codex final review: with a TransformedTargetRegressor the retained fold models
+    predict in the transformed space; training scores must be inverse-transformed."""
+    from lightgbm import LGBMRegressor
+    from sklearn.compose import TransformedTargetRegressor
+
+    rng = np.random.default_rng(1)
+    X = rng.normal(size=(60, 10))
+    y = np.exp(1.0 + 0.6 * X[:, 0] + 0.1 * rng.normal(size=60))  # positive, log-normal
+    params = dict(
+        n_estimators=n_estimators,
+        learning_rate=learning_rate,
+        num_leaves=7,
+        min_child_samples=5,
+        verbose=-1,
+    )
+    cv = KFold(3, shuffle=True, random_state=0)
+    out = cross_validate_with_early_stopping(
+        TransformedTargetRegressor(regressor=LGBMRegressor(**params), func=np.log, inverse_func=np.exp),
+        X,
+        y,
+        cv,
+        early_stopping_rounds=5,
+        return_train_score=True,
+    )
+    k = out["n_rounds_selected"]
+    assert (k < n_estimators) is expect_truncated
+
+    expected = []
+    for train_idx, _ in cv.split(X, y):
+        booster = LGBMRegressor(**params).fit(X[train_idx], np.log(y[train_idx]))
+        pred = np.exp(booster.predict(X[train_idx], num_iteration=k))
+        expected.append(-np.sqrt(np.mean((y[train_idx] - pred) ** 2)))
+    np.testing.assert_allclose(out["train_score"], expected, rtol=1e-6)
+
+
+def test_target_transform_is_applied_before_in_fold_resampling():
+    """DeepSeek final review: CV must transform y BEFORE a sampler, as the final
+    TransformedTargetRegressor does (transform, then the pipeline resamples)."""
+    from lightgbm import LGBMRegressor
+    from sklearn.base import BaseEstimator
+    from sklearn.preprocessing import FunctionTransformer
+
+    from spectral_predict.cv_utils import _fit_fold_full_rounds
+
+    seen = []
+
+    class _RecordingSampler(BaseEstimator):
+        def fit_resample(self, X, y):
+            seen.append(np.asarray(y).copy())
+            return X, y
+
+    from imblearn.pipeline import Pipeline as ImbPipeline
+
+    pipe = ImbPipeline(
+        [("imbalance", _RecordingSampler()), ("model", LGBMRegressor(n_estimators=5, verbose=-1))]
+    )
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(30, 4))
+    y = np.exp(rng.normal(size=30))
+    _fit_fold_full_rounds(
+        pipe,
+        X[:20],
+        y[:20],
+        X[20:],
+        None,
+        False,
+        target_transformer=FunctionTransformer(np.log, np.exp, validate=True),
+    )
+    np.testing.assert_allclose(seen[0], np.log(y[:20]))
+
+
 # --- Grid search rows (R028 + R126) -----------------------------------------------
 
 
 def _run_grid(model, task, X, y, **kwargs):
     from spectral_predict.search import run_search
 
-    X_df = pd.DataFrame(X, columns=np.linspace(1000.0, 1100.0, X.shape[1]))
+    # Integer wavelengths so all_vars round-trips exactly in validation rebuilds.
+    X_df = pd.DataFrame(X, columns=np.arange(1000, 1000 + 4 * X.shape[1], 4))
     grids = {
         "LightGBM": dict(
             lightgbm_n_estimators_list=[60],
@@ -388,13 +468,123 @@ def test_grid_row_without_round_selection_keeps_configured_rounds():
 def test_weighted_grid_rows_run_the_round_selection_they_record(model, task, imbalance_method):
     """R126: weighted paths used to skip early stopping yet record 40. Now they run
     the same pooled-curve selection (weights threaded through) and record it."""
-    X, y = _data(task)
+    from spectral_predict.search import compute_validation_metrics_for_top_models
+
+    if task == "classification":
+        # Imbalanced (about 1 in 4 positive), so the balanced weights change the model.
+        rng = np.random.default_rng(3)
+        X = rng.normal(size=(60, 25))
+        y = (X[:, 0] + 0.5 * rng.normal(size=60) > 0.7).astype(int)
+    else:
+        X, y = _data(task)
     df = _run_grid(model, task, X, y, early_stopping_rounds=10, imbalance_method=imbalance_method)
     assert len(df) > 0
     for _, row in df.iterrows():
         assert row["early_stopping_rounds"] == 10
         k = int(row["n_estimators_selected"])
         assert _rounds_param(row["Params"]) == k
+
+    # The grid's final model (fitted at R with the same weights as CV, truncated to
+    # k) must be the model the validation rebuild makes from the row: with the
+    # holdout = calibration set, the rebuilt model reproduces the calibration metrics.
+    wavelengths = np.arange(1000, 1000 + 4 * X.shape[1], 4)
+    out = compute_validation_metrics_for_top_models(
+        df.copy(),
+        X,
+        y,
+        X,
+        y,
+        task,
+        wavelengths,
+        top_n=len(df),
+        imbalance_method=imbalance_method,
+    )
+    for _, r in out.iterrows():
+        if task == "classification":
+            assert r["val_Accuracy"] == pytest.approx(r["Accuracy"]), r["Params"]
+            assert r["val_F1"] == pytest.approx(r["F1"])
+            assert r["val_ROC_AUC"] == pytest.approx(r["ROC_AUC"])
+        else:
+            assert r["RMSEP"] == pytest.approx(r["RMSE"]), r["Params"]
+            assert r["R2pred"] == pytest.approx(r["R2"])
+
+
+def test_weighted_grid_final_fit_uses_balanced_weights():
+    """Codex final review: the grid final refit dropped XGBoost's balanced weights."""
+    from sklearn.utils.class_weight import compute_sample_weight
+    from xgboost import XGBClassifier
+
+    from spectral_predict.cv_utils import truncate_booster
+
+    rng = np.random.default_rng(3)
+    X = rng.normal(size=(60, 25))
+    y = (X[:, 0] + 0.5 * rng.normal(size=60) > 0.7).astype(int)
+    df = _run_grid(
+        "XGBoost", "classification", X, y, early_stopping_rounds=10, imbalance_method="class_weight"
+    )
+    row = df.iloc[0]
+    k, fit_rounds = int(row["n_estimators_selected"]), int(row["n_estimators_fit"])
+    params = ast.literal_eval(row["Params"])
+    params["n_estimators"] = fit_rounds
+
+    def _cal_proba(sample_weight):
+        model = XGBClassifier(**params)
+        model.fit(X, y, sample_weight=sample_weight)
+        truncate_booster(model, k)
+        return model.predict_proba(X)[:, 1]
+
+    weighted = _cal_proba(compute_sample_weight("balanced", y))
+    unweighted = _cal_proba(None)
+    assert not np.allclose(weighted, unweighted)  # the weights matter on this data
+    from sklearn.metrics import log_loss
+
+    assert row["LogLoss"] == pytest.approx(log_loss(y, weighted), rel=1e-6)
+    assert row["Accuracy"] == pytest.approx(float(np.mean((weighted > 0.5) == y)))
+
+
+@pytest.mark.parametrize("labels", [(1, 2, 5), (1, 5)])
+@pytest.mark.parametrize("es", [10, None])
+def test_grid_xgboost_fits_codes_for_integer_labels(labels, es):
+    """DeepSeek final review: XGBoost only accepts 0..K-1; the grid fits codes for
+    {1, 2, 5} / {1, 5} and reports everything in the user's labels."""
+    from spectral_predict.search import run_search
+
+    rng = np.random.default_rng(0)
+    n = 60
+    X = rng.normal(size=(n, 25))
+    codes = np.digitize(X[:, 0] + 0.3 * rng.normal(size=n), [-0.4, 0.4][: len(labels) - 1])
+    y = np.asarray(labels)[codes]
+    X_df = pd.DataFrame(X, columns=np.arange(1000, 1100, 4))
+    df, _ = run_search(
+        X_df,
+        pd.Series(y),
+        "classification",
+        folds=3,
+        tier="quick",
+        models_to_test=["XGBoost"],
+        enabled_models=["XGBoost"],
+        preprocessing_methods={"raw": True},
+        enable_variable_subsets=False,
+        enable_region_subsets=False,
+        xgb_n_estimators_list=[30],
+        xgb_learning_rates=[0.2],
+        xgb_max_depths=[3],
+        early_stopping_rounds=es,
+    )
+    assert len(df) > 0
+    row = df.iloc[0]
+    assert 0.0 <= row["Accuracy"] <= 1.0 and row["Accuracy"] > 0.5
+    if es:
+        assert 1 <= int(row["n_estimators_selected"]) <= 30
+    # Same model as the validation rebuild (which fits codes and decodes them).
+    from spectral_predict.search import compute_validation_metrics_for_top_models
+
+    out = compute_validation_metrics_for_top_models(
+        df.copy(), X, y, X, y, "classification", np.arange(1000, 1100, 4), top_n=len(df)
+    )
+    for _, r in out.iterrows():
+        assert r["val_Accuracy"] == pytest.approx(r["Accuracy"])
+        assert r["val_F1"] == pytest.approx(r["F1"])
 
 
 # --- Bayesian (R003) -------------------------------------------------------------------

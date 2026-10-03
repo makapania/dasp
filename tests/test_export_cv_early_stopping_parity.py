@@ -252,6 +252,28 @@ def test_emitted_constant_reflects_threaded_value(esr):
     assert f"EARLY_STOPPING_ROUNDS = {expected}" in code
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (40, 40),
+        (40.0, 40),
+        ("40", 40),
+        (float("inf"), None),
+        (float("nan"), None),
+        (1.9, None),
+        (True, None),
+        (0, None),
+        (-3, None),
+        ("abc", None),
+    ],
+)
+def test_early_stopping_rounds_is_parsed_strictly(raw, expected):
+    """DeepSeek final review: patience is parsed like the round-count metadata
+    (positive integer or None); inf used to raise OverflowError, 1.9 became 1."""
+    gen = CodeGenerator(_build_model_config(raw), ExportOptions(format="script"))
+    assert gen.early_stopping_rounds == expected
+
+
 @pytest.mark.parametrize("imbalance_method", [None, "class_weight", "smote"])
 def test_export_never_passes_an_eval_set(imbalance_method):
     """No exported CV path may early-stop on the test fold."""

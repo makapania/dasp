@@ -124,21 +124,19 @@ class CodeGenerator:
         # does in-app. Lives on `model_config` (set by the GUI export path from the
         # result row) and falls back to training_config for completeness. None or
         # <=0 means the configured round count is used as is.
+        from .cv_utils import parse_bool_cell, parse_count_cell
+
         _es_raw = model_config.get(
             'early_stopping_rounds',
             _training_config.get('early_stopping_rounds', None),
         )
-        try:
-            _es_int = int(_es_raw) if _es_raw is not None else None
-        except (TypeError, ValueError):
-            _es_int = None
-        self.early_stopping_rounds = _es_int if (_es_int and _es_int > 0) else None
+        # Positive integer (int, integral float or digit string) or None; NaN, inf,
+        # bools and fractions mean no round selection.
+        self.early_stopping_rounds = parse_count_cell(_es_raw)
         # Boosters with round selection: the in-app final model was fitted at
         # n_estimators_fit rounds and truncated to n_estimators_selected.
         # Parsed with the same rules as cv_utils.round_truncation_from_row; an
         # inconsistent pair (not 1 <= selected <= fit) means no truncation.
-        from .cv_utils import parse_bool_cell, parse_count_cell
-
         self.n_estimators_fit = None
         self.n_estimators_selected = None
         if parse_bool_cell(model_config.get('round_selection_truncated')):
