@@ -2147,8 +2147,15 @@ def create_auto_ensembles(results_df, X_train, y_train, task_type, reconstruct_f
                     # these rows, so using it here would report calibration as CV.
 
                 if np.all(cv_filled):
+                    # Same F1 definition as every search engine
+                    # (scoring.classification_metrics: binary positive = second
+                    # sorted class, multiclass macro); was support-weighted.
+                    from .scoring import classification_metrics
+
                     accuracy = accuracy_score(y_train, cv_predictions)
-                    f1 = f1_score(y_train, cv_predictions, average="weighted")
+                    f1 = classification_metrics(
+                        y_train, cv_predictions, classes=np.unique(y_train)
+                    )['F1']
                 else:
                     warnings.warn(
                         f"{ensemble_name}: fewer than 2 base models could be rebuilt on some "

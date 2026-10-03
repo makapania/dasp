@@ -653,6 +653,72 @@ def test_previous_policy_booster_study_is_reported_not_reused(tmp_path, monkeypa
     assert optuna.load_study(study_name=old_name, storage=url).trials == old_trials
 
 
+def test_previous_policy_study_with_label_segment_is_reported(tmp_path, monkeypatch):
+    """Merge of #91: a LightGBM study on raw labels saved after the label policy but
+    before the booster fix (name with |labels=, without |boost_rounds=) is reported as
+    not reused, and the current name keeps |labels= AFTER |boost_rounds=."""
+    import hashlib
+
+    import optuna
+
+    from spectral_predict import run_state
+    from spectral_predict.unified_bayesian import (
+        BOOSTING_ROUND_POLICY,
+        LABEL_FIT_POLICY,
+        RESUME_DECLINED_KEY,
+        run_unified_bayesian,
+    )
+
+    X, y01 = _classification_data(n=36)
+    y = np.where(y01 == 1, 5, 1)  # integer labels that are not 0..K-1 -> "raw" policy
+    opts = dict(
+        X=X,
+        y=y,
+        wavelengths=np.linspace(900, 1700, X.shape[1]),
+        model_name="LightGBM",
+        task_type="classification",
+        cv_folds=3,
+        early_stopping_rounds=10,
+        random_state=42,
+        verbose=False,
+    )
+    path = tmp_path / "old_label_policy.sqlite3"
+    url = f"sqlite:///{path.as_posix()}"
+    monkeypatch.setattr(run_state, "get_storage_url", lambda: url)
+
+    hashed = []
+    real_sha256 = hashlib.sha256
+
+    def _recording_sha256(data=b"", *args, **kwargs):
+        if isinstance(data, bytes):
+            hashed.append(data)
+        return real_sha256(data, *args, **kwargs)
+
+    monkeypatch.setattr(hashlib, "sha256", _recording_sha256)
+    run_unified_bayesian(**opts, n_trials=0, enable_sqlite_persistence="never")
+    monkeypatch.setattr(hashlib, "sha256", real_sha256)
+
+    boost_seg = f"|boost_rounds={BOOSTING_ROUND_POLICY}"
+    label_seg = f"|labels={LABEL_FIT_POLICY}"
+    final = [d.decode() for d in hashed if boost_seg.encode() in d and label_seg.encode() in d]
+    assert final, "no study-name config with both segments was hashed"
+    config = final[-1]
+    assert config.index(boost_seg) < config.index(label_seg)
+    pre_fix = config.replace(boost_seg, "")
+    old_base = f"unified_bayesian_LightGBM_{real_sha256(pre_fix.encode()).hexdigest()[:8]}"
+
+    old_name = f"{old_base}_env1_olddigest"
+    prior = optuna.create_study(study_name=old_name, storage=url)
+    prior.add_trial(optuna.trial.create_trial(value=0.5))
+    notes = []
+    run_unified_bayesian(
+        **opts, n_trials=1, enable_sqlite_persistence="always", progress_callback=notes.append
+    )
+    notices = [n for n in notes if n.get("booster_scoring_changed")]
+    assert len(notices) == 1 and old_name in notices[0]["message"]
+    assert notices[0].get(RESUME_DECLINED_KEY) is True
+
+
 def _unsupported_boosters():
     from catboost import CatBoostRegressor
     from lightgbm import LGBMRegressor

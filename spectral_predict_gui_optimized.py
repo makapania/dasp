@@ -2410,6 +2410,76 @@ class SidebarNavigation:
                 section['content'].config(bg=sidebar_bg)
 
 
+# ===== HELPERS: CLASSIFICATION LABEL POLICY IN THE GUI =====
+# The searches fit integer-valued numeric labels as given and label-encode only
+# text / non-integer labels (scoring.classification_fit_labels). The GUI must
+# hand the validation rebuild the labels the models were fitted on, and only
+# decode metric keys with an encoder when those keys really are codes.
+
+def _display_label_encoder(y):
+    """LabelEncoder for display/decoding, or None when labels are fitted raw.
+
+    Integer-valued numeric labels are fitted (and keyed in per-class metrics)
+    as the user's own values, so decoding them through an encoder would show
+    e.g. class 1 as "2" for labels {1, 2, 100}.
+    """
+    from spectral_predict.scoring import classification_fit_labels
+
+    return classification_fit_labels(np.asarray(y)).encoder
+
+
+def _holdout_labels_as_fitted(encoder, y_train_codes, y_val_codes, y_train_raw):
+    """Return (y_train, y_val) in the label space the searches fitted.
+
+    The Bayesian holdout block maps validation labels onto the training classes
+    through a temporary LabelEncoder. For integer-valued numeric labels the
+    models were fitted on the raw values (PLS-DA regresses on them), so the
+    codes are decoded back; text / non-integer labels stay encoded.
+    """
+    if _display_label_encoder(y_train_raw) is None:
+        return (
+            encoder.inverse_transform(np.asarray(y_train_codes, dtype=int)),
+            encoder.inverse_transform(np.asarray(y_val_codes, dtype=int)),
+        )
+    return y_train_codes, y_val_codes
+
+
+def _encode_holdout_pair(encoder, y_train, y_val, drop_unknown=False):
+    """Encode training and validation labels with the same search encoder.
+
+    Used by the NSGA-II holdout block: when the search label-encoded the target
+    (text / non-integer labels), its models were fitted on codes, so both label
+    vectors handed to the validation rebuild must be codes. A label unknown to
+    the encoder raises ValueError, unless ``drop_unknown`` is set: then unknown
+    validation rows are dropped (as in the Bayesian holdout block) and the
+    result is ``(y_train, y_val_kept, keep_mask)``.
+    """
+    if encoder is None:
+        y_val = np.asarray(y_val)
+        if drop_unknown:
+            return y_train, y_val, np.ones(len(y_val), dtype=bool)
+        return y_train, y_val
+
+    classes_str = {str(c) for c in encoder.classes_}
+
+    def _enc(values):
+        values = np.asarray(values)
+        try:
+            return encoder.transform(values)
+        except (ValueError, TypeError):
+            # the NSGA-II encoder may have been fitted on str-normalised labels
+            return encoder.transform(values.astype(str))
+
+    if not drop_unknown:
+        return _enc(y_train), _enc(y_val)
+    y_val = np.asarray(y_val)
+    keep = np.array(
+        [v in set(encoder.classes_.tolist()) or str(v) in classes_str for v in y_val.tolist()],
+        dtype=bool,
+    )
+    return _enc(y_train), (_enc(y_val[keep]) if keep.any() else y_val[keep]), keep
+
+
 # ===== HELPER: ROBUST AUTOSCALE FLAG PARSE =====
 # Pulled out of the metadata save / code-export sites so we share the same
 # string-aware parsing the code generator uses (`bool("False")` is True in
@@ -25556,7 +25626,9 @@ class SpectralPredictApp:
                     mae = mean_absolute_error(y_arr, cv_predictions)
 
                     # Calculate RPD (Ratio of Performance to Deviation)
-                    rpd = np.std(y_arr) / rmse if rmse > 0 else 0
+                    # (scoring.spread_ratio: a perfect ensemble gives inf, as everywhere else)
+                    from spectral_predict.scoring import spread_ratio
+                    rpd = spread_ratio(float(np.std(y_arr)), rmse)
 
                     # Compute calibration metrics (ensemble prediction on training data)
                     cal_predictions = ensemble.predict(X_filtered)
@@ -30689,6 +30761,12 @@ class SpectralPredictApp:
                                         )
                                         raise ValueError("No validation labels match training classes")
 
+                                # The Bayesian models were fitted on the raw labels when
+                                # they are integer-valued: rebuild them on the same values.
+                                y_train_np, y_val_np = _holdout_labels_as_fitted(
+                                    temp_encoder, y_train_np, y_val_np, y_np_clean
+                                )
+
                             # Compute validation metrics
                             results_df = compute_validation_metrics_for_top_models(
                                 df_results=results_df,
@@ -30729,14 +30807,18 @@ class SpectralPredictApp:
                     else:
                         self._log_progress(f"    CV Error: {best.get('CV Error', 'N/A'):.4f}")
 
-                # Store label_encoder for classification (needed for legend display)
+                # Store label_encoder for classification (needed for legend display).
+                # None when the labels were fitted raw (integer-valued numeric): the
+                # per-class keys are then the user's own labels, not codes.
+                # Set the local too: the shared tail below (`self.label_encoder =
+                # label_encoder`) runs for every optimization method and would
+                # otherwise wipe the Bayesian encoder (text/fractional labels then
+                # showed codes in the legend and saved models returned codes).
                 if task_type == 'classification':
-                    from sklearn.preprocessing import LabelEncoder
-                    label_encoder = LabelEncoder()
-                    label_encoder.fit(y_np)
-                    self.label_encoder = label_encoder
+                    label_encoder = _display_label_encoder(y_np)
                 else:
-                    self.label_encoder = None
+                    label_encoder = None
+                self.label_encoder = label_encoder
 
             elif optimization_method == "nsga2":
                 # === NSGA-II MULTI-OBJECTIVE OPTIMIZATION ===
@@ -30843,8 +30925,23 @@ class SpectralPredictApp:
                                 if len(_types) > 1:
                                     y_val_np = _normalize_mixed_type_labels(y_val_np)
                             try:
-                                y_val_np = label_encoder.transform(y_val_np)
-                                self._log_progress("  Encoded validation labels using training encoder")
+                                # Training labels too: the NSGA-II models were fitted on
+                                # these codes (passing raw training labels with coded
+                                # validation labels scored every row as wrong).
+                                # Unknown validation labels are dropped with a warning
+                                # (as in the Bayesian block) instead of failing every row.
+                                y_np_clean, y_val_np, _keep = _encode_holdout_pair(
+                                    label_encoder, y_np_clean, y_val_np, drop_unknown=True
+                                )
+                                if not _keep.all():
+                                    self._log_progress(
+                                        f"  [Warning] {int((~_keep).sum())} validation labels not in "
+                                        f"training classes; dropping those rows for validation metrics"
+                                    )
+                                    X_val_np = X_val_np[_keep]
+                                if not _keep.any():
+                                    raise ValueError("No validation labels match training classes")
+                                self._log_progress("  Encoded training + validation labels using training encoder")
                             except ValueError as e:
                                 self._log_progress(f"  [Warning] Could not encode validation labels: {e}")
 
@@ -31666,6 +31763,8 @@ For detailed documentation, see the User Guide.
             'R2', 'R2cv', 'R²', 'Accuracy', 'Accuracycv',
             'ROC_AUC', 'F1', 'F1cv', 'ROC_AUCcv', 'RPD', 'RER',
             'CCC', 'CCCcv',
+            # Figures of merit (scoring.regression_figures_of_merit)
+            'RPIQ', 'RPIQpred', 'RPDpred', 'RERpred', 'CCCpred',
         }
 
         if shift_held and self.results_sort_keys:
@@ -33418,17 +33517,20 @@ For detailed documentation, see the User Guide.
         # Add class values description label (maps C0, C1, etc. to original Y values)
         # Use label_encoder to get original text labels if available
         encoder = getattr(self, 'label_encoder', None)
-        if encoder is not None and hasattr(encoder, 'classes_'):
+        n_enc = len(getattr(encoder, 'classes_', [])) if encoder is not None else 0
+
+        def _is_code(label):
+            # Decode only keys that really are 0..K-1 codes of this encoder.
+            # Raw numeric keys (labels fitted as given, e.g. {1, 2, 100}) must
+            # not be read as indices.
+            text = str(label).strip()
+            return text.isdigit() and int(text) < n_enc
+
+        if n_enc and all(_is_code(lbl) for lbl in class_labels):
             # Map encoded values back to original labels
-            class_value_parts = []
-            for i, encoded_label in enumerate(class_labels):
-                try:
-                    # encoded_label is the numeric class (0, 1, 2...)
-                    # encoder.classes_[encoded_label] gives original text
-                    original_name = encoder.classes_[int(encoded_label)]
-                    class_value_parts.append(f"C{encoded_label}={original_name}")
-                except (IndexError, ValueError):
-                    class_value_parts.append(f"C{i}={encoded_label}")
+            class_value_parts = [
+                f"C{lbl}={encoder.classes_[int(str(lbl).strip())]}" for lbl in class_labels
+            ]
         else:
             # No encoder - just show class labels as-is
             class_value_parts = [f"C{i}={label}" for i, label in enumerate(class_labels)]
@@ -37995,20 +38097,19 @@ Performance (Classification):
         self._add_plot_export_button(self.refine_plot_frame, fig, "confusion_matrix")
 
         # Calculate and display metrics
-        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+        # Same definitions as the Results tab (scoring.classification_metrics):
+        # binary positive class = second sorted label, multiclass macro.
+        from spectral_predict.scoring import classification_metrics
 
-        accuracy = accuracy_score(self.refined_y_true, self.refined_y_pred)
-
-        # Handle binary vs multi-class
-        n_classes = len(class_labels)
-        if n_classes == 2:
-            precision = precision_score(self.refined_y_true, self.refined_y_pred, average='binary', zero_division=0)
-            recall = recall_score(self.refined_y_true, self.refined_y_pred, average='binary', zero_division=0)
-            f1 = f1_score(self.refined_y_true, self.refined_y_pred, average='binary', zero_division=0)
-        else:
-            precision = precision_score(self.refined_y_true, self.refined_y_pred, average='weighted', zero_division=0)
-            recall = recall_score(self.refined_y_true, self.refined_y_pred, average='weighted', zero_division=0)
-            f1 = f1_score(self.refined_y_true, self.refined_y_pred, average='weighted', zero_division=0)
+        _panel_m = classification_metrics(
+            self.refined_y_true,
+            self.refined_y_pred,
+            classes=np.unique(np.concatenate([self.refined_y_true, self.refined_y_pred])),
+        )
+        accuracy = _panel_m['Accuracy']
+        precision = _panel_m['Precision']
+        recall = _panel_m['Recall']
+        f1 = _panel_m['F1']
 
         # Display metrics in text box
         metrics_text = f"""
@@ -41243,8 +41344,15 @@ F1 Score:  {f1:.4f}
             # This matches the logic in search.py lines 127-143
             local_label_encoder = None
             if task_type == "classification":
-                # Check if labels are non-numeric (text labels like "Clean", "Contaminated", etc.)
-                if not pd.api.types.is_numeric_dtype(y_series.dtype):
+                # Encode text labels ("Clean", "Contaminated", ...) and non-integer
+                # numeric labels ({0.1, 0.2}: sklearn reads them as continuous);
+                # integer-valued labels are fitted as given, as in every search
+                # (scoring.classification_fit_labels).
+                from spectral_predict.scoring import labels_are_integer_valued
+                if (
+                    not pd.api.types.is_numeric_dtype(y_series.dtype)
+                    or not labels_are_integer_valued(y_series.to_numpy())
+                ):
                     from sklearn.preprocessing import LabelEncoder
                     local_label_encoder = LabelEncoder()
                     y_original = y_series.copy()  # Keep original for logging
@@ -42127,6 +42235,19 @@ F1 Score:  {f1:.4f}
             all_y_pred = []
             all_y_proba = []  # Store prediction probabilities for classification
             all_cv_indices = []  # Store CV sample indices for specimen ID mapping
+
+            def _aligned_fold_proba(proba, fitted):
+                """One probability column per dataset class (zeros for a class the
+                fold model never saw), as in the grid search."""
+                from spectral_predict.scoring import align_proba_to_classes
+                try:
+                    return align_proba_to_classes(
+                        proba, getattr(fitted, 'classes_', None), np.unique(y_array)
+                    )
+                except ValueError as _e:
+                    print(f"WARNING: fold probabilities could not be aligned: {_e}")
+                    return proba
+
             X_raw = X_work  # For derivative+subset, this is preprocessed; for others, it's raw
 
             # A Y-transform (non-early-stopping) wraps the pipeline in a
@@ -42233,14 +42354,14 @@ F1 Score:  {f1:.4f}
                     _fold_steps = getattr(pipe_fold, 'named_steps', {})
                     if hasattr(pipe_fold, 'predict_proba'):
                         y_proba = pipe_fold.predict_proba(X_test)
-                        all_y_proba.append(y_proba)
+                        all_y_proba.append(_aligned_fold_proba(y_proba, pipe_fold))
                     elif 'model' in _fold_steps and hasattr(_fold_steps['model'], 'predict_proba'):
                         y_proba = _fold_steps['model'].predict_proba(X_test)
-                        all_y_proba.append(y_proba)
+                        all_y_proba.append(_aligned_fold_proba(y_proba, _fold_steps['model']))
                     elif 'lr' in _fold_steps and hasattr(_fold_steps['lr'], 'predict_proba'):
                         # For PLS-DA, LogisticRegression is named 'lr'
                         y_proba = _fold_steps['lr'].predict_proba(X_test)
-                        all_y_proba.append(y_proba)
+                        all_y_proba.append(_aligned_fold_proba(y_proba, _fold_steps['lr']))
 
                 if task_type == "regression":
                     rmse = np.sqrt(mean_squared_error(y_test, y_pred))
@@ -42265,11 +42386,54 @@ F1 Score:  {f1:.4f}
                     print(f"Fold MAE:  {mae:.4f}")
                     print(f"{'='*80}\n")
                 else:
-                    acc = accuracy_score(y_test, y_pred)
-                    prec = precision_score(y_test, y_pred, average='weighted', zero_division=0)
-                    rec = recall_score(y_test, y_pred, average='weighted', zero_division=0)
-                    f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
-                    fold_metrics.append({"accuracy": acc, "precision": prec, "recall": rec, "f1": f1})
+                    # Per-fold values feed the *_std spread only; the headline
+                    # *_mean values are pooled below. Same definitions as the
+                    # Results tab (scoring.classification_metrics).
+                    from spectral_predict.scoring import classification_metrics
+
+                    _fold_m = classification_metrics(
+                        y_test, y_pred, classes=np.unique(y_array)
+                    )
+                    fold_metrics.append({
+                        "accuracy": _fold_m['Accuracy'], "precision": _fold_m['Precision'],
+                        "recall": _fold_m['Recall'], "f1": _fold_m['F1'],
+                    })
+
+            # Repeated CV: reduce to ONE out-of-fold prediction per sample before
+            # headline scoring, plots and stored predictions, with the grid
+            # search's policy (cv_utils.reduce_repeated_cv_predictions): mean
+            # prediction (regression) or majority vote (classification, ties to
+            # the earliest fold), probabilities averaged. fold_metrics (the *_std
+            # spread) keep every fold.
+            _cv_idx = np.asarray(all_cv_indices)
+            if len(_cv_idx) and len(np.unique(_cv_idx)) < len(_cv_idx):
+                from collections import Counter as _Counter
+
+                _yt = np.asarray(all_y_true)
+                _yp = np.asarray(all_y_pred)
+                _pr = None
+                if all_y_proba:
+                    try:
+                        _pr = np.concatenate(all_y_proba, axis=0)
+                        if len(_pr) != len(_cv_idx):
+                            _pr = None
+                    except ValueError:
+                        _pr = None
+                _samples = np.unique(_cv_idx)
+                _red_true, _red_pred, _red_proba = [], [], []
+                for _s in _samples:
+                    _m = _cv_idx == _s
+                    _red_true.append(_yt[_m][0])
+                    if task_type == "regression":
+                        _red_pred.append(float(np.mean(_yp[_m])))
+                    else:
+                        _red_pred.append(_Counter(_yp[_m].tolist()).most_common(1)[0][0])
+                    if _pr is not None:
+                        _red_proba.append(_pr[_m].mean(axis=0))
+                all_y_true = list(_red_true)
+                all_y_pred = list(_red_pred)
+                all_cv_indices = list(_samples)
+                all_y_proba = [np.vstack(_red_proba)] if _pr is not None else []
 
             if n_rounds_selected is not None:
                 _rounds_line = (
@@ -42325,39 +42489,42 @@ F1 Score:  {f1:.4f}
                 results['y_quartiles'] = quartiles.tolist()
 
                 # Compute RPD and Bias from aggregated CV predictions
-                rpd = float(np.std(all_y_true_arr)) / results['rmse_mean'] if results['rmse_mean'] > 0 else 0.0
+                # (spread_ratio: a perfect model gives inf, as in every search engine)
+                from spectral_predict.scoring import spread_ratio
+
+                rpd = spread_ratio(float(np.std(all_y_true_arr)), results['rmse_mean'])
                 bias_cv = float(np.mean(all_y_pred_arr - all_y_true_arr))
                 results['rpd'] = rpd
                 results['bias'] = bias_cv
             else:
-                results['accuracy_mean'] = np.mean([m['accuracy'] for m in fold_metrics])
+                # Headline CV metrics from the pooled out-of-fold predictions,
+                # as in the grid search (R030); std is the fold-to-fold spread.
+                from spectral_predict.scoring import classification_metrics
+
+                _pooled_m = classification_metrics(
+                    np.asarray(all_y_true), np.asarray(all_y_pred), classes=np.unique(y_array)
+                )
+                results['accuracy_mean'] = _pooled_m['Accuracy']
                 results['accuracy_std'] = np.std([m['accuracy'] for m in fold_metrics])
-                results['precision_mean'] = np.mean([m['precision'] for m in fold_metrics])
+                results['precision_mean'] = _pooled_m['Precision']
                 results['precision_std'] = np.std([m['precision'] for m in fold_metrics])
-                results['recall_mean'] = np.mean([m['recall'] for m in fold_metrics])
+                results['recall_mean'] = _pooled_m['Recall']
                 results['recall_std'] = np.std([m['recall'] for m in fold_metrics])
-                results['f1_mean'] = np.mean([m['f1'] for m in fold_metrics])
+                results['f1_mean'] = _pooled_m['F1']
                 results['f1_std'] = np.std([m['f1'] for m in fold_metrics])
 
-                # Compute ROC AUC from aggregated CV probabilities
+                # ROC AUC from the pooled, class-aligned CV probabilities, with
+                # the same definition as the Results tab.
                 results['roc_auc'] = np.nan
                 if all_y_proba:
                     try:
-                        from sklearn.metrics import roc_auc_score
-                        y_true_arr = np.array(all_y_true)
-                        y_proba_arr = np.concatenate(all_y_proba, axis=0)
-                        unique_classes = np.unique(y_true_arr)
-                        if len(unique_classes) == 2:
-                            # Binary: use probability of positive class
-                            if y_proba_arr.ndim == 2:
-                                results['roc_auc'] = roc_auc_score(y_true_arr, y_proba_arr[:, 1])
-                            else:
-                                results['roc_auc'] = roc_auc_score(y_true_arr, y_proba_arr)
-                        elif len(unique_classes) > 2:
-                            # Multiclass: use OVR
-                            results['roc_auc'] = roc_auc_score(
-                                y_true_arr, y_proba_arr, multi_class='ovr', average='weighted'
-                            )
+                        _pooled_auc = classification_metrics(
+                            np.asarray(all_y_true),
+                            np.asarray(all_y_pred),
+                            classes=np.unique(y_array),
+                            y_proba=np.concatenate(all_y_proba, axis=0),
+                        )['ROC_AUC']
+                        results['roc_auc'] = _pooled_auc
                     except Exception as e:
                         print(f"WARNING: Could not compute ROC AUC: {e}")
 
@@ -42464,8 +42631,10 @@ NOTE: {'Derivative + subset detected! Using full-spectrum preprocessing to match
                 # Build comparison text for classification
                 loaded_acc = "N/A"
                 acc_diff = "N/A"
-                if run_inputs['row'] is not None and 'Accuracy' in run_inputs['row']:
-                    loaded_acc_value = run_inputs['row'].get('Accuracy')
+                # Compare CV with CV: the row's Accuracycv, not its calibration
+                # Accuracy (which made an unchanged model look worse).
+                if run_inputs['row'] is not None and 'Accuracycv' in run_inputs['row']:
+                    loaded_acc_value = run_inputs['row'].get('Accuracycv')
                     if loaded_acc_value is not None and not pd.isna(loaded_acc_value):
                         loaded_acc = f"{loaded_acc_value:.4f}"
                         acc_diff_value = results['accuracy_mean'] - loaded_acc_value
@@ -42484,8 +42653,8 @@ Cross-Validation Performance ({cv_strategy}{f', {n_folds} folds' if cv_strategy 
   F1 Score:  {results['f1_mean']:.4f} ± {results['f1_std']:.4f}{roc_auc_text}
 
 COMPARISON TO LOADED MODEL:
-  Original Accuracy (from Results tab): {loaded_acc}
-  Refined Accuracy (just computed):     {results['accuracy_mean']:.4f}
+  Original CV Accuracy (Results tab):   {loaded_acc}
+  Refined CV Accuracy (just computed):  {results['accuracy_mean']:.4f}
   Difference:                           {acc_diff}
 """
 
@@ -42553,9 +42722,13 @@ Calibration Performance (n={len(y_array)}):
   R2_cal:   {cal_r2:.4f}
 """
                 else:
-                    from sklearn.metrics import accuracy_score, f1_score
-                    cal_acc = accuracy_score(y_array, y_cal_pred)
-                    cal_f1 = f1_score(y_array, y_cal_pred, average='weighted', zero_division=0)
+                    # Same definitions as the Results tab (classification_metrics)
+                    from spectral_predict.scoring import classification_metrics
+                    _cal_m = classification_metrics(
+                        y_array, y_cal_pred, classes=np.unique(y_array)
+                    )
+                    cal_acc = _cal_m['Accuracy']
+                    cal_f1 = _cal_m['F1']
                     results['cal_accuracy'] = cal_acc
                     results['cal_f1'] = cal_f1
                     cal_text = f"""
@@ -42631,7 +42804,8 @@ Calibration Performance (n={len(y_array)}):
                         val_r2 = r2_score(val_y, val_y_pred)
                         val_mae = mean_absolute_error(val_y, val_y_pred)
                         val_bias = float(np.mean(val_y_pred - val_y))
-                        val_rpd = float(np.std(val_y)) / val_rmse if val_rmse > 0 else 0.0
+                        from spectral_predict.scoring import spread_ratio
+                        val_rpd = spread_ratio(float(np.std(val_y)), val_rmse)
                         results['val_rmse'] = val_rmse
                         results['val_r2'] = val_r2
                         results['val_mae'] = val_mae
@@ -42646,11 +42820,17 @@ External Validation Performance (n={n_val}):
   RPD_val:  {val_rpd:.2f}
 """
                     else:
-                        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-                        val_acc = accuracy_score(val_y, val_y_pred)
-                        val_prec = precision_score(val_y, val_y_pred, average='weighted', zero_division=0)
-                        val_rec = recall_score(val_y, val_y_pred, average='weighted', zero_division=0)
-                        val_f1 = f1_score(val_y, val_y_pred, average='weighted', zero_division=0)
+                        # Same definitions as the Results tab: classes = training
+                        # classes plus any extra holdout labels.
+                        from spectral_predict.scoring import classification_metrics
+                        _val_m = classification_metrics(
+                            val_y, val_y_pred,
+                            classes=np.unique(np.concatenate([np.unique(y_array), np.unique(val_y)])),
+                        )
+                        val_acc = _val_m['Accuracy']
+                        val_prec = _val_m['Precision']
+                        val_rec = _val_m['Recall']
+                        val_f1 = _val_m['F1']
                         results['val_accuracy'] = val_acc
                         results['val_precision'] = val_prec
                         results['val_recall'] = val_rec
@@ -43206,8 +43386,9 @@ External Validation Performance (n={n_val}):
 
             # Save the model
             # R016: only the encoder the refined model was trained with. Refinement
-            # encodes text labels itself and trains on raw numeric labels, so the
-            # search's encoder (self.label_encoder) never describes this model.
+            # encodes text (and non-integer numeric) labels itself and trains on raw
+            # integer labels, so the search's encoder (self.label_encoder) never
+            # describes this model.
             label_encoder_to_save = snap['label_encoder']
 
             # Prepare CV data for uncertainty estimation

@@ -57,28 +57,6 @@ CROSS_VALIDATION_REGRESSION_TEMPLATE = '''
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from sklearn.base import clone
 
-def _lins_ccc(y_true, y_pred):
-    """Lin's Concordance Correlation Coefficient (Lin 1989, Biometrics 45(1)).
-
-    Display convention: zero-variance inputs return 0.0 (unequal) or 1.0
-    (equal).  Lin (1989) defines CCC as undefined when variance is zero.
-    """
-    y_true = np.asarray(y_true, dtype=np.float64)
-    y_pred = np.asarray(y_pred, dtype=np.float64)
-    if np.isnan(y_true).any() or np.isnan(y_pred).any():
-        return float('nan')
-    mean_t = y_true.mean()
-    mean_p = y_pred.mean()
-    var_t = y_true.var()
-    var_p = y_pred.var()
-    cov = np.mean((y_true - mean_t) * (y_pred - mean_p))
-    denom = var_t + var_p + (mean_t - mean_p) ** 2
-    if denom == 0.0:
-        return 1.0
-    if var_t == 0.0 or var_p == 0.0:
-        return 0.0
-    return float(2.0 * cov / denom)
-
 # Set up cross-validation
 cv = {cv_constructor}
 
@@ -310,43 +288,7 @@ CROSS_VALIDATION_ONE_CLASS_TEMPLATE = '''
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.base import clone
-from sklearn.metrics import (
-    balanced_accuracy_score, recall_score, precision_score,
-    f1_score, accuracy_score, roc_auc_score,
-)
 import numpy as np
-
-def _one_class_metrics(y_true, y_pred, scores=None):
-    y_true = np.asarray(y_true)
-    y_pred = np.asarray(y_pred)
-    y_true_bin = (y_true == -1).astype(int)
-    y_pred_bin = (y_pred == -1).astype(int)
-    metrics = {{}}
-    n_true_outliers = int(y_true_bin.sum())
-    n_true_inliers = int((1 - y_true_bin).sum())
-    if n_true_outliers > 0:
-        metrics['sensitivity'] = recall_score(y_true_bin, y_pred_bin, zero_division=0)
-    else:
-        metrics['sensitivity'] = float('nan')
-    if n_true_inliers > 0:
-        metrics['specificity'] = recall_score(1 - y_true_bin, 1 - y_pred_bin, zero_division=0)
-    else:
-        metrics['specificity'] = float('nan')
-    metrics['precision'] = precision_score(y_true_bin, y_pred_bin, zero_division=0)
-    metrics['f1'] = f1_score(y_true_bin, y_pred_bin, zero_division=0)
-    metrics['accuracy'] = accuracy_score(y_true_bin, y_pred_bin)
-    if n_true_outliers > 0 and n_true_inliers > 0:
-        metrics['balanced_accuracy'] = balanced_accuracy_score(y_true_bin, y_pred_bin)
-    else:
-        metrics['balanced_accuracy'] = float('nan')
-    if scores is not None and n_true_outliers > 0 and n_true_inliers > 0:
-        try:
-            metrics['auc'] = roc_auc_score(y_true_bin, -np.asarray(scores))
-        except (ValueError, TypeError):
-            metrics['auc'] = float('nan')
-    else:
-        metrics['auc'] = float('nan')
-    return metrics
 
 cv = {cv_constructor}
 
@@ -443,6 +385,23 @@ ber = 1.0 - balanced_accuracy
 
 all_y_true_arr = pooled_labels
 y_pred_cv = pooled_preds
+
+# Out-of-fold scores aligned with all_y_true_arr (for the score histogram).
+# decision_function: >= 0 means inlier (the rule used for y_pred above).
+# Under Repeated K-Fold each sample's scores are averaged across repeats,
+# while y_pred_cv is a majority vote of the per-repeat labels, so near the
+# threshold a sample's mean score and its reported label can disagree.
+# Under plain K-Fold every outlier is scored in every fold (as in
+# run_one_class_cv), so outliers appear cv_folds times.
+cv_scores_are_decision = hasattr(model, 'decision_function')
+cv_scores = None
+if all_scores and len(all_scores) == len(all_test_idx):
+    _idx_flat = np.concatenate(all_test_idx)
+    _scores_flat = np.concatenate(all_scores)
+    if _is_repeated:
+        cv_scores = np.array([_scores_flat[_idx_flat == s].mean() for s in unique_samples])
+    else:
+        cv_scores = _scores_flat
 '''
 
 METRICS_ONE_CLASS_TEMPLATE = '''
@@ -547,6 +506,95 @@ PREDICTION_ONE_CLASS_TEMPLATE = '''
 # results.to_csv("predictions.csv", index=False)
 # print(results)
 '''
+
+# Metric helpers used by both the CV block and the final-model block. They are
+# emitted once, ahead of both, so a script exported without CV still defines
+# them (the final-model block prints calibration CCC / one-class metrics).
+# Plain strings, not str.format templates: braces are literal.
+LINS_CCC_HELPER = '''
+# =============================================================================
+# METRIC HELPERS
+# =============================================================================
+
+def _lins_ccc(y_true, y_pred):
+    """Lin's Concordance Correlation Coefficient (Lin 1989, Biometrics 45(1)).
+
+    Display convention: zero-variance inputs return 0.0 (unequal) or 1.0
+    (equal).  Lin (1989) defines CCC as undefined when variance is zero.
+    """
+    y_true = np.asarray(y_true, dtype=np.float64)
+    y_pred = np.asarray(y_pred, dtype=np.float64)
+    if np.isnan(y_true).any() or np.isnan(y_pred).any():
+        return float('nan')
+    mean_t = y_true.mean()
+    mean_p = y_pred.mean()
+    var_t = y_true.var()
+    var_p = y_pred.var()
+    cov = np.mean((y_true - mean_t) * (y_pred - mean_p))
+    denom = var_t + var_p + (mean_t - mean_p) ** 2
+    if denom == 0.0:
+        return 1.0
+    if var_t == 0.0 or var_p == 0.0:
+        return 0.0
+    return float(2.0 * cov / denom)
+'''
+
+ONE_CLASS_METRICS_HELPER = '''
+# =============================================================================
+# METRIC HELPERS (One-Class)
+# =============================================================================
+
+import numpy as np
+from sklearn.metrics import (
+    balanced_accuracy_score, recall_score, precision_score,
+    f1_score, accuracy_score, roc_auc_score,
+)
+
+def _one_class_metrics(y_true, y_pred, scores=None):
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    y_true_bin = (y_true == -1).astype(int)
+    y_pred_bin = (y_pred == -1).astype(int)
+    metrics = {}
+    n_true_outliers = int(y_true_bin.sum())
+    n_true_inliers = int((1 - y_true_bin).sum())
+    if n_true_outliers > 0:
+        metrics['sensitivity'] = recall_score(y_true_bin, y_pred_bin, zero_division=0)
+    else:
+        metrics['sensitivity'] = float('nan')
+    if n_true_inliers > 0:
+        metrics['specificity'] = recall_score(1 - y_true_bin, 1 - y_pred_bin, zero_division=0)
+    else:
+        metrics['specificity'] = float('nan')
+    metrics['precision'] = precision_score(y_true_bin, y_pred_bin, zero_division=0)
+    metrics['f1'] = f1_score(y_true_bin, y_pred_bin, zero_division=0)
+    metrics['accuracy'] = accuracy_score(y_true_bin, y_pred_bin)
+    if n_true_outliers > 0 and n_true_inliers > 0:
+        metrics['balanced_accuracy'] = balanced_accuracy_score(y_true_bin, y_pred_bin)
+    else:
+        metrics['balanced_accuracy'] = float('nan')
+    if scores is not None and n_true_outliers > 0 and n_true_inliers > 0:
+        try:
+            metrics['auc'] = roc_auc_score(y_true_bin, -np.asarray(scores))
+        except (ValueError, TypeError):
+            metrics['auc'] = float('nan')
+    else:
+        metrics['auc'] = float('nan')
+    return metrics
+'''
+
+
+def get_metric_helpers_template(task_type: str) -> str:
+    """Return metric helper definitions shared by the CV and final-model blocks.
+
+    Emit this before either block so exports with CV disabled still define the
+    helpers the final-model block calls.
+    """
+    if task_type == 'one_class':
+        return ONE_CLASS_METRICS_HELPER
+    if task_type == 'classification':
+        return ''
+    return LINS_CCC_HELPER
 
 
 def get_cross_validation_template(

@@ -323,8 +323,11 @@ class TestCallerThreading:
         )
         # Stronger pin: verify the literal fit() call carries the splat.
         # The fit site immediately follows the helper call.
-        assert "model.fit(X_train_final, y_train, **fit_kwargs)" in source, (
-            "Fit site must invoke `model.fit(X_train_final, y_train, **fit_kwargs)` "
+        # y_train_fit: the labels the row's model is fitted on (user labels, or
+        # 0..K-1 codes for XGBoost; scoring.classification_fit_labels). Balanced
+        # sample weights are invariant to that re-coding.
+        assert "model.fit(X_train_final, y_train_fit, **fit_kwargs)" in source, (
+            "Fit site must invoke `model.fit(X_train_final, y_train_fit, **fit_kwargs)` "
             "exactly. A refactor that splits the splat into a separate variable "
             "or moves the kwargs application elsewhere should re-verify the "
             "splat pattern is preserved."
