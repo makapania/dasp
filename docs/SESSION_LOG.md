@@ -743,6 +743,99 @@ producing that fold's score (booster early stopping on the test fold R028/R003/R
 the scored fold R002/R021). Rule now in CLAUDE.md. Also: the 2026-09-28 reviews were Claude-only; Codex gpt-6-astra
 and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before any fix starts.
 
+## 2026-10-02 - Wavelength mapping contract (R009/R026/R112, R031/R078) and label encoder (R016), branch fix/wavelength-mapping
+- **One contract:** `spectral_predict/wavelength_matching.py` (`match_wavelengths`, `resolve_wavelength_list`,
+  `format_wavelength_list`, `WavelengthMatchError`; on the declared surface). Exact axis value first, else the single
+  value within 0.01; missing, two-candidate or two-values-one-column all raise. Tab 7 (both mapping sites), model_io
+  (every former `< 0.01` first-hit loop and `_select_wavelengths_from_dataframe`) and both validation rebuilds use it.
+- **The GUI rounds axes to integers on load** (`_apply_wavelength_filter`, ~19670, refuses sub-integer data with a
+  dialog). So the fine-grid R009 bug is reachable in the GUI only when that filter is skipped (X_original kept, e.g.
+  after its error dialog) and from Python; R031/R078 are reachable in the GUI after nm<->cm-1 conversion (1e7/x
+  columns are not rounded). Do not "simplify" the contract on the assumption that GUI axes are integers.
+- **Legacy %g handling (revised after review round 1, Codex BLOCK):** a numeric window around the rounded value is
+  wrong below powers of ten (`"10000"` would match 9999.97, which %g prints as `"9999.97"`) and for negatives. Match a
+  legacy token to the axis columns whose OWN `f"{a:g}"` equals the token, and require exactly one. Telling new rows
+  from old ones per row also failed: repr writes `10000.1`, which %g also writes. The writer now appends a `0` to any
+  mantissa that lacks a trailing zero after the decimal point (`10000.10`, `1.0e-05`, `7407.4074074074080`); %g
+  strips trailing zeros, so it never writes such a token, and classification is per token. Rows written by
+  `1f3c671` (plain repr) never shipped.
+- **Old models with %g-rounded metadata wavelengths:** the pre-fix refit stored the parsed `all_vars` floats. On a
+  0.012 grid ~45% of them have both neighbours within ±0.01, so unstamped models are mapped with
+  `match_wavelengths(..., legacy_g=True)` (the same %g-text rule) at predict time and in the load-time replay; if even
+  that is ambiguous, load warns and predict raises "Retrain".
+- **Ensembles are excluded from the retrain replay:** the GUI ensemble save stores `wavelengths == full_wavelengths`
+  (the whole exact axis) for every member, so replaying the Tab 7 first-hit rule would flag every fine-grid ensemble
+  falsely. Members carry `ensemble_parent`/`is_base_model`.
+- **Old saved models:** `save_model` now stamps `metadata['wavelength_matching'] = 1`. On load, an unstamped Path A model
+  (`use_full_spectrum_preprocessing` + `full_wavelengths`) replays the old first-hit-within-0.5 mapping against
+  `full_wavelengths` (= the Tab 7 training axis) and warns if any feature differs (Tab 8 load shows a dialog).
+  Prediction already read the named column before the fix, so old models predict exactly as before; only the warning
+  is new. Not auto-remapped to the neighbour on purpose (brief: warn + retrain).
+- **GUI `wavelength_indices` must be a list:** the one-class validation block tests `if wavelength_indices:`; a numpy
+  array there raises "truth value of an array is ambiguous". The refit sites call `.tolist()`.
+- **R016:** refinement trains on raw numeric labels (it encodes only text labels), so `self.label_encoder` (fitted on
+  every Bayesian/NSGA classification search) never belongs to a refined model; the save fallback is gone.
+  `save_model` also drops an encoder whose model `classes_` are not codes 0..n-1 (warning), and `predict_with_model`
+  skips decoding for such legacy artifacts. Display-only fallbacks (`refined_label_encoder or self.label_encoder` at
+  ~21176/21198/37715/38596) still mis-label numeric classes in tooltips/plots: not fixed here.
+- **Validation failures are surfaced via `df.attrs["validation_failures"]`** (`{row index: reason}`) and
+  `df.attrs["validation_attempted"]` from both `compute_validation_metrics_for_top_models` and the one-class twin;
+  the GUI logs "computed for only X of top N" plus reasons, counting only this run's non-failed attempted rows.
+  The one-class helper now clears val_* on attempted rows first (it used to keep an earlier run's numbers). A
+  supervised row with no usable `all_vars` is validated on the full spectrum only if it is tagged full AND its
+  `n_vars` equals the column count.
+- **Review round 2 (Codex BLOCK on 820c039):**
+  - The R016 class-count rule was wrong: an encoder fit on a,b,c with a model trained on codes for a,b only is a
+    valid pair. Only provable staleness (model classes not codes 0..n-1 of the encoder) is rejected; ownership is
+    enforced where the encoder is chosen (Tab 7 saves only `refined_label_encoder`).
+  - Legacy `%g` interpretation at predict is limited to `_is_legacy_tab7_model` metadata (unstamped Tab 7 Path A).
+    Ensembles/multiclass keep exact-first; `save_ensemble` stamps its top-level metadata too.
+  - Legacy tokens are classified by their TEXT (`_looks_like_g_token`: <=6 significant digits, no trailing zero
+    after the point, fixed notation only for 1e-4 <= |v| < 1e6), never by re-formatting the parsed value, which
+    fails for subnormals (`float('1e-318')` prints `9.99999e-319`).
+  - Success is recorded, not inferred: `attrs["validation_succeeded"]` from both helpers (try/else). One-class
+    `val_BalancedAcc` is NaN by design on an inlier-only validation set.
+  - The missing-`all_vars` fallback needs an affirmative `"full"` tag (`SubsetTag`, or `Subset` when SubsetTag is
+    null) and matching `n_vars`; the rule is `wavelength_matching._full_spectrum_fallback_refusal`, shared by
+    search validation, GUI ensemble rebuild and `ensemble.extract_preprocessor_config`.
+  - Ensemble paths converted: GUI `_reconstruct_models_from_results` (`parse_wavelength_subset` now takes the row;
+    failures raise and the row is excluded with "[!] Failed to reconstruct"), `preprocessing_wrapper.
+    PreprocessorConfig` and `ensemble.extract_preprocessor_config`. The wrapper-level
+    `_match_wavelengths_normalized` (WavelengthSubsetWrapper predict path) was converted at the merge of main
+    (PR #84) in its new home `src/spectral_predict/model_wrappers.py`; no copy remains in the GUI or model_io. Test fixtures that rebuilt full rows without `all_vars` now carry
+    `SubsetTag="full"` + `n_vars`, as real search rows do.
+  - `compute_composite_score` re-keys validation attrs after `reset_index` (`scoring._remap_validation_attrs`).
+- **Review round 3 (Codex BLOCK on dae6654):**
+  - Encoder ownership is now RECORDED, not inferred: `save_model` writes `metadata['label_encoder_owned']=True`
+    whenever it keeps an encoder (dropping only provably stale ones: bool or non-code classes). Prediction decodes
+    only classification models, and only (a) stamped encoders whose codes are valid, or (b) for unstamped legacy
+    files, encoders that provably fit (model classes == codes 0..n-1, same count). Everything else returns raw
+    predictions with a warning. No class-count rule on new files (subset-class models stay valid); the count rule
+    survives only as the legacy proof. Raw {0,1} next to a stale x,y,z is indistinguishable from a subset-trained
+    model without the stamp, hence no decoding.
+  - Model Development loading (`_load_model_for_refinement`) applies `_full_spectrum_fallback_refusal`; with no
+    `all_vars`, `top_vars` is used only if it maps and its count equals `n_vars` (it keeps at most the top 30).
+    Otherwise "# ERROR" in the wavelength box.
+  - `_looks_like_g_token` now checks the exponent grammar exactly as %g writes it: two-digit padded exponent, more
+    digits only when needed, and exponent form only for exp < -4 or >= 6. `1e+00`, `1e+03`, `1e+006`, `1.5e+05`
+    are matched exactly.
+  - Multi-class holdout val_* need no pre-clear: the supervised helper re-initialises every val column to NaN for
+    ALL rows on entry (whole-column assignment). Pinned by a test instead of new code.
+- **Review round 4 (Codex MERGE-WITH-FIXES):** files with absent/null `task_type` are classifiers when the fitted
+  estimator is (`model_io._effective_task_type`: sklearn `is_classifier` or `classes_`), so an owned encoder still
+  decodes them; explicit regression/one_class/multiclass_simca dispatch is unchanged. The decoding decision is one
+  helper (`_decoding_encoder`) shared by prediction and `predict_with_uncertainty`, whose probability column names
+  now follow `model.classes_` (decoded only through a qualifying encoder, never more names than columns). That
+  fixes the Tab 8 `_display_uncertainty` IndexError with a superset encoder.
+- **Review round 5:** `model_wrappers._match_wavelengths_normalized` partitions PER ITEM (numeric requests via
+  `match_wavelengths`, non-numeric ones such as an ID column must be present literally, order restored); an
+  all-or-nothing numeric parse broke legacy wrappers with `[1000.0, "id"]`. Tab 8 `_display_uncertainty` uses the
+  union of all loaded models' class labels as headers and places each model's probabilities under its own labels
+  (blank where absent); headers used to come from the first model only.
+- **Follow-ups not done (review round 2, deliberately out of scope):** `scoring.py` ~112 substitutes the CV gap
+  when validation is missing; `save_model` stamps `wavelength_matching` on any save, so an old fitted model
+  merely re-saved without retraining would lose its retrain warning.
+
 ## 2026-10-02 - fix/contaminant-maths (QW3, QW6, R024, R025, R075, R113, R114): gotchas
 - **EPO must not centre the nuisance library.** `EstimatedEPO`, `MultiGroupEPO` and `interference.EPO` all
   column-centred D before the SVD. When the rows share one contaminant shift (mean diff + noise copies,

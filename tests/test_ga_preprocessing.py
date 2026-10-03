@@ -642,6 +642,10 @@ class TestAutoscaleTrainValAsymmetry:
                     "preprocess_chromosome": str(chromosome),
                     "Autoscale": True,
                     "all_vars": "N/A",
+                    # Without all_vars, only a row that says it used every column
+                    # is validated on the full spectrum.
+                    "SubsetTag": "full",
+                    "n_vars": n_features,
                     "CompositeScore": 0.5,
                     "baseline_method": None,
                     "smoothing": False,

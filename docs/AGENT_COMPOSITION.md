@@ -485,6 +485,17 @@ the stored scaler and PCA reducer; the regression path above uses the preprocess
 only. For multi-class models it returns a dict (`p_values`, `decision_matrix`, …)
 rather than an array.
 
+**Classifiers and `label_encoder`.** Pass `save_model(..., label_encoder=le)` only when
+the model was trained on `le.transform(y)`. Passing it asserts that ownership: the file
+records `label_encoder_owned`, and `predict_with_model` decodes predictions (and
+`predict_with_uncertainty` names probability columns) through it. A model trained on raw
+labels, numeric class values included, gets `label_encoder=None`. `save_model` drops an
+encoder the model's classes prove stale (booleans, non-integer values, codes outside the
+encoder), but it cannot detect a stale encoder whose codes happen to be valid, so never
+pass one left over from another fit. Files saved before ownership was recorded are
+decoded only when the model's classes are exactly the encoder's codes; otherwise they
+return raw labels with a warning.
+
 ### 8b. Rebuild a model from a results row
 
 A results row does not store a fitted model. It stores what to build, as `str(dict)`,
@@ -515,7 +526,27 @@ else:
 
 If `prep["autoscale"]` is true, the search skipped the per-model `StandardScaler` for
 scale-sensitive models (SVM/SVR/MLP/Ridge/Lasso/ElasticNet/NeuralBoosted), so don't add
-one. Wavelength subsets (`all_vars`) are taken **after** preprocessing.
+one. Wavelength subsets (`all_vars`) are taken **after** preprocessing. Map them to
+columns with `resolve_wavelength_list`, never with float equality or a ±tolerance
+"first hit":
+
+```python
+from spectral_predict.wavelength_matching import resolve_wavelength_list
+
+cols = resolve_wavelength_list(row["all_vars"], wavelengths)   # ndarray of column indices
+X_sel = X_pp[:, cols]                                          # training order preserved
+```
+
+It raises `WavelengthMatchError` (a `ValueError`) when any value is missing or matches
+two columns, so a partial match can never become a smaller model. Rows written before
+the 2026-10 fix used `%g` (6 significant digits); such a token still resolves when exactly
+one axis column prints as that same `%g` text. Write your own lists with
+`format_wavelength_list` (its tokens always end their mantissa in a `0` after the decimal
+point, e.g. `10000.10`, so they can never be mistaken for `%g` text; `float()` reads them
+back exactly), and map plain float lists with `match_wavelengths(values, axis)` (exact
+match first, else the single axis value within 0.01). Missing `all_vars` on a subset row
+is a failure too: the validation rebuild only falls back to every column for a row tagged
+full-spectrum whose `n_vars` equals the column count.
 `preprocessing_config_from_row` fills a missing derivative order / window with 1 / 15.
 Parse `Autoscale` / `smoothing` flag cells with `preprocess.parse_bool_cell`
 (`bool("False")` is `True`); every rebuild path in DASP uses it.
@@ -539,6 +570,7 @@ listed is an internal implementation detail that may change without notice.
 | `contamination` | `PCASIMCA` |
 | `models` | `PLSTransformer`; results-row rebuild helpers `parse_row_params`, `estimator_params_from_row`, `plsda_head_kwargs` (and its `PLSDA_HEAD_DEFAULT_RANDOM_STATE` default) |
 | `model_io` | `save_model`, `load_model`, `predict_with_model` |
+| `wavelength_matching` | `match_wavelengths`, `resolve_wavelength_list`, `format_wavelength_list`, `WavelengthMatchError` |
 | `search` | `run_search`, `run_one_class_search`, `run_multiclass_simca_search`, `multiclass_varsel_mask`, `build_multiclass_decision_view`, `compute_validation_metrics_for_top_models`, `MulticlassVarselUnsupported` |
 
 **This table is the contract.** Only `search` declares an `__all__` enforcing it (it
