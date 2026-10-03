@@ -199,8 +199,8 @@ Spectral Predict has been evaluated for beta readiness through comprehensive tes
 ### Medium Priority (Document as Limitations)
 
 6. **Calibration Transfer Methods** 🟠
-   - **TSR (Transfer by Orthogonal Projection):** 2 failures
-   - **CTAI (Calibration Transfer via Adaptive Identification):** 3 failures
+   - **TSR (per-wavelength slope/bias; stored key 'tsr'):** 2 failures
+   - **CTAI (PC-DS, paired regression in satellite PCA space; stored key 'ctai'):** 3 failures
    - **Impact:** Instrument standardization limited
    - **Workaround:** Use Direct Standardization (DS) or PDS instead
 

@@ -11,6 +11,8 @@ import numpy as np
 from typing import Optional, List, Union
 from sklearn.base import BaseEstimator, TransformerMixin
 
+from .wavelength_matching import match_wavelengths
+
 
 class PreprocessorConfig(BaseEstimator, TransformerMixin):
     """
@@ -85,17 +87,10 @@ class PreprocessorConfig(BaseEstimator, TransformerMixin):
             self.wavelength_indices_ = None
             return
 
-        all_wl_array = np.array(self.all_wavelengths, dtype=np.float64)
-        selected_wl = np.array(self.wavelengths, dtype=np.float64)
-
-        # Find matching indices (with tolerance for float comparison)
-        indices = []
-        for wl in selected_wl:
-            idx = np.argmin(np.abs(all_wl_array - wl))
-            if np.abs(all_wl_array[idx] - wl) < 0.5:  # Tolerance
-                indices.append(idx)
-
-        self.wavelength_indices_ = np.array(indices) if indices else None
+        # Shared exact-first contract: every selected wavelength must name exactly one
+        # column. The old nearest-within-0.5 rule dropped missing channels silently
+        # and fell back to the full spectrum when none matched.
+        self.wavelength_indices_ = match_wavelengths(self.wavelengths, self.all_wavelengths)
 
     def fit(self, X, y=None):
         """

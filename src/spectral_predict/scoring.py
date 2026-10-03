@@ -63,6 +63,24 @@ from sklearn.utils.multiclass import unique_labels
 
 logger = logging.getLogger(__name__)
 
+# DataFrame.attrs written by the validation helpers, keyed by row index label.
+_VALIDATION_ROW_ATTRS = ("validation_failures", "validation_attempted", "validation_succeeded")
+
+
+def _remap_validation_attrs(df: pd.DataFrame, old_index: pd.Index) -> None:
+    """Re-key validation attrs after ``reset_index`` so they follow their rows.
+
+    Without this, a re-rank attached one row's failure reason to whichever row
+    moved into its old position.
+    """
+    position = {label: pos for pos, label in enumerate(old_index)}
+    for key in _VALIDATION_ROW_ATTRS:
+        value = df.attrs.get(key)
+        if isinstance(value, dict):
+            df.attrs[key] = {position[k]: v for k, v in value.items() if k in position}
+        elif isinstance(value, (list, tuple)):
+            df.attrs[key] = [position[k] for k in value if k in position]
+
 
 def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penalty=0,
                             use_rmsep_gap=False, verbose=False):
@@ -268,7 +286,10 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penal
         df["Rank"] = df["CompositeScore"].rank(method="min", na_option="bottom").astype(int)
 
     # Sort by rank and reset index to ensure sequential IDs for GUI display
-    df = df.sort_values("Rank").reset_index(drop=True)
+    df = df.sort_values("Rank")
+    old_index = df.index
+    df = df.reset_index(drop=True)
+    _remap_validation_attrs(df, old_index)
 
     # Reorder columns: Rank first, top_vars last
     cols = [c for c in df.columns if c not in ['Rank', 'top_vars']]

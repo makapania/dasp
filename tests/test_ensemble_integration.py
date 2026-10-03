@@ -163,6 +163,8 @@ class TestResultsDFToEnsemble:
             'Window': [15, 15, 11],
             'Poly': [2, 2, 2],
             'all_vars': ['N/A', 'N/A', '1500,1510,1520,1530'],
+            'SubsetTag': ['full', 'full', 'top4'],
+            'n_vars': [50, 50, 4],
             'R2': [0.90, 0.92, 0.95],
             'RMSE': [0.15, 0.13, 0.10]
         })
