@@ -238,11 +238,12 @@ CAPTURABLE_SETTINGS: tuple[str, ...] = (
     # post-hoc. Trials in the resumed SQLite were trained on a specific
     # calibration split; re-creating a different validation set on resume
     # (different algorithm, different %) could place trial-trained samples
-    # into the "new" validation, causing silent leakage. Capturing the
-    # configuration is sufficient for deterministic algorithms (SPXY,
-    # Kennard-Stone, Stratified). For non-deterministic ("Random") and
-    # Manual algorithms the partition indices themselves must persist —
-    # tracked separately as T-49.
+    # into the "new" validation, causing silent leakage. The configuration
+    # alone is NOT enough to rebuild the partition: Random and Manual are not
+    # reproducible, and QW4 (2026-10-02) changed what Kennard-Stone / SPXY
+    # select (they now pick the calibration set, not the holdout). The holdout
+    # IDs themselves persist (``validation_indices`` / ``calibration_rows`` in
+    # run_state) and resume restores those; these keys are a record only.
     "validation_enabled",
     "validation_percentage",
     "validation_algorithm",

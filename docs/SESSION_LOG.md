@@ -1596,3 +1596,38 @@ the same folds, as for PLS LV selection. Implemented on branch fix/booster-early
   (`_sub_estimators` / `_walk_estimators`) that also reads `(name, estimator)` lists, tuples and dicts, with an
   id-visited set instead of a depth cap. (3) `native_thread_limit` rolls back its bookkeeping if applying the cap
   fails on enter, and rejects non-int / < 1 thread counts with ValueError.
+
+## 2026-10-02 - QW4 holdout direction (`fix/holdout-direction`)
+
+- **Root cause.** The GUI's `_validation_kennard_stone` / `_validation_spxy` returned the samples KS/SPXY
+  pick first as the *holdout*. KS/SPXY pick the representative boundary samples, so the extremes went to
+  validation and the model had to extrapolate. Now `sample_selection.split_calibration_holdout(X, n_holdout,
+  method, y)` picks the `N - n_holdout` **calibration** samples and the rest validate; the GUI and the test
+  harness (`tests/gui/harness.py::apply_spxy_holdout`, same bug) route through it.
+- **SPXY** (Galvão 2005) now divides the X- and y-distance *matrices* by their maxima and adds them
+  (`spxy_distance_matrix`). Both the GUI and backend versions used to min-max scale every spectral column,
+  which gives a near-constant noise column the weight of a real band. **DUPLEX** (Snee 1977) now runs two
+  interleaved max-min selections (cal seed = farthest pair, val seed = farthest remaining pair, then each set
+  adds the sample farthest from its *own* members); the old version alternated one KS order, which sent an
+  extreme to validation. DUPLEX is a new GUI option.
+- **Kennard-Stone order is unchanged** (checked against the old implementation on 200 random cases, ties
+  included), so calibration-transfer standards (`calibration_transfer`, GUI CT tab) and `model_io`
+  representative sets are identical. CT semantics untouched: there the KS pick *is* the wanted set.
+- **Saved holdouts are stable by construction.** Every persisted path stores holdout IDs, never the algorithm
+  output: run_state `validation_indices` / `calibration_rows` (resume restores those labels in
+  `_reconcile_resume_validation_split`), the refined-model config, the data-viewer revert state. Nothing
+  re-runs a selector on load. The `run_gui_settings` comment that said the algorithm name was enough to
+  rebuild a deterministic split was wrong and is rewritten. Test: `tests/gui/test_holdout_direction_gui.py`
+  restores a pre-QW4 holdout exactly with every selector patched to raise.
+- **Example numbers** (bundled bone collagen, N=49, PLS, LV by 5-fold CV on the calibration set, raw spectra;
+  scratch script, not pinned): 9 held out (the GUI's 20%): KS old 3.57 (4 holdout samples outside the cal y
+  range) vs new 1.30 (0); SPXY old 4.63 (2) vs new 1.62 (0); DUPLEX 2.06 (1); random splits mean 2.97 (sd
+  1.05, 200 splits). 10 held out: KS 3.35 vs 1.29, SPXY 4.38 vs 1.56, DUPLEX 1.88, random 3.02. SNV gives
+  the same picture (KS 4.69 vs 1.22, SPXY 5.26 vs 2.41). Note the corrected KS/SPXY RMSEP is *below* the
+  random-split mean: an interior holdout is the easy case, which the UserGuide now says.
+- **Not done (optional per the cross-check):** distances on preprocessed spectra / PCA scores (still raw X as
+  loaded), stratified KS, and group-aware selection (F1).
+- **GLM 5.3 review LOWs (fixed).** A one-sample DUPLEX set has no seed pair: a one-sample holdout now takes the
+  sample farthest from the calibration seed (was: the lower end of the farthest remaining pair). KS tie rule
+  (lowest row index) is pinned by a duplicated-rows test and a randomized check against a slow literal max-min
+  reference in `tests/test_holdout_direction.py`.

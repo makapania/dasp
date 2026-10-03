@@ -1418,11 +1418,29 @@ Use the slider to select what percentage of your data to reserve for validation:
 
 | Algorithm | Description | Recommended For |
 |-----------|-------------|-----------------|
-| Kennard-Stone | Maximizes spectral diversity only | When Y distribution doesn't matter |
-| SPXY | Balances spectral and target diversity | Most applications (recommended) |
+| Kennard-Stone | Picks the calibration samples that cover the spectral range (extremes included); the remaining samples are the holdout | When Y distribution doesn't matter |
+| SPXY | Picks the calibration samples that cover both the spectral and the reference-value range; the rest are the holdout | Most applications (recommended) |
+| DUPLEX | Builds the calibration and holdout sets alternately, so both span the spectral range | A more demanding holdout that still avoids pure extrapolation |
 | Random | Simple random selection | Quick testing, baseline comparison |
 | Stratified | Ensures balanced target distribution | Classification or highly skewed regression |
 | Manual | Select samples from Data Viewer | Expert-guided validation design |
+
+**Which samples end up in validation.** Kennard-Stone and SPXY choose the *calibration*
+set, following the usual chemometrics convention (Kennard & Stone 1969; Galvão et al.
+2005). The most unusual samples therefore train the model, and the holdout lies inside
+the calibration range, so the model is not asked to extrapolate. Because those holdout
+samples are the "easy" interior ones, RMSEP from a Kennard-Stone or SPXY holdout tends to
+be lower than from a random split. DUPLEX (Snee 1977) is the middle ground: both sets
+reach towards the edges of the data. SPXY weights spectra and reference values equally by
+dividing each distance matrix by its largest value; the spectra themselves are not
+rescaled. Distances are computed on the spectra as loaded (before preprocessing).
+
+Versions before October 2026 used Kennard-Stone and SPXY the other way round: they picked
+the *holdout*, which put the extremes in validation and inflated RMSEP. A validation set
+you created earlier keeps exactly the samples it
+had, whether it is still loaded, stored in a saved model's settings, or restored when you
+resume a run. Only a set made with "Create Validation Set" from now on uses the new
+direction.
 
 #### 4.5.4 Creating the Validation Set
 
