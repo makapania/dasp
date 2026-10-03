@@ -743,6 +743,105 @@ producing that fold's score (booster early stopping on the test fold R028/R003/R
 the scored fold R002/R021). Rule now in CLAUDE.md. Also: the 2026-09-28 reviews were Claude-only; Codex gpt-6-astra
 and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before any fix starts.
 
+## 2026-10-02 - Tab 7 Y-transform save contract (R048/R001/R020/R014/R010), branch fix/ytransform-save
+- **R048 was masking R001/R020.** Every TTR refit crashed on `pipe.steps` before reaching the TTR save branch, so no
+  .dasp with a TTR could exist; a bare `hasattr` guard would have shipped silent corruption (lost prep_pipeline,
+  scaler saved twice). Fix both together.
+- **Save contract:** Tab 7 always runs Path A, so spectral preprocessing (`prep_pipeline`) is fitted OUTSIDE the TTR on
+  the full spectrum; the TTR wraps only the post-subset `[imbalance?, scaler?, model]`. Save a TTR exactly like the
+  untransformed case (preprocessor = prep_pipeline; model = scaler+model or bare model) and re-wrap that prediction
+  model with `y_transform.replace_fitted_regressor` (copies the fitted TTR, swaps `regressor_`). Never split the
+  TTR's inner steps out as the preprocessor.
+- **'Box-Cox'.** `.lower().replace('-', '-')` was a no-op, so the combobox value never matched 'boxcox'; also
+  `validate()` skipped the y>0 check for it. All entry points now go through `normalize_y_transform_method`.
+- **Early stopping + transform:** CV transforms fold y by hand; the final fit is now TTR-wrapped (no ES on the final
+  fit either way). If the booster ES agent changes the final fit (e.g. `set_params(model__n_estimators=...)`), the
+  TTR needs `regressor__` prefixes.
+- **Corrections:** each new `refined_model` gets a fresh `_refined_model_token`; corrections record the token they
+  were computed under and `_correction_to_save()` only returns a matching one, regression only. `model_io` drops a
+  correction for non-regression at save and ignores one at predict (legacy files).
+- **Pre-existing, not fixed:** `_plot_wavelength_importance` applies `refined_preprocessor` (full-spectrum prep) to
+  `refined_X_train` (already preprocessed + subset), so the residual-correlation overlay double-preprocesses.
+- **Review round 1 (Codex + GLM, MERGE-WITH-FIXES):**
+  - Token race: Compute runs on the Tk thread while the refit worker can swap the model. Capture the token BEFORE
+    reading `refined_y_*`, keep the result only if the token is unchanged; the worker sets the token to None before
+    the model swap and issues the new one only after the CV predictions are stored. Save/Compute are also disabled
+    while a refit runs (GA abort paths now re-enable them).
+  - Every consumer that rebuilds or inspects the model must handle a TTR: code export (now `YTransformRegressor` in
+    the generated script; `_fit_fold` re-enters with transformed train/eval y for early stopping; export refuses
+    Y-transform + imbalance), RF tree variance in `predict_with_uncertainty` (inverse-transform each tree), complexity
+    curve (clones of `final_pipe`, params `regressor__model__<p>`). SHAP has no TreeExplainer for a TTR and falls
+    back to KernelExplainer (works, slower, original units).
+  - **Tree-count hook for fix/booster-early-stopping:** set any final-fit parameter on `final_pipe` at the
+    "FINAL-FIT PARAMETER HOOK" comment (just after the Y-transform wrap); `_final_param_prefix` is `'regressor__'`
+    when it is a TTR, so the booster tree count is `regressor__model__n_estimators`.
+  - Saved `y_transform` is now the canonical name (`log`, `boxcox`, `none`); files from before this fix hold display
+    names ('Log', 'None'), so readers must normalize.
+  - Export parity gotcha: a Tab 7 XGBoost refit fills params missing from `Params` with GUI defaults (subsample 0.8,
+    colsample_bytree 0.6, ...) that the code export does not know, so export CV differs unless the row is complete.
+    Pre-existing, not Y-transform specific; test rows carry full params.
+- **Review round 2 (Codex BLOCK, GLM MERGE):**
+  - Disabled Run buttons are NOT a refit guard: the Model Development tab handler treats a disabled Run as
+    "uninitialised" and re-enables it, and loading defaults or a Results row re-enables it too. `_run_refined_model`
+    now refuses while `_refit_active`; the flag is cleared by `_end_refit(generation)`, queued in the worker's
+    `finally` AFTER the run's own result callbacks. Save refuses while a refit is active, reads everything once via
+    `_refined_state_snapshot()`, and aborts if the model token changed during the file dialog.
+  - Error path: Save/Export stay enabled when the previous model is still complete (`refined_model` set AND token
+    set); a failure mid-swap (token None) disables them.
+  - Exported `YTransformRegressor` must be `(RegressorMixin, BaseEstimator)` (mixin first) or `is_regressor` is
+    False and VotingRegressor rejects it; it also mirrors TTR's (n,)/(n,1) output shape.
+  - Complexity grids must contain the fitted value (8-point grids around a base usually miss it).
+- **Review round 3 (Codex BLOCK, GLM MERGE-WITH-FIXES):**
+  - The refit worker must not write ANY `refined_*` field before success: the one-class path wrote
+    `refined_full_wavelengths` before its no-inlier / too-few-folds exits, so a failed run left Save enabled with
+    model A plus run B's axis. Both paths now build their fitted state locally and call
+    `_publish_refined_state(dict)` once (token None during the setattr loop, fresh token after). `refined_ga_*`
+    are run inputs (set by Results-row loading / GA), frozen into `refined_config`, so they stay as they are.
+  - If `threading.Thread(...)`/`start()` raises after `_refit_active=True`, nothing ever clears it: the launch is
+    wrapped and releases its generation on failure.
+  - Export Code joins Save/Compute: disabled during a run, refused at method level, config + data from one snapshot.
+    `_update_bias_correction_ui(from_run_completion=True)` is the only call allowed during a run (the completion
+    callback runs before `_end_refit` clears the flag).
+- **Review round 4 (Codex + GLM MERGE-WITH-FIXES):**
+  - The refit result is now ONE frozen `RefinedState` (module level in the GUI) held in `app._refined_state` and
+    replaced by a single assignment; `app.refined_<field>` and `app._refined_model_token` are properties onto it
+    (assigning one replaces the whole object via `dataclasses.replace`). Unset fields raise AttributeError so the
+    many `hasattr(self, 'refined_...')` checks still work. The worker queues publication on the Tk thread
+    (`_publish_refined_state_on_tk_thread`), so Tk callbacks never straddle a swap; off-Tk or update()-calling
+    consumers (learning-curve worker, SHAP) capture `self._refined_state` once.
+  - `RefinedState.training` = the Results row (shallow copy) + autoscale flag captured at worker START; Save
+    metadata and Export read params/Deriv/Poly/imbalance/early stopping/autoscale from it, never from the live
+    selection. GA genes/config/model type are frozen per run (locals), not re-read at publish.
+  - `_refined_state_snapshot()` returns None without a token/model; Save, Export entry and the open dialog's
+    `do_export` refuse then. Loading a Results row is refused while a refit runs.
+  - Tooling gotcha: passing `\\n` through the agent's Bash heredoc arrived as `\n` (escape collapsed), so string
+    anchors containing backslashes silently failed to match; anchor on backslash-free text.
+- **Review round 5 (Codex + GLM MERGE-WITH-FIXES):**
+  - The refit worker read the live Results row (~24 sites: Params/Preprocess/Window/Deriv, hyperparams,
+    one-class, imbalance, early stopping, `optuna_params` at publish) and live Tk vars/data. Now
+    `_capture_refit_inputs()` freezes ALL of it on the Tk thread in `_run_refined_model` (or at the top of a
+    direct `_run_refined_model_thread()` call) and the worker reads only `run_inputs`; grep confirms no
+    `self.selected_model_config` / `self.<tkvar>.get()` / `self.X|y|validation_*` read remains in the worker.
+    `_collect_refine_hyperparams` is pre-collected for the widget model and 'PLS' (the only remap target).
+  - `_on_result_double_click` assigned `selected_model_config` before the guarded loader refused: guard at the
+    very top now (both branches).
+  - Save metadata data_type / x_unit / validation_* / inlier fallback come from `snap['training']`.
+  - Plot click callbacks (regression scatter, residual, leverage) captured y_true/y_pred but read the CURRENT
+    cv_indices/specimen_ids, so a click on A's plot after B published offered B's specimen. Each plot binds
+    `plot_state = self._refined_state` for itself and its callbacks.
+  - The Export dialog shows and exports the snapshot taken when it opened; `do_export` refuses if the current
+    token is no longer that snapshot's.
+- **Review round 6 (DeepSeek MERGE-WITH-FIXES):** helpers called FROM the worker count too:
+  `_parse_wavelength_spec` read the live `_original_wavelength_order`; it now takes `original_order` (worker passes
+  its frozen copy; None or [] = available order). Plot callbacks no longer fall back to the live `self.y.index`
+  (no specimen IDs in the run = nothing offered). GA inputs are stored via `root.after` (`_store_ga_inputs`),
+  not from the worker. Captured frames are `copy(deep=False)`: shares data under pandas CoW, freezes the object.
+- **Merge / follow-up items (not fixed here):**
+  - R015: the bundle export ships already-preprocessed `refined_X_train` but its script preprocesses again
+    (pre-existing; still true with the Y-transform wrapper).
+  - fix/booster-early-stopping: its export round/tree-count selector must look inside `YTransformRegressor`
+    (`model.regressor`) in generated code, and inside the TTR (`regressor__model__...`) in the app.
+
 ## 2026-10-02 - Wavelength mapping contract (R009/R026/R112, R031/R078) and label encoder (R016), branch fix/wavelength-mapping
 - **One contract:** `spectral_predict/wavelength_matching.py` (`match_wavelengths`, `resolve_wavelength_list`,
   `format_wavelength_list`, `WavelengthMatchError`; on the declared surface). Exact axis value first, else the single
