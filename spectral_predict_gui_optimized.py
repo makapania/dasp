@@ -49367,7 +49367,7 @@ External Validation Performance (n={n_val}):
         output_format = self.ct_eq_format_var.get()
 
         try:
-            from spectral_predict.calibration_transfer import apply_ds, apply_pds, resample_to_grid
+            from spectral_predict.calibration_transfer import resample_to_grid
             from spectral_predict.io import write_spectra
             from pathlib import Path
 
@@ -49600,27 +49600,12 @@ External Validation Performance (n={n_val}):
                 getattr(self.ct_transfer_model, 'meta', None),
             )
 
-            # Apply transfer to get transferred spectra
-            if method == 'ds':
-                A = self.ct_transfer_model.params['A']
-                X_transferred = apply_ds(X_sat, A)
-            elif method == 'pds':
-                B = self.ct_transfer_model.params['B']
-                window = self.ct_transfer_model.params['window']
-                X_transferred = apply_pds(X_sat, B, window)
-            elif method == 'tsr':
-                from spectral_predict.calibration_transfer import apply_tsr
-                X_transferred = apply_tsr(X_sat, self.ct_transfer_model.params)
-            elif method == 'ctai':
-                from spectral_predict.calibration_transfer import apply_ctai
-                X_transferred = apply_ctai(X_sat, self.ct_transfer_model.params)
-            elif method == 'jypls-inv':
-                from spectral_predict.calibration_transfer import apply_jypls_inv
-                X_transferred = apply_jypls_inv(X_sat, self.ct_transfer_model.params)
-            elif method == 'nspfce':
-                from spectral_predict.calibration_transfer import apply_nspfce
-                X_transferred = apply_nspfce(X_sat, self.ct_transfer_model.params)
-            else:
+            # Apply transfer to get transferred spectra (one apply path for every
+            # stored param form, incl. centred PDS and dual-form DS)
+            from spectral_predict.calibration_transfer import apply_transfer_dispatch
+            try:
+                X_transferred = apply_transfer_dispatch(X_sat, self.ct_transfer_model)
+            except ValueError:
                 # Unsupported method for plotting
                 return
 
@@ -51768,27 +51753,9 @@ External Validation Performance (n={n_val}):
         np.ndarray
             Transformed spectra in primary domain
         """
-        from spectral_predict.calibration_transfer import (
-            apply_ds, apply_pds, apply_tsr, apply_ctai, apply_nspfce, apply_jypls_inv
-        )
+        from spectral_predict.calibration_transfer import apply_transfer_dispatch
 
-        method = transfer_model.method
-        params = transfer_model.params
-
-        if method == 'ds':
-            return apply_ds(X_satellite, params['A'])
-        elif method == 'pds':
-            return apply_pds(X_satellite, params['B'], params['window'])
-        elif method == 'tsr':
-            return apply_tsr(X_satellite, params)
-        elif method == 'ctai':
-            return apply_ctai(X_satellite, params)
-        elif method == 'nspfce':
-            return apply_nspfce(X_satellite, params)
-        elif method == 'jypls-inv':
-            return apply_jypls_inv(X_satellite, params)
-        else:
-            raise ValueError(f"Unknown transfer method: {method}")
+        return apply_transfer_dispatch(X_satellite, transfer_model)
 
     def _apply_transfer_with_roi(self, X_satellite, transfer_model):
         """Apply transfer model, handling ROI splice if the model was built with one.

@@ -8,8 +8,10 @@ Supported methods (internal key -> what the code does). The keys are stored in
 saved transfer models, so they stay as they are even where the historical name is
 misleading; user-facing text should come from ``method_display_name``.
 
-- ``'ds'``: Direct Standardization (ridge-regularised full matrix).
-- ``'pds'``: Piecewise Direct Standardization.
+- ``'ds'``: Direct Standardization (ridge-regularised full matrix, or the centred
+  dual form from ``estimate_ds_dual``).
+- ``'pds'``: Piecewise Direct Standardization (legacy uncentred, or centred low
+  rank from ``estimate_pds_lowrank``).
 - ``'tsr'``: per-wavelength slope/bias standardization. Not trimmed scores
   regression (Folch-Fortuny et al. 2017), which is also abbreviated TSR.
 - ``'ctai'``: paired regression in the satellite PCA space ("PC-DS"). Not the
@@ -19,7 +21,8 @@ misleading; user-facing text should come from ``method_display_name``.
 - ``'jypls-inv'``: experimental PLS score mapping; disabled in the GUI.
 
 Every method here is fitted on paired rows: row i of the primary matrix and row i
-of the satellite matrix must be the same physical standard.
+of the satellite matrix must be the same physical standard. To check whether a
+transfer works, and to compare methods, use ``transfer_evaluation.evaluate_transfer``.
 """
 
 from __future__ import annotations
@@ -393,6 +396,304 @@ def apply_pds(
         X_transformed[:, i] = X_window @ b
 
     return X_transformed
+
+
+# ==============================================================================
+# Centred low-rank PDS and dual-form DS (2026-10, F2/CT1-CT2)
+#
+# New-form parameters use keys the pre-2026-10 apply code does not read
+# ('B_centred', 'ds_form'), so an older dasp build fails with a KeyError instead of
+# applying the map without its offset.
+# ==============================================================================
+
+TRANSFER_FORMAT_VERSION: int = 2
+"""``meta['format_version']`` written for centred PDS and dual-form DS models."""
+
+
+def estimate_pds_lowrank(
+    X_primary: np.ndarray,
+    X_satellite: np.ndarray,
+    window: int = 11,
+    rank: int | None = None,
+) -> Dict:
+    """Estimate centred, low-rank Piecewise Direct Standardization.
+
+    For each wavelength i the satellite window (channels i-k..i+k) and the primary
+    channel i are mean-centred over the standards, and the local coefficients are
+    fitted by truncated SVD (principal components regression) of the centred
+    window. An offset per wavelength restores the means, so the map is affine:
+    ``x_primary[i] ≈ x_satellite[window] @ b_i + offset[i]``. Capping the rank below
+    the number of standards keeps the fit from chasing noise when there are few
+    standards (Wang, Veltkamp & Kowalski 1991, *Anal Chem* 63(23):2750-2756).
+
+    Args:
+        X_primary: Primary spectra of the paired standards, (n, p).
+        X_satellite: Satellite spectra of the same standards, same row order.
+        window: Odd window width 2k+1. Edge windows are truncated, as in
+            ``estimate_pds``.
+        rank: Components per window. ``None`` uses the most the data allow,
+            ``n - 1`` (one degree of freedom goes to centring). It is also capped per
+            window by the window's width and its numerical rank.
+
+    Returns:
+        Params for ``TransferModel(method='pds')``: ``B_centred`` (p, window),
+        ``offset`` (p,), ``window``, ``rank`` (the resolved integer cap) and
+        ``centred`` (True). Apply with ``apply_pds_centred`` or
+        ``apply_transfer_dispatch``.
+
+    Raises:
+        ValueError: Bad window or rank, mismatched shapes, fewer than 2 standards,
+            or non-finite values.
+    """
+    from numpy.lib.stride_tricks import sliding_window_view
+
+    Xp = np.asarray(X_primary, dtype=np.float64)
+    Xs = np.asarray(X_satellite, dtype=np.float64)
+    if Xp.ndim != 2 or Xp.shape != Xs.shape:
+        raise ValueError(
+            f"X_primary and X_satellite must be 2-D with the same shape, got "
+            f"{Xp.shape} and {Xs.shape}"
+        )
+    if not isinstance(window, (int, np.integer)) or window < 1 or window % 2 == 0:
+        raise ValueError(f"window must be a positive odd integer, got {window!r}")
+    n, p = Xs.shape
+    if n < 2:
+        raise ValueError(f"Centred PDS needs at least 2 standards, got {n}")
+    if not (np.isfinite(Xp).all() and np.isfinite(Xs).all()):
+        raise ValueError("Standard spectra contain NaN or infinite values")
+    if rank is not None and (not isinstance(rank, (int, np.integer)) or rank < 1):
+        raise ValueError(f"rank must be a positive integer or None, got {rank!r}")
+    window = int(window)
+    rank_cap = min(n - 1, window) if rank is None else min(int(rank), n - 1, window)
+
+    half = window // 2
+    mean_s = Xs.mean(axis=0)
+    mean_p = Xp.mean(axis=0)
+    # Zero-padding the centred satellite data gives every wavelength a full-width
+    # window; padded columns carry no variance, so they get no coefficient.
+    padded = np.pad(Xs - mean_s, ((0, 0), (half, half)))
+    windows = np.moveaxis(sliding_window_view(padded, window, axis=1), 1, 0)  # (p, n, w)
+    U, s, Vt = np.linalg.svd(windows, full_matrices=False)
+    k = s.shape[1]
+    # Numerical-rank cut on the scale of the whole data set, not of each window: a
+    # window with no satellite variation keeps only centring round-off, which a
+    # per-window relative cut would invert into large coefficients.
+    data_scale = max(float(s.max(initial=0.0)), float(np.sqrt(n) * np.abs(Xs).max()))
+    tol = max(n, window) * np.finfo(np.float64).eps * data_scale
+    keep = (s > tol) & (np.arange(k) < rank_cap)
+    uty = np.einsum("pnk,np->pk", U, Xp - mean_p)
+    scaled = np.where(keep, uty / np.where(keep, s, 1.0), 0.0)
+    B = np.einsum("pk,pkw->pw", scaled, Vt)
+
+    pos = np.arange(p)[:, None] - half + np.arange(window)[None, :]
+    inside = (pos >= 0) & (pos < p)
+    B[~inside] = 0.0
+    mean_s_windows = np.where(inside, mean_s[np.clip(pos, 0, p - 1)], 0.0)
+    offset = mean_p - np.einsum("pw,pw->p", B, mean_s_windows)
+
+    return {
+        "B_centred": B,
+        "offset": offset,
+        "window": window,
+        "rank": int(rank_cap),
+        "centred": True,
+    }
+
+
+def apply_pds_centred(X_satellite_new: np.ndarray, params: Dict) -> np.ndarray:
+    """Apply centred PDS params from ``estimate_pds_lowrank``.
+
+    Args:
+        X_satellite_new: Satellite spectra, (m, p).
+        params: Must hold ``B_centred`` and ``offset``.
+
+    Returns:
+        Spectra in the primary instrument's domain.
+    """
+    offset = np.asarray(params["offset"], dtype=np.float64)
+    return apply_pds(np.asarray(X_satellite_new, dtype=np.float64), params["B_centred"]) + offset
+
+
+def estimate_ds_dual(
+    X_primary: np.ndarray,
+    X_satellite: np.ndarray,
+    lam_rel: float = 1e-2,
+    center: bool = True,
+) -> Dict:
+    """Estimate ridge Direct Standardization in dual (n × n) form.
+
+    With the centred standards Xc (satellite) and Pc (primary), the ridge DS map
+    ``A = (Xcᵀ Xc + λI)⁻¹ Xcᵀ Pc`` equals ``Xcᵀ (Xc Xcᵀ + λI)⁻¹ Pc``. Solving the
+    n × n system instead of the p × p one takes milliseconds, and storing ``Xc``
+    and ``W = (Xc Xcᵀ + λI)⁻¹ Pc`` (each n × p) replaces the p × p matrix.
+
+    Args:
+        X_primary: Primary spectra of the paired standards, (n, p).
+        X_satellite: Satellite spectra of the same standards, same row order.
+        lam_rel: Ridge strength relative to the mean squared norm of the centred
+            satellite standards, ``λ = lam_rel · trace(Xc Xcᵀ) / n``, so it does not
+            depend on the spectral scale. Must be > 0.
+        center: Centre both instruments' standards and add the means back (an
+            intercept). ``False`` reproduces uncentred ridge DS.
+
+    Returns:
+        Params for ``TransferModel(method='ds')``: ``ds_form='dual'``, ``basis``,
+        ``W``, ``mean_satellite``, ``mean_primary``, ``lam``, ``lam_rel`` and
+        ``centred``. Apply with ``apply_ds_dual`` or ``apply_transfer_dispatch``.
+
+    Raises:
+        ValueError: Mismatched shapes, ``lam_rel <= 0``, fewer than 2 standards,
+            non-finite values, or (centred form) satellite standards with no
+            variation.
+    """
+    Xp = np.asarray(X_primary, dtype=np.float64)
+    Xs = np.asarray(X_satellite, dtype=np.float64)
+    if Xp.ndim != 2 or Xp.shape != Xs.shape:
+        raise ValueError(
+            f"X_primary and X_satellite must be 2-D with the same shape, got "
+            f"{Xp.shape} and {Xs.shape}"
+        )
+    if not (np.isfinite(lam_rel) and lam_rel > 0):
+        raise ValueError(f"lam_rel must be a finite value > 0, got {lam_rel!r}")
+    n, p = Xs.shape
+    if n < 2:
+        raise ValueError(f"DS needs at least 2 standards, got {n}")
+    if not (np.isfinite(Xp).all() and np.isfinite(Xs).all()):
+        raise ValueError("Standard spectra contain NaN or infinite values")
+    mean_s = Xs.mean(axis=0) if center else np.zeros(p)
+    mean_p = Xp.mean(axis=0) if center else np.zeros(p)
+    Xc = Xs - mean_s
+    Pc = Xp - mean_p
+    K = Xc @ Xc.T
+    scale = float(np.trace(K)) / n
+    # Identical rows rarely centre to exact zeros; compare with the data's own size.
+    raw_scale = float(np.mean(np.sum(Xs**2, axis=1)))
+    if not scale > (np.finfo(np.float64).eps * max(n, p)) ** 2 * max(raw_scale, 1e-300):
+        raise ValueError("The satellite standards do not vary; DS cannot be fitted")
+    lam = float(lam_rel) * scale
+    W = np.linalg.solve(K + lam * np.eye(n), Pc)
+    return {
+        "ds_form": "dual",
+        "basis": Xc,
+        "W": W,
+        "mean_satellite": mean_s,
+        "mean_primary": mean_p,
+        "lam": lam,
+        "lam_rel": float(lam_rel),
+        "centred": bool(center),
+    }
+
+
+def apply_ds_dual(X_satellite_new: np.ndarray, params: Dict) -> np.ndarray:
+    """Apply dual-form DS params from ``estimate_ds_dual``.
+
+    Args:
+        X_satellite_new: Satellite spectra, (m, p).
+        params: From ``estimate_ds_dual``.
+
+    Returns:
+        Spectra in the primary instrument's domain.
+
+    Raises:
+        ValueError: The spectra do not have the model's wavelength count.
+    """
+    X = np.asarray(X_satellite_new, dtype=np.float64)
+    basis = np.asarray(params["basis"], dtype=np.float64)
+    if X.shape[1] != basis.shape[1]:
+        raise ValueError(
+            f"Spectra have {X.shape[1]} wavelengths but the DS model expects {basis.shape[1]}"
+        )
+    centred = X - np.asarray(params["mean_satellite"], dtype=np.float64)
+    return np.asarray(params["mean_primary"], dtype=np.float64) + (centred @ basis.T) @ np.asarray(
+        params["W"], dtype=np.float64
+    )
+
+
+def estimate_prediction_correction(
+    y_ref: np.ndarray,
+    y_pred_satellite: np.ndarray,
+    fit_slope: bool = True,
+    y_range_reference: tuple[float, float] | None = None,
+) -> Dict:
+    """Slope/bias correction of predictions, fitted on satellite standards.
+
+    Fits ``y_ref = bias + slope · ŷ_satellite`` (or bias only, slope 1) on standards
+    whose reference values are known and whose satellite spectra the model
+    predicted (Bouveresse et al. 1996, *Anal Chem* 68(6):982-990). The result has the
+    ``bias_correction`` format, so ``apply_prediction_correction`` and saved
+    models apply it. It holds no fit metrics: a correction's fit to its own standards
+    is not a validation (use ``transfer_evaluation.evaluate_transfer``).
+
+    Args:
+        y_ref: Reference values of the standards.
+        y_pred_satellite: The model's predictions from the satellite spectra.
+        fit_slope: Fit slope and bias (needs 3+ standards); ``False`` fits bias only.
+        y_range_reference: (min, max) of the model's calibration y, for a warning
+            when the standards span little of it.
+
+    Returns:
+        ``{'method': 'linear', 'bias', 'slope', 'prediction_scale': 'original',
+        'source': 'satellite_standards', 'fit': 'slope_bias' | 'bias',
+        'n_standards', 'warnings'}``.
+
+    Raises:
+        ValueError: Mismatched lengths, non-finite values, too few standards, or
+            predictions with no spread when fitting a slope.
+    """
+    y = np.asarray(y_ref, dtype=np.float64).ravel()
+    yhat = np.asarray(y_pred_satellite, dtype=np.float64).ravel()
+    if y.shape != yhat.shape:
+        raise ValueError(f"y_ref has {y.size} values and y_pred_satellite {yhat.size}")
+    if not (np.isfinite(y).all() and np.isfinite(yhat).all()):
+        raise ValueError("Reference values or predictions contain NaN or infinite values")
+    n = int(y.size)
+    need = 3 if fit_slope else 1
+    if n < need:
+        raise ValueError(
+            f"A {'slope/bias' if fit_slope else 'bias'} correction needs at least {need} "
+            f"standards, got {n}"
+        )
+    warnings_out: list[str] = []
+    if fit_slope:
+        if np.ptp(yhat) <= 0:
+            raise ValueError("The satellite predictions do not vary; a slope cannot be fitted")
+        slope, bias = (float(v) for v in np.polyfit(yhat, y, 1))
+    else:
+        slope, bias = 1.0, float(np.mean(y - yhat))
+    if n < 5:
+        warnings_out.append(f"Correction fitted on only {n} standards.")
+    if y_range_reference is not None:
+        lo, hi = (float(v) for v in y_range_reference)
+        if fit_slope and hi > lo and np.ptp(y) < 0.3 * (hi - lo):
+            warnings_out.append(
+                "The standards span less than 30% of the calibration y range; the slope "
+                "extrapolates outside it."
+            )
+    return {
+        "method": "linear",
+        "bias": bias,
+        "slope": slope,
+        "prediction_scale": "original",
+        "source": "satellite_standards",
+        "fit": "slope_bias" if fit_slope else "bias",
+        "n_standards": n,
+        "warnings": warnings_out,
+    }
+
+
+def apply_prediction_correction(y_pred: np.ndarray, correction: Dict) -> np.ndarray:
+    """Apply a correction from ``estimate_prediction_correction`` to predictions.
+
+    Args:
+        y_pred: The model's predictions from (untransferred) satellite spectra.
+        correction: The correction dict.
+
+    Returns:
+        Corrected predictions, ``bias + slope · y_pred``.
+    """
+    from .bias_correction import apply_correction
+
+    return apply_correction(y_pred, correction)
 
 
 def save_transfer_model(
@@ -1765,9 +2066,13 @@ def apply_transfer_dispatch(X_satellite: np.ndarray, transfer_model: TransferMod
     params = transfer_model.params
 
     if method == 'ds':
+        if params.get('ds_form') == 'dual':
+            return apply_ds_dual(X_satellite, params)
         return apply_ds(X_satellite, params['A'])
     elif method == 'pds':
-        return apply_pds(X_satellite, params['B'], params['window'])
+        if 'B_centred' in params:
+            return apply_pds_centred(X_satellite, params)
+        return apply_pds(X_satellite, params['B'], params.get('window'))
     elif method == 'tsr':
         return apply_tsr(X_satellite, params)
     elif method == 'ctai':
