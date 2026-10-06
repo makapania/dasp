@@ -1047,3 +1047,30 @@ branch and external reviewers per round. Non-obvious lessons:
   PLS + regression imbalance `sample_weight`; regression sample weighters weight CV folds but not the final refit;
   QW4 distance on preprocessed spectra/PCA scores; DeepSeek LOWs on #86 (7% vs 6.5% text; skew hint first direction).
 
+
+## 2026-10-05 - F2 part 1 (transfer evaluation backend): ranking and PDS gotchas
+
+Branch `feat/ct-evaluate-transfer`. Plan: `docs/plans/2026-10-05-F2-part1-transfer-validation-backend.md`
+(reviewed by GLM 5.3 and DeepSeek Flash before coding).
+- **RMSEP is the wrong default ranking for a transfer bake-off on few standards.** ŷ_sat − y = (ŷ_sat − ŷ_prim) +
+  (ŷ_prim − y); only the first term is the transfer's. On 10 example standards, DS topped the RMSEP board with a
+  transfer error 20-300x that of PDS, and "No correction" beat an exact recovery (spectral RMSE 1e-16) on a mild
+  gain change, because the transfer error cancelled model residuals by chance (worse when the standards were also
+  calibration samples). `evaluate_transfer` ranks by `RMSD_vs_primary` whenever a model is given (`rank_by=` to
+  override). Over 10 splits of the simulated instrument, picking by RMSD gave equal or lower external RMSEP than
+  picking by RMSEP (n=5: 2.63 vs 2.79, worst 3.24 vs 4.24; ideal 2.58, none 3.12).
+- **Centred PDS must not reuse the `B` key.** An older build applies `params['B']` without the offset and returns
+  plausible wrong spectra (both reviewers). New forms use `B_centred`/`offset` and `ds_form='dual'` (no `A`), so old
+  code KeyErrors; `meta['format_version']=2`.
+- **Numerical-rank cut must be on the data-set scale.** A window with no satellite variation keeps ~1e-16 centring
+  round-off; a per-window relative SVD cut inverted it into coefficients of order 1. The cut is now
+  `max(n, w)·eps·max(largest singular value, sqrt(n)·max|X|)`.
+- **Batched PDS:** zero-padding the centred satellite and one batched `np.linalg.svd` over (p, n, w) windows gives
+  the same B as the per-channel loop (test), incl. truncated edge windows; 25 candidates × 12 folds at 2151 bands
+  take ~5 s.
+- **Centred dual DS is still worse than no correction below ~12 standards** on the simulated instrument (4.3-4.6 at
+  3-5 standards vs 3.12). The bake-off shows that; do not assert DS helps in tests.
+- The 2026-09-28 benchmark scripts (other machine's scratchpad) are gone; the simulated instrument is re-created in
+  `tests/test_ct_evaluate_transfer.py::simulated_instruments` (milder than the original: none 3.12, not 3.91).
+- The roadmap's claim that `estimate_pds` was on the declared surface was false; `calibration_transfer` and the new
+  `transfer_evaluation` module now have rows in AGENT_COMPOSITION.

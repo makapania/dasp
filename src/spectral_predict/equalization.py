@@ -63,14 +63,14 @@ def build_equalization_mapping_for_instrument(
     This can combine:
     - Resampling to wavelengths_common
     - Optional smoothing (based on resolution estimates)
-    - Optional calibration transfer (DS/PDS) if transfer_model is provided
+    - Optional calibration transfer (any stored method) if transfer_model is provided
 
     Returns
     -------
     callable
         A function f(X, wl_src) -> X_common
     """
-    from .calibration_transfer import resample_to_grid, apply_ds, apply_pds
+    from .calibration_transfer import apply_transfer_dispatch, resample_to_grid
 
     def mapping_func(X: np.ndarray, wl_src: np.ndarray) -> np.ndarray:
         """Map spectra from source instrument to common grid."""
@@ -79,13 +79,7 @@ def build_equalization_mapping_for_instrument(
 
         # Step 2: Apply calibration transfer if provided
         if transfer_model is not None:
-            if transfer_model.method == "ds":
-                A = transfer_model.params["A"]
-                X_common = apply_ds(X_common, A)
-            elif transfer_model.method == "pds":
-                B = transfer_model.params["B"]
-                window = transfer_model.params.get("window", 11)
-                X_common = apply_pds(X_common, B, window)
+            X_common = apply_transfer_dispatch(X_common, transfer_model)
 
         # Step 3: Optional smoothing could be added here based on reference_profile
         # For now, we skip this step

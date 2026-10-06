@@ -14,6 +14,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Calibration transfer that checks itself (F2 part 1, backend).**
+  - `transfer_evaluation.evaluate_transfer` compares transfer methods by
+    leave-one-standard-out. Each standard is predicted from a transfer fitted on the
+    others, and the board always includes a "No correction" row and, with y, a
+    primary-instrument reference row.
+  - With a model, the board is ranked by `RMSD_vs_primary`: the transfer's own error in
+    y units, which excludes the model's own error. RMSEP, Bias, SEP and Slope are also
+    reported, and `rank_by=` selects another column.
+  - New methods: centred low-rank PDS (`calibration_transfer.estimate_pds_lowrank`),
+    centred ridge DS in dual form (`estimate_ds_dual`, n×n instead of p×p), and a
+    slope/bias of predictions fitted on satellite standards
+    (`estimate_prediction_correction`).
+  - `pair_standards_by_id` pairs standards by sample ID instead of row order.
+  - Every apply site (GUI quality plot, GUI prediction, equalization) now goes through
+    `apply_transfer_dispatch`.
+  - New-form transfer files carry `meta['format_version'] = 2`, and older builds refuse
+    them instead of misapplying them. Both modules are on the declared surface
+    (AGENT_COMPOSITION §9).
+
 - Results-row rebuild helpers on the declared composition surface
   (`docs/AGENT_COMPOSITION.md` §8b): `models.parse_row_params`,
   `models.estimator_params_from_row`, `models.plsda_head_kwargs`,

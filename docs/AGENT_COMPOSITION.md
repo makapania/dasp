@@ -557,6 +557,79 @@ full-spectrum whose `n_vars` equals the column count.
 Parse `Autoscale` / `smoothing` flag cells with `preprocess.parse_bool_cell`
 (`bool("False")` is `True`); every rebuild path in DASP uses it.
 
+## 9. Calibration transfer: check it worked, then pick the method
+
+Judge a transfer by prediction error on the second ("satellite") instrument, not by
+how well it fits the standards it was estimated from. `evaluate_transfer` refits each
+candidate with one standard left out, transforms that standard's satellite spectrum
+and predicts it. It always includes a "No correction" row, and a "Primary instrument
+(reference)" row (unranked) when you give y. Pair standards **by sample ID**, never by
+row order:
+
+```python
+import numpy as np
+from sklearn.cross_decomposition import PLSRegression
+from spectral_predict.transfer_evaluation import (
+    pair_standards_by_id, evaluate_transfer, fit_transfer,
+)
+from spectral_predict.calibration_transfer import apply_transfer_dispatch
+
+# Stand-in for a second instrument: the same specimens, shuffled, with a gain that
+# tilts across the range plus an offset. Real use: read each instrument's folder
+# into a DataFrame indexed by sample ID, on one common wavelength grid.
+primary = X_aligned.iloc[:10]
+tilt = np.linspace(0.8, 1.2, primary.shape[1])
+satellite = (primary * tilt + 0.02).sample(frac=1.0, random_state=0)
+
+paired = pair_standards_by_id(primary, satellite)   # matched on IDs, any order
+model = PLSRegression(n_components=5).fit(X_aligned.to_numpy(float), y.to_numpy(float))
+predict = lambda Z: model.predict(Z).ravel()         # any (m, p) -> (m,) callable
+
+ev = evaluate_transfer(
+    paired.X_primary, paired.X_satellite,
+    y=y.loc[paired.ids].to_numpy(float), predict=predict,
+)
+print(ev.leaderboard[["label", "RMSD_vs_primary", "RMSEP", "Bias", "SEP"]].head())
+print(ev.warnings)
+
+transfer = fit_transfer(ev.best, paired.X_primary, paired.X_satellite,
+                        y=y.loc[paired.ids].to_numpy(float), predict=predict,
+                        wavelengths=paired.wavelengths,
+                        primary_id="lab_asd", satellite_id="field_unit")
+# A spectral method returns a TransferModel; apply it with apply_transfer_dispatch
+# and save it with calibration_transfer.save_transfer_model. A prediction correction
+# returns a bias_correction dict (bias_correction.apply_correction). "No correction"
+# returns None.
+```
+
+- **Inputs are arrays on one common grid.** `pair_standards_by_id` refuses different
+  grids instead of interpolating; resample first.
+- **Prediction-based scores need a model.** RMSEP, Bias, SEP and Slope need both `y` and
+  `predict` (passing y alone raises). With a model, rows are ranked by `RMSD_vs_primary`
+  (how far each satellite prediction is from the primary spectrum's prediction, in y
+  units); without one, by `spectral_RMSE`. `rank_by="RMSEP"` ranks by error against y
+  instead (see the next point for why that is not the default). `predict_fn_from_model(load_model(...), wavelengths)` wraps a saved
+  regression `.dasp`, including any bias correction stored in it.
+- **The candidates** (`default_transfer_candidates`) are slope/bias and bias per
+  wavelength, centred low-rank PDS (`estimate_pds_lowrank`: window 5-31, rank 1-4),
+  centred ridge DS in dual form (`estimate_ds_dual`), and, with y and a model, slope/bias
+  or bias of the predictions (`estimate_prediction_correction`). Only settings that every
+  leave-one-out fit can estimate are offered. At least 3 standards are needed.
+- **RMSEP includes the model's own error.** ŷ_satellite − y = (ŷ_satellite − ŷ_primary) +
+  (ŷ_primary − y), and only the first term is the transfer's. On a few standards a
+  transfer error can cancel model error by chance, so a row (even "No correction") can
+  score below the reference row (the stand-in above does exactly that: on RMSEP, DS
+  would top the board while its transfer error is 20-300 times that of PDS).
+  `RMSD_vs_primary` is the transfer error alone, which is why it ranks the board; treat
+  reaching the reference row's RMSEP as success.
+- **Reading the board.** The best of about 25 leave-one-out scores is mildly optimistic,
+  as picking a PLS LV count by CV is; `ev.n_candidates` records how many were compared.
+  With fewer than 5 standards, differences between rows are mostly noise, and the board
+  can honestly come out as "No method beat No correction".
+- **New-form files.** Centred PDS (`B_centred`, `offset`) and dual DS (`ds_form='dual'`)
+  are written with `meta['format_version'] = 2`. DASP builds from before 2026-10 cannot
+  apply them and raise a KeyError instead of applying them wrongly.
+
 ---
 
 ## Declared stable surface
@@ -577,6 +650,8 @@ listed is an internal implementation detail that may change without notice.
 | `models` | `PLSTransformer`; results-row rebuild helpers `parse_row_params`, `estimator_params_from_row`, `plsda_head_kwargs` (and its `PLSDA_HEAD_DEFAULT_RANDOM_STATE` default) |
 | `model_io` | `save_model`, `load_model`, `predict_with_model` |
 | `sample_selection` | `split_calibration_holdout` |
+| `calibration_transfer` | `estimate_pds_lowrank`, `apply_pds_centred`, `estimate_ds_dual`, `apply_ds_dual`, `estimate_tsr`, `apply_tsr`, `estimate_prediction_correction`, `apply_transfer_dispatch`, `TransferModel`, `save_transfer_model`, `load_transfer_model` |
+| `transfer_evaluation` | `evaluate_transfer`, `default_transfer_candidates`, `fit_transfer`, `TransferCandidate`, `TransferEvaluation`, `pair_standards_by_id`, `PairedStandards`, `predict_fn_from_model` |
 | `wavelength_matching` | `match_wavelengths`, `resolve_wavelength_list`, `format_wavelength_list`, `WavelengthMatchError` |
 | `search` | `run_search`, `run_one_class_search`, `run_multiclass_simca_search`, `multiclass_varsel_mask`, `build_multiclass_decision_view`, `compute_validation_metrics_for_top_models`, `MulticlassVarselUnsupported` |
 

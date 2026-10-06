@@ -70,6 +70,30 @@ PRIMITIVES: dict[str, list[str]] = {
     "model_io": ["save_model", "load_model", "predict_with_model"],
     # QW4: KS / SPXY / DUPLEX calibration-holdout split (KS/SPXY pick calibration)
     "sample_selection": ["split_calibration_holdout"],
+    # F2 part 1: transfer estimators and leave-one-standard-out evaluation
+    "calibration_transfer": [
+        "estimate_pds_lowrank",
+        "apply_pds_centred",
+        "estimate_ds_dual",
+        "apply_ds_dual",
+        "estimate_tsr",
+        "apply_tsr",
+        "estimate_prediction_correction",
+        "apply_transfer_dispatch",
+        "TransferModel",
+        "save_transfer_model",
+        "load_transfer_model",
+    ],
+    "transfer_evaluation": [
+        "evaluate_transfer",
+        "default_transfer_candidates",
+        "fit_transfer",
+        "TransferCandidate",
+        "TransferEvaluation",
+        "pair_standards_by_id",
+        "PairedStandards",
+        "predict_fn_from_model",
+    ],
     "wavelength_matching": [
         "match_wavelengths",
         "resolve_wavelength_list",
