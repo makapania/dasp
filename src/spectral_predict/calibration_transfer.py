@@ -543,7 +543,8 @@ def estimate_ds_dual(
 
     Raises:
         ValueError: Mismatched shapes, ``lam_rel <= 0``, fewer than 2 standards,
-            non-finite values, or satellite standards with no variation.
+            non-finite values, or (centred form) satellite standards with no
+            variation.
     """
     Xp = np.asarray(X_primary, dtype=np.float64)
     Xs = np.asarray(X_satellite, dtype=np.float64)
@@ -619,7 +620,7 @@ def estimate_prediction_correction(
     Fits ``y_ref = bias + slope · ŷ_satellite`` (or bias only, slope 1) on standards
     whose reference values are known and whose satellite spectra the model
     predicted (Bouveresse et al. 1996, *Anal Chem* 68(6):982-990). The result has the
-    ``bias_correction`` format, so ``bias_correction.apply_correction`` and saved
+    ``bias_correction`` format, so ``apply_prediction_correction`` and saved
     models apply it. It holds no fit metrics: a correction's fit to its own standards
     is not a validation (use ``transfer_evaluation.evaluate_transfer``).
 

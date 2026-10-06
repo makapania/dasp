@@ -624,6 +624,9 @@ transfer = fit_transfer(ev.best, paired.X_primary, paired.X_satellite,
   reaching the reference row's RMSEP as success.
 - **Reading the board.** The best of about 25 leave-one-out scores is mildly optimistic,
   as picking a PLS LV count by CV is; `ev.n_candidates` records how many were compared.
+  `ev.ids` gives the standards in the row order of `ev.oof_predictions` /
+  `ev.oof_residual_spectra`, which (like `ev.candidates`) are keyed by the leaderboard's
+  `label` column.
   With fewer than 5 standards, differences between rows are mostly noise, and the board
   can honestly come out as "No method beat No correction".
 - **New-form files.** Centred PDS (`B_centred`, `offset`) and dual DS (`ds_form='dual'`)

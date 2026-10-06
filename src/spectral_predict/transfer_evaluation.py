@@ -251,7 +251,7 @@ def fit_transfer(
     Returns:
         ``None`` for "No correction"; a ``TransferModel`` (apply with
         ``calibration_transfer.apply_transfer_dispatch``) for a spectral method; a
-        ``bias_correction``-format dict (``bias_correction.apply_correction``) for a
+        ``bias_correction``-format dict (``calibration_transfer.apply_prediction_correction``) for a
         prediction correction.
 
     Raises:
