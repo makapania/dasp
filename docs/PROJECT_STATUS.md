@@ -4,11 +4,12 @@
 
 ## ▶ NEXT SESSION — START HERE (hand-off updated 2026-10-06)
 
-### 0. NOW (2026-10-06): Wave 3 started — F2 part 1 (transfer evaluation backend) on `feat/ct-evaluate-transfer`
-Wave 1 + 2 (PRs #83-#96) are merged; their summary is in the archive (Batch 2). Wave 3 order (§0a): F2 part 1 →
-F2 part 2 (GUI) → F1 part 1 (CVPlan) → F4/CS1/F3/F5/MW1/SP1-2.
-**F2 part 1** (plan `docs/plans/2026-10-05-F2-part1-transfer-validation-backend.md`, reviewed by GLM 5.3 + DeepSeek
-Flash; code review round 1 fixes applied): `transfer_evaluation.evaluate_transfer` (leave-one-standard-out
+### 0. NOW (2026-10-06): Wave 3 — F2 part 1 MERGED (PR #97, `d405299`); next is F2 part 2 (GUI)
+Wave 1 + 2 (PRs #83-#96) are merged; their summary is in the archive (Batch 2). Wave 3 order (§0a): F2 part 1 ✔ →
+F2 part 2 (GUI) → F1 part 1 (CVPlan) → F4/CS1/F3/F5/MW1/SP1-2. No open branches.
+**F2 part 1** (plan `docs/plans/2026-10-05-F2-part1-transfer-validation-backend.md`; plan, code and confirm rounds
+reviewed by GLM 5.3 + DeepSeek Flash, both MERGE; full suite 5029 passed / 26 skipped / 0 failed):
+`transfer_evaluation.evaluate_transfer` (leave-one-standard-out
 bake-off, "No correction" + primary reference rows), `fit_transfer`, `pair_standards_by_id`,
 `predict_fn_from_model`; `calibration_transfer.estimate_pds_lowrank` (centred low-rank PDS, `B_centred` key),
 `estimate_ds_dual`, `estimate_prediction_correction`/`apply_prediction_correction`; all apply sites use
