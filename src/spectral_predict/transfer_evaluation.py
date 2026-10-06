@@ -10,9 +10,9 @@ of each satellite prediction from the primary spectrum's prediction: it is in y 
 like RMSEP but excludes the model's own error, which on a few standards can cancel a
 transfer error by chance.
 
-Every candidate is fitted by ``fit_transfer``, the function a caller then uses to
-build the chosen transfer on all standards, so the evaluated and the deployed
-transfer are the same code.
+Every candidate, in every leave-one-out fold, is fitted by ``fit_transfer``, the
+function a caller then uses to build the chosen transfer on all standards, so the
+evaluated and the deployed transfer are the same code.
 """
 
 from __future__ import annotations
@@ -42,6 +42,13 @@ _METHOD_KINDS: dict[str, str] = {
     "ds_legacy": "spectral",
     "pred_slope_bias": "prediction",
     "pred_bias": "prediction",
+}
+
+_REQUIRED_SETTINGS: dict[str, tuple[str, ...]] = {
+    "pds": ("window", "rank"),
+    "pds_legacy": ("window",),
+    "ds": ("lam_rel",),
+    "ds_legacy": ("lam",),
 }
 
 DEFAULT_PDS_WINDOWS: tuple[int, ...] = (5, 11, 21, 31)
@@ -76,6 +83,9 @@ class TransferCandidate:
                 f"Unknown transfer candidate method {self.method!r}; "
                 f"expected one of {sorted(_METHOD_KINDS)}"
             )
+        missing = [k for k in _REQUIRED_SETTINGS.get(self.method, ()) if k not in dict(self.params)]
+        if missing:
+            raise ValueError(f"Transfer candidate {self.method!r} needs settings {missing}")
 
     @classmethod
     def make(cls, method: str, **params: Any) -> TransferCandidate:
@@ -136,8 +146,10 @@ class TransferEvaluation:
         score_column: The column the leaderboard is sorted by (``'RMSEP'``,
             ``'RMSD_vs_primary'`` or ``'spectral_RMSE'``).
         n_standards: Number of paired standards.
-        n_candidates: Number of ranked candidates (including "No correction"). The
-            best of many leave-one-out scores is mildly optimistic.
+        n_candidates: Number of candidates that were scored (including "No
+            correction"; failed candidates excluded). The best of many leave-one-out
+            scores is mildly optimistic.
+        ids: The standard IDs, in the row order of the out-of-fold arrays.
         oof_predictions: Label -> out-of-fold prediction per standard.
         oof_residual_spectra: Label -> (n_standards, p) primary minus transferred
             spectra (spectral candidates and "No correction" only).
@@ -149,6 +161,7 @@ class TransferEvaluation:
     score_column: str
     n_standards: int
     n_candidates: int
+    ids: list = field(default_factory=list)
     oof_predictions: dict[str, np.ndarray] = field(default_factory=dict)
     oof_residual_spectra: dict[str, np.ndarray] = field(default_factory=dict)
     candidates: dict[str, TransferCandidate] = field(default_factory=dict)
@@ -290,6 +303,8 @@ def fit_transfer(
         method = "ds"
         params = {"A": ct.estimate_ds(Xp, Xs, lam=float(s["lam"]))}
     wl = np.arange(p, dtype=np.float64) if wavelengths is None else np.asarray(wavelengths)
+    if wl.shape != (p,):
+        raise ValueError(f"wavelengths has shape {wl.shape} for spectra with {p} columns")
     return ct.TransferModel(
         primary_id=primary_id,
         satellite_id=satellite_id,
@@ -339,7 +354,8 @@ def evaluate_transfer(
             ``predict_fn_from_model``. Without it only spectral RMSE is reported.
         candidates: Candidates to compare (default ``default_transfer_candidates``).
             "No correction" is added when missing.
-        ids: Standard IDs, kept in ``oof`` tables (default 0..n-1).
+        ids: Standard IDs, stored as ``TransferEvaluation.ids`` in the row order of
+            the out-of-fold arrays (default 0..n-1).
         y_range_reference: (min, max) of the model's calibration y. A warning is
             raised when the standards span much less of it.
         rank_by: Leaderboard sort column. ``'auto'`` ranks by ``RMSD_vs_primary``
@@ -417,7 +433,10 @@ def evaluate_transfer(
     for cand in cand_list:
         label = cand.label
         if label in by_label:
-            continue
+            # Labels round settings (%g); keep a distinct candidate distinguishable.
+            label = f"{label} [{', '.join(f'{k}={v!r}' for k, v in cand.params)}]"
+            if label in by_label:
+                continue
         by_label[label] = cand
         row: dict[str, Any] = {
             "label": label,
@@ -469,6 +488,7 @@ def evaluate_transfer(
     board = board.reset_index(drop=True)
 
     ranked = board[board[score_column].notna()]
+    n_scored = int(len(ranked))
     if not ranked.empty and ranked.iloc[0]["method"] == "none":
         warnings_out.append("No method beat No correction on these standards.")
 
@@ -490,7 +510,8 @@ def evaluate_transfer(
         leaderboard=board,
         score_column=score_column,
         n_standards=n,
-        n_candidates=len(by_label),
+        n_candidates=n_scored,
+        ids=list(ids) if ids is not None else list(range(n)),
         oof_predictions=oof_pred,
         oof_residual_spectra=oof_res,
         candidates=by_label,
@@ -539,15 +560,11 @@ def _loso(
         return (y_sat.copy() if y_sat is not None else None), Xs.copy()
 
     if cand.kind == "prediction":
-        from .bias_correction import apply_correction
-
         pred = np.empty(n)
         for i in range(n):
             keep = np.arange(n) != i
-            corr = ct.estimate_prediction_correction(
-                y[keep], y_sat[keep], fit_slope=cand.method == "pred_slope_bias"
-            )
-            pred[i] = float(apply_correction(y_sat[i : i + 1], corr)[0])
+            corr = fit_transfer(cand, Xp[keep], Xs[keep], y=y[keep], predict=predict)
+            pred[i] = float(ct.apply_prediction_correction(y_sat[i : i + 1], corr)[0])
         return pred, None
 
     Z = np.empty_like(Xs)

@@ -79,6 +79,7 @@ PRIMITIVES: dict[str, list[str]] = {
         "estimate_tsr",
         "apply_tsr",
         "estimate_prediction_correction",
+        "apply_prediction_correction",
         "apply_transfer_dispatch",
         "TransferModel",
         "save_transfer_model",

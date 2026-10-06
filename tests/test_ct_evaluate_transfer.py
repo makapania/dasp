@@ -448,3 +448,115 @@ def test_simulated_instrument_ranking(simulated_instruments):
     # Centred PDS and slope/bias per wavelength both help on held-out spectra.
     assert external_rmsep(TransferCandidate.make("pds", window=11, rank=2)) < none_ext
     assert external_rmsep(TransferCandidate.make("tsr")) < none_ext
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 (DeepSeek): guards and documented behaviour
+# ---------------------------------------------------------------------------
+
+
+def test_dual_ds_rejects_constant_standards_that_do_not_centre_exactly():
+    row = np.random.default_rng(7).standard_normal((1, 25))
+    flat = np.tile(row, (6, 1))
+    with pytest.raises(ValueError, match="do not vary"):
+        ct.estimate_ds_dual(_pair(n=6, p=25)[0], flat)
+
+
+def test_candidate_failing_in_one_fold_is_an_error_row_and_not_counted():
+    Xp, _ = _pair(n=4, p=25)
+    row = np.random.default_rng(7).standard_normal((1, 25))
+    Xs = np.vstack([np.tile(row, (3, 1)), row + 1.0])  # leaving out row 3 leaves no variation
+    ds = TransferCandidate.make("ds", lam_rel=1e-2)
+    ev = evaluate_transfer(Xp, Xs, candidates=[ds, TransferCandidate.make("tsr_bias")])
+    board = ev.leaderboard.set_index("label")
+    assert "do not vary" in board.loc[ds.label, "error"]
+    assert np.isnan(board.loc[ds.label, "spectral_RMSE"])
+    assert ev.leaderboard.iloc[-1]["label"] == ds.label
+    assert ev.n_candidates == 2
+
+
+def test_ids_are_kept_in_oof_row_order():
+    Xp, Xs = _pair(n=4, p=20)
+    ev = evaluate_transfer(Xp, Xs, ids=["a", "b", "c", "d"])
+    assert ev.ids == ["a", "b", "c", "d"]
+    assert evaluate_transfer(Xp, Xs).ids == [0, 1, 2, 3]
+    with pytest.raises(ValueError, match="ids has"):
+        evaluate_transfer(Xp, Xs, ids=["a"])
+
+
+def test_no_method_beat_no_correction_warning():
+    Xp, _ = _pair(n=5, p=20)
+    ev = evaluate_transfer(
+        Xp, Xp.copy(), candidates=[TransferCandidate.make("ds_legacy", lam=1e-3)]
+    )
+    assert ev.best.method == "none"
+    assert any("No method beat" in w for w in ev.warnings)
+
+
+def test_narrow_standard_range_warning():
+    Xp, Xs = _pair(n=6, p=20)
+    predict = _linear_predict(20)
+    y = predict(Xp)
+    lo, hi = float(y.min()), float(y.max())
+    ev = evaluate_transfer(
+        Xp, Xs, y=y, predict=predict, y_range_reference=(lo - 10 * (hi - lo), hi)
+    )
+    assert any("30%" in w for w in ev.warnings)
+
+
+def test_rounded_labels_do_not_drop_distinct_candidates():
+    Xp, Xs = _pair(n=5, p=20)
+    a = TransferCandidate.make("ds", lam_rel=0.01)
+    b = TransferCandidate.make("ds", lam_rel=0.0100000001)
+    ev = evaluate_transfer(Xp, Xs, candidates=[a, b])
+    assert len(ev.leaderboard) == 3
+    assert set(ev.candidates.values()) == {TransferCandidate.make("none"), a, b}
+
+
+def test_predict_fn_wraps_saved_regression_model_with_its_correction(tmp_path):
+    from sklearn.cross_decomposition import PLSRegression
+
+    from spectral_predict.model_io import load_model, save_model
+
+    rng = np.random.default_rng(2)
+    wl = np.linspace(1000.0, 1100.0, 30)
+    X = rng.standard_normal((20, 30))
+    y = X[:, :3].sum(axis=1)
+    model = PLSRegression(n_components=3).fit(X, y)
+    metadata = {
+        "model_name": "PLS",
+        "task_type": "regression",
+        "wavelengths": [float(w) for w in wl],
+        "n_vars": 30,
+        "target_name": "y",
+        "preprocessing": "raw",
+    }
+    correction = {"method": "linear", "bias": 0.5, "slope": 2.0}
+    path = tmp_path / "m.dasp"
+    save_model(model, None, metadata, str(path), bias_correction=correction)
+    predict = predict_fn_from_model(load_model(str(path)), wl)
+    np.testing.assert_allclose(predict(X[:4]), 0.5 + 2.0 * model.predict(X[:4]).ravel(), atol=1e-10)
+    with pytest.raises(ValueError):
+        predict_fn_from_model(load_model(str(path)), wl + 7.0)(X[:2])
+
+
+def test_apply_prediction_correction_matches_fit_transfer():
+    Xp, Xs = _pair(n=6, p=20)
+    predict = _linear_predict(20)
+    y = predict(Xp) + 0.3
+    corr = fit_transfer(TransferCandidate.make("pred_slope_bias"), Xp, Xs, y=y, predict=predict)
+    out = ct.apply_prediction_correction(predict(Xs), corr)
+    np.testing.assert_allclose(out, corr["bias"] + corr["slope"] * predict(Xs))
+
+
+def test_candidate_settings_are_validated_up_front():
+    with pytest.raises(ValueError, match="needs settings"):
+        TransferCandidate.make("pds", window=5)
+    with pytest.raises(ValueError, match="Unknown transfer candidate"):
+        TransferCandidate.make("epo")
+
+
+def test_fit_transfer_checks_wavelength_length():
+    Xp, Xs = _pair(n=5, p=20)
+    with pytest.raises(ValueError, match="wavelengths has shape"):
+        fit_transfer(TransferCandidate.make("tsr"), Xp, Xs, wavelengths=np.arange(19.0))

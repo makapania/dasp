@@ -25,10 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New methods: centred low-rank PDS (`calibration_transfer.estimate_pds_lowrank`),
     centred ridge DS in dual form (`estimate_ds_dual`, n×n instead of p×p), and a
     slope/bias of predictions fitted on satellite standards
-    (`estimate_prediction_correction`).
+    (`estimate_prediction_correction`, applied with `apply_prediction_correction`).
   - `pair_standards_by_id` pairs standards by sample ID instead of row order.
   - Every apply site (GUI quality plot, GUI prediction, equalization) now goes through
-    `apply_transfer_dispatch`.
+    `apply_transfer_dispatch`. Behaviour change: `equalization.build_equalization_mapping_for_instrument`
+    used to apply only DS/PDS and silently pass other methods through untransferred; it now
+    applies every stored method and raises on an unknown one.
   - New-form transfer files carry `meta['format_version'] = 2`, and older builds refuse
     them instead of misapplying them. Both modules are on the declared surface
     (AGENT_COMPOSITION §9).

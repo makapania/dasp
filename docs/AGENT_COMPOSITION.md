@@ -598,8 +598,8 @@ transfer = fit_transfer(ev.best, paired.X_primary, paired.X_satellite,
                         primary_id="lab_asd", satellite_id="field_unit")
 # A spectral method returns a TransferModel; apply it with apply_transfer_dispatch
 # and save it with calibration_transfer.save_transfer_model. A prediction correction
-# returns a bias_correction dict (bias_correction.apply_correction). "No correction"
-# returns None.
+# returns a dict for calibration_transfer.apply_prediction_correction, applied to the
+# model's predictions from the raw satellite spectra. "No correction" returns None.
 ```
 
 - **Inputs are arrays on one common grid.** `pair_standards_by_id` refuses different
@@ -650,7 +650,7 @@ listed is an internal implementation detail that may change without notice.
 | `models` | `PLSTransformer`; results-row rebuild helpers `parse_row_params`, `estimator_params_from_row`, `plsda_head_kwargs` (and its `PLSDA_HEAD_DEFAULT_RANDOM_STATE` default) |
 | `model_io` | `save_model`, `load_model`, `predict_with_model` |
 | `sample_selection` | `split_calibration_holdout` |
-| `calibration_transfer` | `estimate_pds_lowrank`, `apply_pds_centred`, `estimate_ds_dual`, `apply_ds_dual`, `estimate_tsr`, `apply_tsr`, `estimate_prediction_correction`, `apply_transfer_dispatch`, `TransferModel`, `save_transfer_model`, `load_transfer_model` |
+| `calibration_transfer` | `estimate_pds_lowrank`, `apply_pds_centred`, `estimate_ds_dual`, `apply_ds_dual`, `estimate_tsr`, `apply_tsr`, `estimate_prediction_correction`, `apply_prediction_correction`, `apply_transfer_dispatch`, `TransferModel`, `save_transfer_model`, `load_transfer_model` |
 | `transfer_evaluation` | `evaluate_transfer`, `default_transfer_candidates`, `fit_transfer`, `TransferCandidate`, `TransferEvaluation`, `pair_standards_by_id`, `PairedStandards`, `predict_fn_from_model` |
 | `wavelength_matching` | `match_wavelengths`, `resolve_wavelength_list`, `format_wavelength_list`, `WavelengthMatchError` |
 | `search` | `run_search`, `run_one_class_search`, `run_multiclass_simca_search`, `multiclass_varsel_mask`, `build_multiclass_decision_view`, `compute_validation_metrics_for_top_models`, `MulticlassVarselUnsupported` |

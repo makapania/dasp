@@ -565,7 +565,9 @@ def estimate_ds_dual(
     Pc = Xp - mean_p
     K = Xc @ Xc.T
     scale = float(np.trace(K)) / n
-    if not scale > 0:
+    # Identical rows rarely centre to exact zeros; compare with the data's own size.
+    raw_scale = float(np.mean(np.sum(Xs**2, axis=1)))
+    if not scale > (np.finfo(np.float64).eps * max(n, p)) ** 2 * max(raw_scale, 1e-300):
         raise ValueError("The satellite standards do not vary; DS cannot be fitted")
     lam = float(lam_rel) * scale
     W = np.linalg.solve(K + lam * np.eye(n), Pc)
@@ -676,6 +678,21 @@ def estimate_prediction_correction(
         "n_standards": n,
         "warnings": warnings_out,
     }
+
+
+def apply_prediction_correction(y_pred: np.ndarray, correction: Dict) -> np.ndarray:
+    """Apply a correction from ``estimate_prediction_correction`` to predictions.
+
+    Args:
+        y_pred: The model's predictions from (untransferred) satellite spectra.
+        correction: The correction dict.
+
+    Returns:
+        Corrected predictions, ``bias + slope · y_pred``.
+    """
+    from .bias_correction import apply_correction
+
+    return apply_correction(y_pred, correction)
 
 
 def save_transfer_model(

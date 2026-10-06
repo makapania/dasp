@@ -2,51 +2,37 @@
 
 > Historical material (completed-work narratives, old hand-offs, per-PR details, superseded sections) was moved verbatim to [PROJECT_STATUS_ARCHIVE.md](PROJECT_STATUS_ARCHIVE.md) on 2026-09-15. Grep it for history.
 
-## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-27)
+## ▶ NEXT SESSION — START HERE (hand-off updated 2026-10-06)
 
-### 0. DONE (2026-10-03): Wave 1 + Wave 2 fixes all merged (PRs #83-#96) — next: pick Wave 3 / roadmap items
-Every Wave 1/2 item was cross-checked by Codex gpt-6-astra and GLM 5.3 before fixing. User decisions: booster tree
-count = one value from the pooled CV curve; chemometrics validation conventions (CLAUDE.md).
-**Merged:** #83 fix/ct-honest-labels; #84 fix/ensemble-cv (wrappers now in `model_wrappers.py`); #85 feat/dpi-fonts; #86 fix/contaminant-maths (QW3, QW6; auto EPO count
-advisory, revertible `_CONTAM_AUTO_COUNT_ADVISORY`; DeepSeek LOWs left: GUI says ~7% vs docs 6.5%, skew hint checks
-only the first direction); #87 fix/readers (R017 OPUS background, R062 one ASCII parser, data type/scale
-carried through every tab; comma files dot-decimal + warning).
-#88 fix/wavelength-mapping (R009/R031/R016: tolerant wavelength matching everywhere incl. model_wrappers;
-encoders decode only when owned); #89 fix/ytransform-save (Tab 7 saves/exports the trained model: Y-transform,
-bias correction bound by token, frozen refit inputs, atomic RefinedState); #90 fix/preexisting-test-export (multiclass GUI test fake Thread;
-code export without CV / imbalance / plot fixes; PLS + regression imbalance sample_weight still open); #91 fix/classification-metrics (one label rule
-`scoring.classification_fit_labels` in every engine; pooled CV metrics; regression FoM); #92 fix/gui-dataset-state (calibration-identity crash-resume
-gate, transactional reconcile, missing-aware duplicate IDs). #93 test isolation (#89/#90 GUI tests); #94 perf/thread-budget (QW1 one
-thread-budget rule in `parallel_policy`; frozen builds fall back to the threading backend with BLAS/OpenMP caps and
-CatBoost serial; QW10 slow/comprehensive tests deselected by default, run nightly incl. Linux job).
-**#95 QW4 (holdout direction):** KS/SPXY/DUPLEX pick the CALIBRATION set (`sample_selection.split_calibration_holdout`);
-SPXY per Galvão (normalised distance matrices); DUPLEX per Snee; saved holdouts unchanged. Example RMSEP KS 3.57→1.30.
-#96 fix/booster-early-stopping (R028: no test-fold early stopping; one round count from the pooled CV curve; final
-fit at R truncated to k in grid/Bayesian/NSGA-II/Tab 7/export/ensembles; grid+Tab 7 XGBoost on non-0..K-1 integer
-labels fixed; grid final refit uses balanced weights). Example RMSEcv LightGBM 3.900→3.949, XGBoost 3.960→4.062.
-**Reviewers:** Codex is reset but reserved for MAJOR checks only (user, 2026-10-03); routine confirms use GLM 5.3 + DeepSeek (deepseek-flash; Pro only if the
-user says "pro") stand in. opencode prompts must forbid shell redirection, writes, and reads outside the repo, and
-demand a verdict even if a tool call is rejected. Merge rule: well-reviewed PR → merge origin/main into branch, test,
-`gh pr create`, `gh pr merge N --merge --match-head-commit <full sha>`.
-**Open branches:** none. Follow-ups: see SESSION_LOG 2026-10-03 "Wave 1/2 review workflow" (decimal-comma CSV/ASD
-readers; PLS + regression imbalance sample_weight; regression sample weighters not applied to the final refit;
-QW4 distances on preprocessed/PCA spectra; #86 LOWs).
+### 0. NOW (2026-10-06): Wave 3 started — F2 part 1 (transfer evaluation backend) on `feat/ct-evaluate-transfer`
+Wave 1 + 2 (PRs #83-#96) are merged; their summary is in the archive (Batch 2). Wave 3 order (§0a): F2 part 1 →
+F2 part 2 (GUI) → F1 part 1 (CVPlan) → F4/CS1/F3/F5/MW1/SP1-2.
+**F2 part 1** (plan `docs/plans/2026-10-05-F2-part1-transfer-validation-backend.md`, reviewed by GLM 5.3 + DeepSeek
+Flash; code review round 1 fixes applied): `transfer_evaluation.evaluate_transfer` (leave-one-standard-out
+bake-off, "No correction" + primary reference rows), `fit_transfer`, `pair_standards_by_id`,
+`predict_fn_from_model`; `calibration_transfer.estimate_pds_lowrank` (centred low-rank PDS, `B_centred` key),
+`estimate_ds_dual`, `estimate_prediction_correction`/`apply_prediction_correction`; all apply sites use
+`apply_transfer_dispatch`. AGENT_COMPOSITION §9. Simulated second instrument from the example data in
+`tests/test_ct_evaluate_transfer.py`.
+**Decision for the user (my call, revertible):** the board ranks by `RMSD_vs_primary` (transfer error alone, y
+units), not RMSEP, whenever a model is given; `rank_by="RMSEP"` restores the other. Why: SESSION_LOG 2026-10-05.
+**Part 2 next (GUI):** Validate/Compare panel on the CT tab, ID pairing in the loaders, "Plan transfer standards",
+delete the dead `_build_ct_transfer_model`/`_load_ct_paired_spectra`. **Part 3:** `.dasp` per-instrument adapters;
+must decide replace vs chain for a satellite slope/bias over a stored `bias_correction` (CT3 is fitted on the
+model's corrected output), and the GUI Model Development display reads `metrics_original` from a correction dict.
+**Reviewers:** Codex for MAJOR checks only; routine confirms GLM 5.3 + DeepSeek Flash via opencode (forbid shell
+redirection, writes, reads outside the repo; demand a verdict). Merge rule: well-reviewed PR → merge origin/main
+into branch, test, `gh pr create`, `gh pr merge N --merge --match-head-commit <full sha>`.
+**Open follow-ups from Wave 1/2:** decimal-comma CSV/ASD readers; PLS + regression imbalance sample_weight;
+regression sample weighters not applied to the final refit; QW4 distances on preprocessed/PCA spectra; #86 LOWs.
 **Open questions for the user:** Import rounds wavelengths to integers and refuses sub-unit spacing (FTIR?); comma
 ASCII files default to dot-decimal with a warning (my call); advisory EPO count (my call); delete stray GLM temp files
-in %TEMP% (diff.txt, gui_f359708.py, opencode\repo_*).
-
-**Booster round selection (branch `fix/booster-early-stopping`, Wave 1 item 1, R028/R003/R022/R126).** XGBoost,
-LightGBM and CatBoost no longer early-stop each CV fold on its own test fold. The round count is chosen once from the
-pooled CV curve, as the PLS LV count is (`cv_utils.cross_val_boosting_rounds`; `early_stopping_rounds` is the patience),
-and every CV metric, Tab 7 and the export use that count. **Booster CV scores drop** (example data: LightGBM RMSEcv
-3.900 -> 3.949, XGBoost 3.960 -> 4.062). The final model is the scored configuration fitted at the maximum count and
-truncated to the selected one (`truncate_booster`). Results gain `n_estimators_selected`, `n_estimators_fit` and
-`round_selection_truncated`; Params carry the selected count. Booster Bayesian studies with selection on get a
-`|boost_rounds=pooled_cv_curve_v1` identity segment: old booster studies are reported (`booster_scoring_changed`,
-resume declined), preserved, never resumed, and the saved run's resume record is kept until the user deletes it.
-DART, tree dropout, gblinear and CatBoost shrinkage are fitted at their configured count (recorded as no selection).
-Details: SESSION_LOG 2026-10-02.
-
+in %TEMP% (diff.txt, gui_f359708.py, opencode\repo_*); many stale `.claude/worktrees/agent-*` checkouts (delete?).
+**Crash-resume design (PR #79, details in archive):** `_confirm_resume_before_launch` is the single main-thread launch
+gate and freezes every worker input; a new Bayesian input must join `BAYESIAN_REQUIRED_SETTINGS` and
+`CAPTURABLE_SETTINGS`.
+**Python 3.14:** the project is 3.14 only (`.venv314`). A machine still on `.venv312`, or a first pull on a new
+machine: follow archive Batch 2 "MOVING A 3.12 MACHINE TO 3.14" and "FIRST PULL ON A NEW MACHINE" first.
 ### 0a. The 2026-09-28 review results and the combined order
 Two whole-codebase reviews ran on `main` `449dfb1` (PR D merged as `85790dd`):
 - **Correctness:** `docs/reviews/2026-09-28-adversarial-review.md`. 133 findings kept (129 confirmed by an
@@ -55,7 +41,7 @@ Two whole-codebase reviews ran on `main` `449dfb1` (PR D merged as `85790dd`):
   contamination, modelling workflow, speed, GUI usability, visuals, structure). IDs QW*/F*/CT*/CS*/MW*/SP*/LF*/ST*.
 - **Selector test:** the MC-PLS selector is not adopted; its generic form is MW1 (see §4 item 3).
 
-**Combined order (user has not approved it yet; confirm before starting).** Wave 1 fixes the numbers users report
+**Combined order (Waves 1-2 done; user started Wave 3 on 2026-10-05).** Wave 1 fixes the numbers users report
 and deploy.
 1. **CV leakage:** booster early stopping on the CV test fold (R028, the root cause in cv_utils; R003, R022, R126),
    and ensemble CV/weights fitted in-sample (R002 critical, R021, R018, R105). Reported scores will drop.
@@ -72,26 +58,13 @@ Wave 2 stops the app misleading:
    Interference tab crashes (R075), plus R113/R114. Add behavioural tests.
 7. **QW4 + QW5:** holdout direction (KS/SPXY must pick CALIBRATION; R085 starting pair), figures of merit; classification
    metrics R029/R030.
-8. **QW7:** DPI awareness and fonts (the cheapest visible upgrade). **Implemented on `feat/dpi-fonts`** (not merged
-   yet). It adds system DPI awareness before `tk.Tk()` plus a DPI-aware manifest in the spec (the frozen build is
+8. **QW7:** DPI awareness and fonts (the cheapest visible upgrade). **Merged (#85).** It adds system DPI awareness before `tk.Tk()` plus a DPI-aware manifest in the spec (the frozen build is
    untested), the `_px`/`_px_geometry` scale helpers, and six named fonts (`self.fonts`) wired into every ttk style.
    The literal font-tuple sweep (101 tuples) and the per-tab pixel padding are queued in
    `docs/plans/2026-10-02-font-tuple-sweep.md`; do them after the concurrent GUI branches merge.
 Wave 3 (flagships): F2 calibration transfer that validates itself (backend, then GUI), F1 CVPlan/grouped CV, F4 real
 DD-SIMCA, CS1 EMSC-with-interferent then F3 in-fold saved contaminant correction, F5 publication output, MW1 stability
 selection, SP1/SP2 PLS kernel and SPA. Structural enablers ST1a/ST2/ST4 whenever a flagship touches that area.
-
-**What PR D is** (plan: `docs/plans/2026-09-26-T51-PR-D-gui-plan.md` rev 3, three plan-review rounds):
-- **The card:** Bayesian Options gains a collapsed "Extra hyperparameter axes (advanced)" card. It has one checkbox
-  per registry bundle (`bayes_axis_<id>`), a TPE startup-trials box (`bayes_n_startup_trials`; blank = 20) and a
-  dimension caption (`src/spectral_predict/extra_axes_advisory.py`).
-- **Frozen at the click:** all new vars are in `CAPTURABLE_SETTINGS` and `BAYESIAN_REQUIRED_SETTINGS`, and both
-  worker call sites read them from the snapshot, filtered by the resolved task.
-- **Old snapshots:** they are normalised with `LEGACY_DEFAULTS` inside `diff_gui_settings` and at the startup
-  full-restore call site. **Never inside `restore_gui_settings`**, which also applies the dialog's partial patches;
-  doing that loops.
-- **Adding a bundle to the registry now needs no GUI work.** The card, capture and required lists are all generated
-  from `BUNDLES`, and a test fails if a bundle has no var.
 
 **After PR D: T-51 PR E, then F** (old plan `docs/plans/2026-09-13-T51-optuna-axes-implementation-plan.md` §1, §5).
 - **PR E:** the one-class clamp before the fingerprint, with a record. PCA-SIMCA `LVs` reporting. Use the
@@ -100,60 +73,6 @@ selection, SP1/SP2 PLS kernel and SPA. Structural enablers ST1a/ST2/ST4 whenever
   `suggest_one_class_params`. That is the one planned exception to the no-sampler-edits rule, and it changes the
   pinned sampler hashes in `tests/test_t51_extra_axes_mechanism.py`.
 
-
-### PR #81 (sparse-selector top-N cap) MERGED 2026-09-26 as `e3c6d59`
-CARS-family top-N subsets no longer pad with zero-score long wavelengths (grid, one-class, multiclass, Bayesian).
-There were three review rounds.
-- **It re-blessed the T3 trajectory fixture.** That test runs only on the blessing machine (`.venv314` here, digest
-  `322dc72485c2`). Run the suite here before claiming green on anything that changes default Bayesian trial values.
-- Details: SESSION_LOG 2026-09-23 "CARS top-N padding" (items 1-10).
-
-### 1. PR #79 (crash-resume) is MERGED — `a5f9a70`. Nothing pending on it.
-13 review rounds. Rounds 1-8 were reviewed by Codex + DeepSeek Flash + GLM 5.3; rounds 9-13
-by Codex alone (it blocked 8-12 and returned **MERGE** on 13 with no findings). Branches and
-worktrees are deleted. Full non-GUI suite 3405 passed / 26 skipped; `tests/gui/test_resume_*.py`
-91 passed; F821 clean.
-
-**The design, worth knowing before touching the GUI's Run Analysis path:**
-`_confirm_resume_before_launch` is the single main-thread launch gate. It decides
-resume/delete/fresh, claims the run, and freezes everything the worker needs — models, trial
-count, data, optimization method + task type, a `capture_gui_settings` snapshot, and the
-calibration rows (holdout / excluded / active). The worker reads those arguments, never live
-Tk state. **Nearly every Codex block in rounds 9-12 was a place where the worker still
-re-read something the gate had decided.** Add a new Bayesian input → add it to the snapshot
-(`BAYESIAN_REQUIRED_SETTINGS`) and to `CAPTURABLE_SETTINGS`, or a changed control silently
-starts a different study and the finished run releases the saved one's record.
-
-**Binding user decisions (unchanged):** a data mismatch never deletes anything by itself; a
-saved paused/failed/crashed run is offered until it is resumed to completion or deleted;
-resume never changes the persistence radio.
-
-**Known limitations (in CHANGELOG under 0.5.0b3):** two dasp windows share one
-`active_run.json` with no file locking; a finished run whose record couldn't be deleted is
-offered again; a run whose store is missing/empty is not offered; resume restores only
-whitelisted GUI settings, not hyperparameter grids. Also out of scope and still live: grid,
-one-class grid, NSGA-II and post-search paths read live Tk state (they don't touch run_state).
-
-### 2. Merged this session (2026-09-14/15)
-| PR | What |
-|---|---|
-| #69 | T-41 'auto' re-run no longer deletes an earlier study |
-| #68 | T-51 PR A: opt-in extra Optuna axes mechanism |
-| #70 | Test-order leak fix (`reimport_modules` fixture) |
-| #71 | CI: 5 drifted tests fixed, actions v7, docs paths-ignore, PR concurrency, timeouts |
-| #72 | T-51 PR B0: PLS-DA head params survive rebuild/refit/ensemble/export |
-| #73 | CatBoost never writes `catboost_info/` (failed fits under Program Files) |
-| #74 | T-51 PR B: 11 opt-in supervised bundles (Python-only until PR D) |
-| #75 | Removed Linux Xvfb GUI CI job (T-CI-2 was a too-short timeout, not a hang) |
-| #76 | CI: per-sha push concurrency; **blocking flake8 F821/F822/F823 gate** |
-| #77 | Ensembles: tuned `model__*` params + correct row preprocessing (incl. chromosome rows, float64), PLS-DA class_weight/seed, legacy CatBoost refit, GUI NameErrors; shared row helpers on declared surface §8b. **Ensemble scores change.** 5 review rounds. |
-| #78 | Bayesian: no automatic study deletion after failed migration; baseline_params NameError; svm_gamma pair rejection; 'pls-da'; equal categorical choices; numpy scalars; legacy-study warning. 3 review rounds. |
-| #79 | Crash-resume: persistence setting kept; saved run offered until resumed or deleted; damaged record reported not replaced; everything the Bayesian worker uses frozen at the click. 13 rounds. See §1. |
-| #80 | T-51 PR C: 3 opt-in one-class bundles (`if_max_samples`, `lof_metric`, `ocsvm_poly`). Python-only until PR D. GLM 5.3 + 4 Codex rounds; see SESSION_LOG 2026-09-16. |
-
-Review process used (user preference): **Codex + DeepSeek Flash + GLM 5.3** on every PR,
-re-review each round until clean. A post-merge round on #68-#75 found real pre-existing bugs
-(fixed in #76-#78). See SESSION_LOG 2026-09-14 "Post-merge review round".
 
 ### 3. Open PRs / decisions for the user
 - **#63** T-17 multi-target regression (+16k lines, stale since 2026-07-08): user leaning
@@ -213,247 +132,6 @@ re-review each round until clean. A post-merge round on #68-#75 found real pre-e
 - **Rewriting docs from PowerShell:** use `[IO.File]::WriteAllText(..., UTF8Encoding
   $false)` and check `git diff --stat`. `Set-Content` once rewrote the whole of
   PROJECT_STATUS with new line endings.
-
----
-
-## ⚠ MOVING A 3.12 MACHINE TO 3.14 (added 2026-09-12) — DO THIS FIRST
-
-If this machine is still on `.venv312`, do this **before** pulling and before trying
-to run anything. The project is now Python 3.14 only.
-
-> **The trap:** `pyproject.toml` now sets `requires-python = ">=3.14"`. The moment you
-> pull, `pip install -e .` **fails inside `.venv312`** with a `requires-python` error.
-> That is expected, not a broken checkout. Build the new environment instead of trying
-> to repair the old one.
-
-```bash
-# 1. Install Python 3.14 (ordinary GIL build, NOT the free-threaded "t" variant)
-winget install Python.Python.3.14
-py -3.14 -V                       # expect 3.14.x
-
-# 2. Pull
-cd <repo>
-git checkout main                       # PR #65 merged 2026-09-13 (6b956c8)
-git pull
-
-# 3. Build the new environment alongside the old one. Do NOT delete .venv312 yet.
-py -3.14 -m venv .venv314
-.venv314\Scripts\python -m pip install --upgrade pip
-.venv314\Scripts\python -m pip install -r requirements-lock.txt
-.venv314\Scripts\python -m pip install -e . --no-deps
-.venv314\Scripts\python -m pip check          # expect: No broken requirements found.
-
-# 3b. Existing .venv314? Re-apply the lock after every pull. The launchers now do
-#     this automatically when the venv differs from requirements-lock.txt;
-#     this is the manual equivalent. A venv built from the 09-10 lock still has
-#     jcamp 1.2.2, and JCAMP-DX import is broken until it is resynced.
-.venv314\Scripts\python -m pip install -r requirements-lock.txt
-.venv314\Scripts\python -m pip install -e . --no-deps
-.venv314\Scripts\python scripts\check_env_lock.py   # expect: Environment matches ...
-#     (pip check only verifies that installed packages satisfy each other's
-#     declared requirements, so it misses drift from the exact lock pins.
-#     check_env_lock.py compares against the lock.)
-
-# 4. Verify before trusting it
-.venv314\Scripts\python -m pytest -q -p no:randomly --tb=no -rf
-#    Compare failing node IDs with the known baseline below. Counts vary with
-#    platform and optional dependencies. The bar is ZERO NEW failures.
-
-# 5. Launch the GUI
-.venv314\Scripts\python spectral_predict_gui_optimized.py
-```
-
-**The launchers are already updated on this branch.** `install.bat`, `install.sh`,
-`RUN_SPECTRAL_PREDICT.bat` and `run_gui.sh` all target 3.14 / `.venv314`, and the
-installers now install `requirements-lock.txt` instead of resolving pyproject floors.
-Steps 3–4 above are exactly what `install.bat` does, so you can just run that.
-
-**Note that `py` now defaults to 3.14** once installed, so a bare `py` or `python` no
-longer means what it did. Always use the explicit `.venv314\Scripts\python` path.
-
-**Machine progress (2026-09-13):** the primary Windows machine is on `.venv314`
-(Python 3.14.7, jcamp 1.3.2, `pip check` clean). Full suite: all 3,042 tests ran and
-only the five baseline IDs failed (listed in the installation validation report
-below). But Python crashed with an access violation in the GUI `session_app`
-teardown after the last test, so pytest printed no summary. It did not recur in a
-later `tests/gui` run: 132 passed, 2 baseline failed. The GUI launches and runs an
-analysis. Its first launch exposed a Model Development CV-row `TclError` on the
-default kfold, fixed in `a746d5c`. **Other machines:** pull, then launch with
-`RUN_SPECTRAL_PREDICT.bat` (it resyncs the venv to the lock) or do step 3b by hand.
-JCAMP-DX import is broken in any `.venv314` still on jcamp 1.2.2. **Automatic lock
-sync (PR #66, merged 2026-09-13 as `77bb4ad`):** the launchers run
-`scripts/check_env_lock.py` and reinstall from the lock on drift, the installer build
-refuses a drifted build venv (`DASP_ALLOW_LOCK_DRIFT=1` overrides), the frozen
-self-test checks `jcamp.readfile`, and `read_jcamp_file` raises an actionable
-`ImportError` on jcamp <1.3. **Still
-untested on 3.14:** importing a JCAMP-DX file through the GUI (the backend round
-trip passed), and a real installer build with the new lock-drift gate (logic is
-covered by `tests/test_build_and_launcher_safety.py`).
-
-**Keep `.venv312` for now.** It is the rollback lever: the build path is parameterized,
-so `DASP_BUILD_PYTHON=312 DASP_ALLOW_LOCK_DRIFT=1 python build_installer_py312.py` rebuilds on 3.12. A true
-rollback would also mean lowering `requires-python` again. Delete `.venv312` only once
-you are confident, and reclaim the disk then.
-
-**Installer validation complete locally (2026-09-12, application `db975e2`):** a
-real installer built from base `main` (`8de7445`) and retained `.venv312` was
-installed, then upgraded in place. The first attempt exposed 3,309 obsolete
-runtime files and mismatched package metadata; a GUI analysis also exposed the
-missing `logging.handlers` dependency. Both are fixed. The installer replaces
-only its app-owned `_internal` directory, and PyInstaller now analyzes `src`.
-
-The corrected upgrade and a fresh installation each match all 20,384 build
-runtime files by SHA256. Both pass the expanded executable smoke test (44/44
-imports, numerical metadata, booster fits, 99-row search and model round trip)
-and programmatic installed-GUI analysis/model loading. A model saved under 3.12
-reproduces all 30 reference predictions after upgrade. Both uninstall checks
-preserve user files and remove the application registration. The test installs
-were removed; the source shortcut and retained `.venv312` are unchanged.
-
-These were current-user installations on this development machine, not a fresh
-Windows VM or manual desktop test. The native automation bridge was unavailable.
-The final CI comparison also passes: Windows has 3,008 passed and the same five
-baseline failures; Linux and optional dependencies each have 2,880 passed and
-the same three baseline failures. Build passes; the informational GUI timeout
-matches base. **PR #65 was merged into `main` on 2026-09-13 as `6b956c8`** (merge
-commit, user-authorized, guarded to head `8bd3f8f`). See the
-[installation validation report](reviews/2026-09-12-pr65-installation-validation.md)
-for exact commits, artifact hash, review scope and remaining limitations.
-
----
-
-## ⚠ FIRST PULL ON A NEW MACHINE (added 2026-07-30) — DO THIS BEFORE ANYTHING ELSE
-
-If this checkout is the first one on this machine to see commit `763c4ed` or later,
-**run this before running or testing anything:**
-
-```bash
-# from the repo root, in the project venv (.venv314 — see the 3.14 section above)
-pip install -e . --no-deps
-```
-
-> Superseded in practice by the 3.14 section above: building a fresh `.venv314` cannot
-> inherit a stale shim, so this only matters for an environment that predates the
-> migration. Kept because the failure mode below is confusing if you hit it.
-
-**Why it is mandatory, not housekeeping.** The `spectral-predict` console script was
-retired and `src/spectral_predict/cli.py` deleted. A `git pull` removes the source but
-**leaves the installed launcher behind**: `.venv312/Scripts/spectral-predict.exe`
-survives and fails with
-
-```
-ModuleNotFoundError: No module named 'spectral_predict.cli'
-```
-
-Re-running `pip install -e .` removes the stale shim. Verified on the primary machine
-2026-07-30: present and broken before, gone after.
-
-### The other three things to know on first pull
-
-1. **There is no CLI. It is not coming back.** Retired 2026-07-29, abandonment
-   confirmed by the user 2026-07-30 — Codex proposed a one-release deprecation stub and
-   the user declined. Do not add one, and do not re-add a console script "for
-   convenience". Humans use the GUI (`python spectral_predict_gui_optimized.py`);
-   scripts and agents compose backend primitives directly.
-
-2. **Read `docs/AGENT_COMPOSITION.md` before writing any script that calls the
-   backend.** `CLAUDE.md` makes this a MUST. It documents the stable surface and the
-   traps that otherwise cost a turn each — readers and `run_search` both return
-   **tuples**, selectors return **score arrays not masks**, `preprocessing_methods` is a
-   **dict of bools not a list of strings**, and the saved-model metadata key is
-   **`"preprocessing"`, not `"preprocess"`**. Every example in it has been executed
-   against the repo's own `example/` data.
-
-3. **`main`'s CI is red, and has been since ≈June 2026.** That is the pre-existing
-   T-CI-1 rot, NOT this merge. Do not treat a red check as a signal about your own
-   branch — until T-CI-1 closes, diff your failure set against `origin/main` and
-   confirm you add zero NEW failures. Current known-red on `main`:
-   `test_export_code.py` (2), `test_cv_strategy.py` (1), `test_t19_class_weight_per_library.py` (2),
-   **plus two GUI tests** (`tests/gui/test_comprehensive.py::test_catboost_via_gui`,
-   `tests/gui/test_multiclass_gui.py::test_tab9_rejects_multiclass_primary`). That is
-   **7 total** — the list above previously said 5 and was stale. Verified 2026-09-12
-   by full runs on 3.12, on 3.14, and on 3.14 with every dependency upgraded: the
-   same seven fail in all three, 2971 pass, 33 skip.
-
-> ## ▶ ACTIVE DIRECTION (2026-09-12) — **Python 3.14 migration COMPLETE and MERGED to `main`** (PR #65, `6b956c8`, 2026-09-13), all dependencies current
->
-> **The project is Python 3.14 only.** `requires-python = ">=3.14"`, CI matrix is
-> `['3.14']`, classifiers list 3.14 alone. Earlier versions are not supported and
-> pip refuses to install on them. Use the ordinary GIL build, **not** free-threaded.
-> Recreate an environment with `py -3.14 -m venv .venv314` +
-> `pip install -r requirements-lock.txt` + `pip install -e . --no-deps`.
->
-> **What was verified, not assumed.** The analysis in `docs/PYTHON_UPGRADE_DECISION.md`
-> was read-only — its own Appendix B says nothing was ever installed, built or run.
-> All of it has now been executed:
-> - All 114 pinned distributions install on CPython 3.14.7; whole stack imports.
-> - Full suite: **7 failed / 2971 passed / 33 skipped, identical on 3.12, on 3.14,
->   and on 3.14 with every dependency upgraded. Zero new failures.**
-> - **The frozen bundle builds AND runs** — 42/42 imports, all three booster DLLs,
->   threading fallback engaged, a real LightGBM CV job completing (the historical
->   fork-bomb scenario), GUI launching, and a 243.9 MB Inno installer produced.
->
-> **Dependencies are all current except two**, held back by an upstream pin, not by
-> oversight: `alive-progress 3.3.0` requires `about-time==4.2.1` and
-> `graphemeu==0.7.2` exactly and is itself the latest release. Majors that landed:
-> optuna 5.0, plotly 7.0, moocore 0.3.2, xgboost 3.4.1, numpy 2.5.3, sklearn 1.9.1.
->
-> **Rollback is one variable.** The build path no longer hardcodes an interpreter;
-> `DASP_BUILD_PYTHON=312 DASP_ALLOW_LOCK_DRIFT=1 python build_installer_py312.py` rebuilds on 3.12. The
-> user-visible artifact names still say `py312` **deliberately** — they are a stable
-> identity so existing installs upgrade in place. Do not "fix" them.
->
-> **Keeping current is now a routine:** `python scripts/upgrade_check.py` reports
-> what is outdated, what is risky (numerical vs infrastructure), what cannot move
-> and why, and what ordering version caps force. `docs/upgrade/UPGRADE_RUNBOOK.md`
-> is the process; run it quarterly or when a new Python minor ships.
->
-> **Two pre-existing issues found en route, NOT fixed here** (separate tickets):
-> Optuna study identity omits Python/dependency versions, so a *resumed* study can
-> return cached scores computed under a different numerical stack; and `MultiGroupEPO`
-> seeds off `hash(label)`, which is `PYTHONHASHSEED`-dependent. See
-> `docs/upgrade/PYTHON_UPGRADE_PLAN.md`.
->
-> **UPDATE — BOTH ARE NOW FIXED (2026-09-12).** Codex's design was followed.
-> Optuna study names carry a numerical-environment digest
-> (`unified_bayesian_<model>_<confighash>_env1_<envhash>`), the readable
-> environment is stored in `study.user_attrs["numerical_environment"]`, an
-> incompatible prior study produces an explicit notice instead of a silent fresh
-> start, and an unreadable package version raises rather than degrading to a
-> placeholder. MultiGroupEPO uses a stable blake2b label digest and sorted group
-> assembly. Existing pre-fix studies are intentionally no longer auto-resumable;
-> their databases stay intact. **Still open:** the separate GUI
-> `EstimatedEPO(random_state=None)` path remains nondeterministic, and a full
-> cross-version SQLite replay matrix is not implemented.
->
-> The original review recommendation follows.
->
-> **Review recommendation (2026-09-12, Codex): FIX NOW for both pre-existing bugs.**
-> Optuna needs environment-specific study names,
-> stored environment metadata, and a visible fresh-study notice for incompatible
-> or legacy caches; preserve existing databases, but do not resume their unknown
-> scores. MultiGroupEPO needs a stable label digest and sorted group assembly.
-> The latter does not fix the separate GUI EstimatedEPO(random_state=None) path.
-> Cross-version SQLite replay and cross-process EPO output drift reproduced;
-> 110 focused existing tests passed. Details are in SESSION_LOG.md.
->
-> **Installation follow-up:** fresh-directory installation and a real in-place
-> upgrade now pass on this development machine; a fresh-OS check remains untested.
-> See the final validation report linked above.
-
-> **Review findings fixed in `f60cfa5` (2026-09-12).** PR 65 was reviewed by Claude,
-> GLM 5.3 and Codex (`gpt-6-astra`), and Codex confirmed each fix before it was applied.
-> Fixed: fingerprint now rejects missing/empty package version metadata; the resume
-> notice separates legacy (pre-fingerprint) study names from other-environment ones;
-> MultiGroupEPO sorts mixed int/str group labels with a type-tagged key (string-label
-> output bit-identical); deprecated `warn_independent_sampling` removed; launcher
-> points to `install.bat` when `.venv314` is missing; `run_gui.sh` repairs from the
-> lockfile; launcher tests use explicit paths (`NoDefaultCurrentDirectoryInExePath=1`);
-> installer label, harness hash-seed claim and README scipy floor corrected.
-> **Deferred:** (1) a fingerprint read failure still aborts `never`-mode in-memory
-> runs; this is deliberate, and relaxing it must keep persistent-study strictness.
-> (2) Optuna's `consider_endpoints` is also deprecated (removal in 6.0), but dropping
-> it changes its effective value, so it needs a numerical A/B before removal.
 
 ### Keeping machines in sync: `requirements-lock.txt` (added 2026-09-10)
 
