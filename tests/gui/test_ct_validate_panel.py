@@ -876,12 +876,14 @@ def test_stale_validate_result_discarded(inline_workers):
 
     app._ct_store_loaded_standards('primary', 'folder', wl, primary.to_numpy(), None)
     assert context["generation"] != app._ct_input_generation
+    assert app._ct_active_run_id is None  # the reload abandoned the run (R4-3)
+    status_before = str(app.ct_validate_status_label.cget("text"))
     app._on_ct_validate_done(payload, context)
 
     assert app.ct_last_evaluation is None  # the stale board was not installed
     assert app._ct_validate_running is False
-    status = str(app.ct_validate_status_label.cget("text"))
-    assert "discarded" in status
+    # the abandoned run's callback leaves the status untouched (R4-3)
+    assert str(app.ct_validate_status_label.cget("text")) == status_before
 
 
 def test_stale_fit_result_discarded(ct_app):
@@ -1673,9 +1675,15 @@ def test_pairs_table_reload_discards_inflight_validate(inline_workers, tmp_path)
         app._load_ct_pairs_table()
 
     assert app.ct_last_evaluation is None  # the board belonged to the old pairs
+    # the invalidation abandoned the in-flight run: no active run id, the
+    # busy state reset once, and its own message on the status line
+    assert app._ct_active_run_id is None
+    status_before = str(app.ct_validate_status_label.cget("text"))
+    assert "cleared" in status_before
     app._on_ct_validate_done(payload, context)
     assert app.ct_last_evaluation is None  # the stale run is not installed
-    assert "discarded" in str(app.ct_validate_status_label.cget("text"))
+    # the abandoned run's callback changes nothing (R4-3)
+    assert str(app.ct_validate_status_label.cget("text")) == status_before
 
 
 def test_group_edit_discards_inflight_validate(inline_workers):
@@ -1694,9 +1702,14 @@ def test_group_edit_discards_inflight_validate(inline_workers):
     app._ct_set_group_on_selected()
 
     assert app.ct_last_evaluation is None
+    assert app._ct_active_run_id is None  # the in-flight run was abandoned
     app._on_ct_validate_done(payload, context)
     assert app.ct_last_evaluation is None
-    assert "discarded" in str(app.ct_validate_status_label.cget("text"))
+    # the abandoned run's callback leaves the invalidation's message in place
+    # (the group edit itself reports on the pairs status label)
+    status = str(app.ct_validate_status_label.cget("text"))
+    assert status == "Groups changed — leaderboard and fitted transfer " \
+                     "cleared. Run Validate & Compare again."
 
 
 def test_eval_settings_change_discards_board(inline_workers):
@@ -1815,6 +1828,61 @@ def test_stale_fit_callback_does_not_unlock_newer_run(ct_app):
     assert app._ct_validate_running is True
     assert str(app.ct_validate_button.cget("state")) == "disabled"
     assert str(app.ct_fit_selected_button.cget("state")) == "disabled"
+
+
+def test_invalidation_abandons_inflight_run(inline_workers):
+    """R4-3: invalidation during a run resets the busy state once, and the
+    abandoned run's later callback touches nothing."""
+    app, wl, primary, satellite = inline_workers
+    app._pair_ct_standards()
+    with patch("tkinter.messagebox.showerror") as err:
+        app._run_ct_validate()
+    assert not err.called
+    assert app.ct_last_evaluation is not None  # a board is up
+
+    payload, ctx = _captured_validate_run(app)  # a second run is in flight
+    assert app._ct_validate_running is True
+    assert str(app.ct_validate_button.cget("state")) == "disabled"
+
+    # a real settings change invalidates while that run is in flight
+    app.ct_eval_space_var.set("reflectance")
+    app.ct_eval_space_combo.event_generate("<<ComboboxSelected>>", when="now")
+
+    assert app._ct_active_run_id is None  # the run was abandoned
+    assert app._ct_validate_running is False
+    assert str(app.ct_validate_button.cget("state")) == "normal"  # can rerun
+
+    status_before = str(app.ct_validate_status_label.cget("text"))
+    assert "cleared" in status_before
+    app._on_ct_validate_done(payload, ctx)
+    assert str(app.ct_validate_status_label.cget("text")) == status_before
+    assert app.ct_last_evaluation is None
+    assert app._ct_validate_running is False
+
+
+def test_run1_callback_after_relaunch_leaves_run2_busy(inline_workers):
+    """R4-3: an abandoned run's callback must not unlock the run after it."""
+    app, wl, primary, satellite = inline_workers
+    app._pair_ct_standards()
+    payload1, ctx1 = _captured_validate_run(app)  # run 1 in flight
+
+    # the settings change invalidates run 1; a new run launches right away
+    app.ct_eval_joins_var.set("none")
+    app.ct_eval_joins_combo.event_generate("<<ComboboxSelected>>", when="now")
+    payload2, ctx2 = _captured_validate_run(app)  # run 2 in flight
+    assert ctx2["run_id"] != ctx1["run_id"]
+    assert app._ct_validate_running is True
+    assert str(app.ct_validate_button.cget("state")) == "disabled"
+
+    app._on_ct_validate_done(payload1, ctx1)  # run 1 finally reports
+    assert app._ct_validate_running is True   # run 2 still owns the panel
+    assert str(app.ct_validate_button.cget("state")) == "disabled"
+    assert app.ct_last_evaluation is None
+
+    app._on_ct_validate_done(payload2, ctx2)  # the live run completes
+    assert app.ct_last_evaluation is payload2[1]
+    assert app._ct_validate_running is False
+    assert str(app.ct_validate_button.cget("state")) == "normal"
 
 
 def test_partly_matched_table_does_not_pair_unintended_ids(ct_app, tmp_path):

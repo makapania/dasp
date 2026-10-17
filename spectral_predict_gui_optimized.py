@@ -50573,10 +50573,12 @@ External Validation Performance (n={n_val}):
         pairs-table load or clear, a re-pair, a group edit, the evaluation
         model, or the space/joins settings. The input generation is bumped so
         a validate/fit worker still running on the old inputs has its result
-        discarded, and the run in flight is abandoned — its callback belongs
-        to an older run id and will touch nothing (see the run-id checks in
-        ``_on_ct_validate_done`` / ``_on_ct_fit_done``). The pairing itself
-        and a transfer model loaded from a file are NOT panel state and stay.
+        discarded, and the run in flight is abandoned — the active run id is
+        cleared and the busy state reset here, once, so its callback (whose
+        run id is no longer active) touches nothing (see the run-id checks in
+        ``_on_ct_validate_done`` / ``_on_ct_fit_done``) and the user can
+        start a new run immediately. The pairing itself and a transfer model
+        loaded from a file are NOT panel state and stay.
         """
         self._ct_input_generation = getattr(self, '_ct_input_generation', 0) + 1
         had_board = (self.ct_last_evaluation is not None
@@ -50599,7 +50601,11 @@ External Validation Performance (n={n_val}):
         self.ct_diagnostics_text.config(state='normal')
         self.ct_diagnostics_text.delete('1.0', tk.END)
         self.ct_diagnostics_text.config(state='disabled')
-        # A worker still running computed on the old inputs; abandon it.
+        # A worker still running computed on the old inputs; abandon it. Its
+        # run id is no longer the active one, so its callback returns
+        # without touching state, and the busy state is reset here, once —
+        # the user can start a new run right away.
+        self._ct_active_run_id = None
         self._ct_validate_running = False
         self._set_ct_validate_busy(False)
         if had_board:
@@ -51320,9 +51326,10 @@ External Validation Performance (n={n_val}):
 
         ok, ev, err = payload
         if context.get('run_id') != getattr(self, '_ct_active_run_id', None):
-            # A newer run was launched (or the inputs were invalidated and a
-            # new run started); its worker owns the panel's busy state —
-            # touch nothing, just drop this result.
+            # A newer run was launched, or the inputs were invalidated (which
+            # abandons the active run); whichever run owns the panel's busy
+            # state now, it is not this one — touch nothing, just drop this
+            # result.
             return
         if context.get('generation') != getattr(self, '_ct_input_generation', 0):
             # The pairing inputs changed while the worker ran; the board was
@@ -51476,7 +51483,8 @@ External Validation Performance (n={n_val}):
 
         ok, result, err = payload
         if context.get('run_id') != getattr(self, '_ct_active_run_id', None):
-            # A newer run owns the busy state; drop this result untouched.
+            # A newer run owns the busy state (invalidation abandons the
+            # active run too); drop this result untouched.
             return
         if context.get('generation') != getattr(self, '_ct_input_generation', 0):
             # The pairing inputs changed while the fit ran.
