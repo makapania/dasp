@@ -1114,3 +1114,10 @@ is `planning/08_transfer.md` there.
   (5) Join detection: a "persistent level step" test on 10-30 nm flanks failed at 1800 nm (curvature into the 1900
   water band); a sharpness test (>= 3x the boundaries 2-4 channels away; real joins score 10-35x) plus an isolation
   test (adjacent boundaries < half) finds 1000/1800 on every LabSpec, FieldSpec 3 and example set, none on Trek.
+- **Review round 1 (GLM 5.3 + DeepSeek Flash, both MERGE WITH CHANGES).** Main catch: excluding an unusable channel
+  (R <= 0, NaN) from the fit mask is not enough. log10(1/clip(R)) turns it into A = 6, and the 31 nm D2 and the blur
+  spread that into fitted neighbours; one dead channel pushed the learned blur to 10 nm (GLM reproduced it), and a
+  dead channel is constant across spectra, so a cross-spectrum MAD noise map does not see it. Fix: fill unusable
+  channels per spectrum (interpolation in absorbance) before anything else, and dilate the exclusion by the D2
+  half-window. Also: Savitzky-Golay delta and the nm blur need even spacing inside a block (now refused otherwise);
+  an ASCII ".asd" can start with "ASD" (binary headers have a NUL after the magic).
