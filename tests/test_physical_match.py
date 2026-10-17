@@ -307,3 +307,44 @@ def test_smoothing_between_instruments_reads_blur_not_band_depth(example_reflect
         wl[keep], A_high, wl[keep], A_low, [0, 1, 2, 3, 4, 6, 8, 10]
     )
     assert got == 3
+
+
+def test_dead_channel_at_a_join_is_filled_from_its_own_block():
+    """Filling must not import the other detector's values across a join (Codex)."""
+    wl = np.arange(1000.0, 1400.0)
+    params = {
+        "space": "absorbance",
+        "blocks": np.array([[1000.0, 1199.0], [1200.0, 1399.0]]),
+        "sigma_nm": np.array([3.0, 3.0]),
+        "shift_nm": np.zeros(2),
+        "gain": np.ones(2),
+        "offset": np.zeros(2),
+    }
+    X = np.where(wl < 1200, 0.3, 0.9)[None, :].repeat(2, axis=0)
+    X[:, wl == 1199] = np.nan
+    out = pm.apply_physical_match(X, params, wl)
+    np.testing.assert_allclose(out[:, wl < 1200], 0.3)
+    np.testing.assert_allclose(out[:, wl >= 1200], 0.9)
+
+
+def test_exactly_smooth_featureless_primary_is_not_scaled_to_zero():
+    """Zero estimated noise used to give infinite signal/noise to pure round-off (Codex)."""
+    wl = np.arange(1000.0, 1400.0)
+    rng = np.random.default_rng(0)
+    Ap = np.full((20, wl.size), 0.4)
+    As = 0.4 + np.exp(-0.5 * ((wl[None, :] - 1200) / 20) ** 2) * rng.uniform(0.1, 0.3, (20, 1))
+    prm = pm.estimate_physical_match(Ap, As, wl, space="absorbance", sigma=0.0)
+    assert prm["featureless"][0] and prm["gain"][0] == 1.0
+
+
+def test_smoothing_helper_searches_the_callers_candidates(example_reflectance):
+    from spectral_predict.instrument_profiles import estimate_smoothing_between_instruments
+
+    wl, R = example_reflectance
+    keep = (wl >= 1100) & (wl <= 1750)
+    A_high = np.log10(1 / R[:, keep])
+    A_low = 0.6 * pm.blur_shift(A_high, wl[keep], 20.0) + 0.1  # beyond the default 10 nm grid
+    got = estimate_smoothing_between_instruments(
+        wl[keep], A_high, wl[keep], A_low, [0, 5, 10, 15, 20, 25]
+    )
+    assert got == 20

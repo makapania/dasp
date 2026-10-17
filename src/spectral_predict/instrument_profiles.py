@@ -23,6 +23,7 @@ class InstrumentProfile:
     Representation of a spectroscopy instrument with basic, data-driven
     characterization of its wavelength grid and effective resolution.
     """
+
     instrument_id: str
     vendor: Optional[str] = None
     model: Optional[str] = None
@@ -32,16 +33,16 @@ class InstrumentProfile:
 
     # Data-driven metrics
     delta_lambda_med: Optional[float] = None  # median wavelength spacing
-    roughness_R: Optional[float] = None       # spectral roughness metric
-    detail_score: Optional[float] = None      # e.g., roughness_R / delta_lambda_med
+    roughness_R: Optional[float] = None  # spectral roughness metric
+    detail_score: Optional[float] = None  # e.g., roughness_R / delta_lambda_med
 
     # Peak-based resolution metrics
-    peak_count: Optional[int] = None          # average number of peaks per spectrum
-    avg_peak_fwhm: Optional[float] = None     # average FWHM of detected peaks (in nm)
+    peak_count: Optional[int] = None  # average number of peaks per spectrum
+    avg_peak_fwhm: Optional[float] = None  # average FWHM of detected peaks (in nm)
     avg_peak_sharpness: Optional[float] = None  # average peak sharpness metric
 
     # Interpolation detection
-    is_interpolated: Optional[bool] = None    # whether spectra appear interpolated
+    is_interpolated: Optional[bool] = None  # whether spectra appear interpolated
 
     extra: Dict = field(default_factory=dict)
 
@@ -94,7 +95,7 @@ def compute_roughness(X: np.ndarray, wavelengths: np.ndarray) -> float:
     second_deriv = np.diff(X, n=2, axis=1)
 
     # Use RMS of second derivatives as roughness metric
-    roughness = float(np.sqrt(np.mean(second_deriv ** 2)))
+    roughness = float(np.sqrt(np.mean(second_deriv**2)))
 
     return roughness
 
@@ -134,8 +135,9 @@ def detect_interpolation(wavelengths: np.ndarray, tolerance: float = 1e-6) -> bo
     return relative_variation < tolerance
 
 
-def compute_peak_fwhm(spectrum: np.ndarray, wavelengths: np.ndarray,
-                      peak_idx: int) -> Tuple[float, float]:
+def compute_peak_fwhm(
+    spectrum: np.ndarray, wavelengths: np.ndarray, peak_idx: int
+) -> Tuple[float, float]:
     """
     Compute FWHM (Full Width at Half Maximum) for a single peak.
 
@@ -164,7 +166,9 @@ def compute_peak_fwhm(spectrum: np.ndarray, wavelengths: np.ndarray,
     # Interpolate for precise left position
     if left_idx < peak_idx and spectrum[left_idx] < half_max < spectrum[left_idx + 1]:
         frac = (half_max - spectrum[left_idx]) / (spectrum[left_idx + 1] - spectrum[left_idx])
-        left_wavelength = wavelengths[left_idx] + frac * (wavelengths[left_idx + 1] - wavelengths[left_idx])
+        left_wavelength = wavelengths[left_idx] + frac * (
+            wavelengths[left_idx + 1] - wavelengths[left_idx]
+        )
     else:
         left_wavelength = wavelengths[left_idx]
 
@@ -176,7 +180,9 @@ def compute_peak_fwhm(spectrum: np.ndarray, wavelengths: np.ndarray,
     # Interpolate for precise right position
     if right_idx > peak_idx and spectrum[right_idx] < half_max < spectrum[right_idx - 1]:
         frac = (half_max - spectrum[right_idx]) / (spectrum[right_idx - 1] - spectrum[right_idx])
-        right_wavelength = wavelengths[right_idx] + frac * (wavelengths[right_idx - 1] - wavelengths[right_idx])
+        right_wavelength = wavelengths[right_idx] + frac * (
+            wavelengths[right_idx - 1] - wavelengths[right_idx]
+        )
     else:
         right_wavelength = wavelengths[right_idx]
 
@@ -227,8 +233,8 @@ def analyze_peaks(X: np.ndarray, wavelengths: np.ndarray) -> Dict:
         peaks, properties = signal.find_peaks(
             spectrum_norm,
             prominence=0.05,  # Peak must be at least 5% of normalized range
-            distance=5,       # Peaks must be at least 5 wavelength points apart
-            width=2           # Minimum peak width
+            distance=5,  # Peaks must be at least 5 wavelength points apart
+            width=2,  # Minimum peak width
         )
 
         all_peak_counts.append(len(peaks))
@@ -346,7 +352,9 @@ def save_instrument_profiles(
             "vendor": profile.vendor,
             "model": profile.model,
             "description": profile.description,
-            "wavelengths": profile.wavelengths.tolist() if profile.wavelengths is not None else None,
+            "wavelengths": (
+                profile.wavelengths.tolist() if profile.wavelengths is not None else None
+            ),
             "delta_lambda_med": to_python_type(profile.delta_lambda_med),
             "roughness_R": to_python_type(profile.roughness_R),
             "detail_score": to_python_type(profile.detail_score),
@@ -380,7 +388,11 @@ def load_instrument_profiles(path: Path | str) -> Dict[str, InstrumentProfile]:
             vendor=profile_data.get("vendor"),
             model=profile_data.get("model"),
             description=profile_data.get("description"),
-            wavelengths=np.array(profile_data["wavelengths"]) if profile_data.get("wavelengths") is not None else None,
+            wavelengths=(
+                np.array(profile_data["wavelengths"])
+                if profile_data.get("wavelengths") is not None
+                else None
+            ),
             delta_lambda_med=profile_data.get("delta_lambda_med"),
             roughness_R=profile_data.get("roughness_R"),
             detail_score=profile_data.get("detail_score"),
@@ -394,9 +406,7 @@ def load_instrument_profiles(path: Path | str) -> Dict[str, InstrumentProfile]:
     return profiles
 
 
-def rank_instruments_by_detail(
-    profiles: Dict[str, InstrumentProfile]
-) -> List[str]:
+def rank_instruments_by_detail(profiles: Dict[str, InstrumentProfile]) -> List[str]:
     """
     Return instrument_ids sorted by descending detail_score.
     """
@@ -404,7 +414,7 @@ def rank_instruments_by_detail(
     sorted_items = sorted(
         profiles.items(),
         key=lambda x: x[1].detail_score if x[1].detail_score is not None else 0.0,
-        reverse=True
+        reverse=True,
     )
     return [inst_id for inst_id, _ in sorted_items]
 
@@ -424,7 +434,7 @@ def estimate_smoothing_between_instruments(
     plain-MSE search had no gain term, so it read a band-depth difference between
     instruments as blur and ran to the top of its grid (SPYDER Bone's LabSpec pairs:
     bands 1.6x deeper explained most of the difference, blur ~18%). The learned sigma
-    (nm) is converted to channels and snapped to the nearest of ``sigma_candidates``.
+    is searched over ``sigma_candidates`` (converted to nm on the high-detail grid).
     For the gain itself, the joins and the noise handling, use
     ``estimate_physical_match`` directly.
 
@@ -442,9 +452,12 @@ def estimate_smoothing_between_instruments(
         raise ValueError("The two wavelength grids overlap on fewer than 20 channels")
     wl = wl_h[keep]
     Xl_on_h = np.vstack([np.interp(wl, wl_l, row) for row in Xl])
-    params = estimate_physical_match(Xl_on_h, Xh[:, keep], wl, space="absorbance")
-    sigma_channels = float(params["sigma_nm"][0]) / float(np.median(np.diff(wl)))
+    step = float(np.median(np.diff(wl)))
     cands = np.asarray(sigma_candidates, dtype=np.float64)
+    params = estimate_physical_match(
+        Xl_on_h, Xh[:, keep], wl, space="absorbance", sigma_grid=cands * step
+    )
+    sigma_channels = float(params["sigma_nm"][0]) / step
     return float(cands[int(np.argmin(np.abs(cands - sigma_channels)))])
 
 

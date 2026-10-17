@@ -168,10 +168,11 @@ def apply_physical_match(
     sh = np.atleast_1d(np.asarray(params["shift_nm"], dtype=np.float64))
     g = np.atleast_1d(np.asarray(params["gain"], dtype=np.float64))
     c = np.atleast_1d(np.asarray(params["offset"], dtype=np.float64))
+    bounds = _block_bounds(params, wl)
     A, valid = sd.to_absorbance(X, space)
-    X, _ = _fill_invalid(X, A, valid, wl, space)  # a dead channel must not spread
+    X, _ = _fill_invalid(X, A, valid, wl, space, bounds)  # a dead channel must not spread
     out = np.empty_like(X)
-    for b, slc in enumerate(_block_bounds(params, wl)):
+    for b, slc in enumerate(bounds):
         A = _transform_block(X[:, slc], wl[slc], space, float(sig[b]), float(sh[b]))
         out[:, slc] = sd.from_absorbance(g[b] * A + c[b], space)
     return out
@@ -181,17 +182,31 @@ def apply_physical_match(
 
 
 def _fill_invalid(
-    X: np.ndarray, A: np.ndarray, valid: np.ndarray, wl: np.ndarray, space: str
+    X: np.ndarray,
+    A: np.ndarray,
+    valid: np.ndarray,
+    wl: np.ndarray,
+    space: str,
+    blocks: Sequence[slice],
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Replace unusable channels of each spectrum by linear interpolation in absorbance."""
+    """Replace unusable channels of each spectrum by linear interpolation in absorbance,
+    within each detector block (never from the other side of a join).
+
+    Raises:
+        ValueError: A spectrum has no usable channel in a block.
+    """
     if valid.all():
         return X, A
     A = A.copy()
-    for i in np.flatnonzero(~valid.all(axis=1)):
-        ok = valid[i]
-        if ok.sum() < 2:
-            raise ValueError("A spectrum has fewer than 2 usable channels")
-        A[i, ~ok] = np.interp(wl[~ok], wl[ok], A[i, ok])
+    for slc in blocks:
+        wl_b = wl[slc]
+        for i in np.flatnonzero(~valid[:, slc].all(axis=1)):
+            ok = valid[i, slc]
+            if not ok.any():
+                raise ValueError(f"A spectrum has no usable channel in {wl_b[0]:g}-{wl_b[-1]:g} nm")
+            row = A[i, slc]
+            row[~ok] = np.interp(wl_b[~ok], wl_b[ok], row[ok])  # holds end values
+            A[i, slc] = row
     return sd.from_absorbance(A, space), A
 
 
@@ -329,6 +344,7 @@ def estimate_physical_match(
     featureless: str = "unity",
     exclude: Sequence[tuple[float, float]] | None = None,
     noisy_factor: float = 10.0,
+    sigma_grid: Sequence[float] | None = None,
 ) -> dict:
     """Fit a per-block blur + band-depth gain (+ optional shift) from paired standards.
 
@@ -349,6 +365,8 @@ def estimate_physical_match(
         exclude: Extra ``(lo, hi)`` nm regions left out of the fit.
         noisy_factor: Regions noisier than this multiple of the block's quiet level, on
             either instrument, are left out of the fit.
+        sigma_grid: Candidate sigmas (nm) for ``sigma='learn'`` (default 0-10 nm in
+            0.5 nm steps).
 
     Returns:
         Params for ``apply_physical_match``: ``space``, ``blocks`` (B, 2) nm,
@@ -374,18 +392,18 @@ def estimate_physical_match(
         raise ValueError(f"featureless must be 'unity' or 'pooled', got {featureless!r}")
 
     sd.check_uniform_blocks(wl, joins)
+    blocks = sd.block_slices(wl, joins)
+    B = len(blocks)
     A_p, valid_p = sd.to_absorbance(Xp, space)
     A_s, valid_s = sd.to_absorbance(Xs, space)
     # Unusable channels (reflectance <= 0, non-finite) are filled from their neighbours
     # so the 31 nm derivative and the blur cannot spread them; the fit mask then stays
     # a derivative half-window away from them.
-    Xp, A_p = _fill_invalid(Xp, A_p, valid_p, wl, space)
-    Xs, A_s = _fill_invalid(Xs, A_s, valid_s, wl, space)
+    Xp, A_p = _fill_invalid(Xp, A_p, valid_p, wl, space, blocks)
+    Xs, A_s = _fill_invalid(Xs, A_s, valid_s, wl, space, blocks)
     bad = ~(valid_p.all(axis=0) & valid_s.all(axis=0))
     # the D2 window is rounded to whole channels, so reach one channel further
     valid = ~_dilate(bad, wl, 0.5 * sd.D2_WINDOW_NM + float(np.max(np.diff(wl))))
-    blocks = sd.block_slices(wl, joins)
-    B = len(blocks)
     ne_p = sd.estimate_noise(A_p, wl, joins)
     ne_s = sd.estimate_noise(A_s, wl, joins)
     noisy = sd.regions_mask(
@@ -393,6 +411,9 @@ def estimate_physical_match(
     ) | sd.regions_mask(sd.noisy_regions(ne_s.channel_sd, wl, joins, factor=noisy_factor), wl)
     excl = sd.regions_mask(() if exclude is None else exclude, wl)
 
+    grid = tuple(sorted(float(v) for v in (SIGMA_GRID_NM if sigma_grid is None else sigma_grid)))
+    if not grid or grid[0] < 0:
+        raise ValueError("sigma_grid needs at least one value >= 0")
     if fwhm is not None:
         fixed = _sigma_from_fwhm(fwhm, B)
     elif isinstance(sigma, str):
@@ -418,6 +439,10 @@ def estimate_physical_match(
         w_d2 = sd.odd_channels(sd.D2_WINDOW_NM, step, 5)
         w_d2 = min(w_d2, wl_b.size if wl_b.size % 2 else wl_b.size - 1)
         d2c = savgol_coeffs(w_d2, 3, deriv=2, delta=step, use="dot")
+        # Floor the D2 noise at what NOISE_FLOOR absorbance noise would give, so a block
+        # whose spectra are exactly smooth (zero estimated noise) still has a scale and
+        # pure round-off cannot pass the featureless guard as infinite signal/noise.
+        v_floor = sd.NOISE_FLOOR**2 * float((d2c**2).sum()) / n
         bi = len(fits)
         kname_p = ne_p.kernels[bi] if bi < len(ne_p.kernels) else "white"
         kname_s = ne_s.kernels[bi] if bi < len(ne_s.kernels) else "white"
@@ -429,8 +454,8 @@ def estimate_physical_match(
                 wl_b,
                 space,
                 m,
-                ne_p.d2_sd[slc] ** 2 / n,
-                ne_s.d2_sd[slc] ** 2 / n,
+                np.maximum(ne_p.d2_sd[slc] ** 2 / n, v_floor),
+                np.maximum(ne_s.d2_sd[slc] ** 2 / n, v_floor),
                 sd.noise_kernel(kname_p),
                 sd.noise_kernel(kname_s),
                 d2c,
@@ -462,13 +487,13 @@ def estimate_physical_match(
             s_b = fixed[b]
             d_b = _choose_shift(fit, s_b)[0] if shift else 0.0
         else:
-            s_b, r_b = _choose_sigma(fit, SIGMA_GRID_NM, 0.0)
+            s_b, r_b = _choose_sigma(fit, grid, 0.0)
             d_b = 0.0
             if shift:
                 d_b = _choose_shift(fit, s_b)[0]
-                s_b, r_b = _choose_sigma(fit, SIGMA_GRID_NM, d_b)
-            best_r = min(fit.criterion(*fit.sat(s, d_b))[1] for s in SIGMA_GRID_NM)
-            if _primary_blur_better(fit, best_r, SIGMA_GRID_NM):
+                s_b, r_b = _choose_sigma(fit, grid, d_b)
+            best_r = min(fit.criterion(*fit.sat(s, d_b))[1] for s in grid)
+            if _primary_blur_better(fit, best_r, grid):
                 coarser[b] = True
                 s_b = 0.0
                 notes.append(
