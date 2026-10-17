@@ -1716,7 +1716,11 @@ def test_group_edit_discards_inflight_validate(inline_workers):
 
 
 def test_eval_settings_change_discards_board(inline_workers):
-    """R3-1: changing Space or Detector joins invalidates the board."""
+    """R3-1: changing Space or Detector joins invalidates the board.
+
+    The change is driven through the real <<ComboboxSelected>> events (R4-6),
+    so the test proves the widgets' bindings reach the invalidation.
+    """
     app, wl, primary, satellite = inline_workers
     app._pair_ct_standards()
     with patch("tkinter.messagebox.showerror") as err:
@@ -1725,22 +1729,18 @@ def test_eval_settings_change_discards_board(inline_workers):
     assert app.ct_last_evaluation is not None
 
     app.ct_eval_space_var.set("reflectance")
-    app._on_ct_eval_settings_changed()
+    app.ct_eval_space_combo.event_generate("<<ComboboxSelected>>", when="now")
     assert app.ct_last_evaluation is None and app._ct_eval_context is None
     assert not app.ct_leaderboard_tree.get_children()
     assert "cleared" in str(app.ct_validate_status_label.cget("text"))
-
-    # the settings widgets are wired to the same handler
-    assert app.ct_eval_space_combo.bind("<<ComboboxSelected>>")
-    assert app.ct_eval_joins_combo.bind("<<ComboboxSelected>>")
 
     with patch("tkinter.messagebox.showerror") as err:
         app._run_ct_validate()
     assert not err.called
     assert app.ct_last_evaluation is not None
     app.ct_eval_joins_var.set("none")
-    app._on_ct_eval_settings_changed()
-    assert app.ct_last_evaluation is None
+    app.ct_eval_joins_combo.event_generate("<<ComboboxSelected>>", when="now")
+    assert app.ct_last_evaluation is None and app._ct_eval_context is None
 
 
 def test_custom_joins_edit_discards_board(inline_workers):
