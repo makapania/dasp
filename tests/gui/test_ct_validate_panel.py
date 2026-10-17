@@ -47,6 +47,7 @@ _CT_STATE_ATTRS = (
     "ct_paired",
     "ct_pair_groups",
     "ct_pairs_rename",
+    "ct_pairs_collisions",
     "ct_pair_resample_note",
     "ct_last_evaluation",
     "ct_transfer_model",
@@ -1522,3 +1523,73 @@ def test_legacy_transfer_scale_warning(physical_app):
     assert "predates value-scale recording" in stats
     _wl_out, X_out = app.transformed_spectra
     np.testing.assert_allclose(X_out, apply_transfer_dispatch(X, tm))
+
+
+def test_pairs_table_reports_folded_id_collisions(ct_app, tmp_path):
+    """R2-3: two loaded files folding to one name are reported, not last-wins."""
+    app, wl, primary, satellite = ct_app
+    sat = satellite.copy()
+    names = [f"LAB-B-{i + 1:02d}" for i in range(len(sat))]
+    names[2] = "LAB.B.02"  # folds to the same key as "LAB-B-02"
+    sat.index = names
+    app.current_satellite_df = sat
+    table = pd.DataFrame({
+        "primary": ["bone_01", "bone_02", "bone_03"],
+        "satellite": ["LAB-B-01.asd", "LAB-B-02.asd", "LAB-B-04.asd"],
+    })
+    table_path = tmp_path / "pairs.csv"
+    table.to_csv(table_path, index=False)
+    app.ct_pairs_table_path_var.set(str(table_path))
+
+    with patch("tkinter.messagebox.showwarning") as warn:
+        app._load_ct_pairs_table()
+    # the ambiguous row is reported as a problem, not matched by luck of order
+    warned = " ".join(str(c) for c in warn.call_args_list)
+    assert "ambiguous" in warned
+    assert "LAB-B-02" in warned
+    # the collision itself: status label + a "!" row in the pairs view
+    assert "1 naming conflict" in str(app.ct_pairs_status_label.cget("text"))
+    rows = [str(app.ct_pairs_tree.item(item, "values")[0])
+            for item in app.ct_pairs_tree.get_children()]
+    conflict_rows = [r for r in rows if r.startswith("!")]
+    assert len(conflict_rows) == 1
+    assert "LAB-B-02" in conflict_rows[0] and "LAB.B.02" in conflict_rows[0]
+    # the unambiguous rows still rename; the ambiguous one does not
+    assert app.ct_pairs_rename == {"LAB-B-01": "bone_01", "LAB-B-04": "bone_03"}
+    paired = app._pair_ct_standards()
+    assert "bone_02" in paired.unmatched_primary
+
+
+def test_pairs_table_reports_duplicate_row_mappings(ct_app, tmp_path):
+    """R2-3: two table rows naming the same file keep the first, report both."""
+    app, wl, primary, satellite = ct_app
+    sat = satellite.copy()
+    sat.index = [f"LAB-B-{i + 1:02d}" for i in range(len(sat))]
+    app.current_satellite_df = sat
+
+    table_path = tmp_path / "pairs.csv"
+    pd.DataFrame({
+        "primary": ["bone_01", "bone_02"],
+        "satellite": ["LAB-B-01", "LAB-B-01"],  # same satellite file twice
+    }).to_csv(table_path, index=False)
+    app.ct_pairs_table_path_var.set(str(table_path))
+    with patch("tkinter.messagebox.showwarning") as warn:
+        app._load_ct_pairs_table()
+    assert not warn.called  # every row matched a loaded file
+    assert app.ct_pairs_rename == {"LAB-B-01": "bone_01"}  # first row kept
+    assert "1 naming conflict" in str(app.ct_pairs_status_label.cget("text"))
+    rows = [str(app.ct_pairs_tree.item(item, "values")[0])
+            for item in app.ct_pairs_tree.get_children()]
+    assert any("both map the satellite file 'LAB-B-01'" in r for r in rows)
+
+    # same story on the primary side: two rows claiming one primary file
+    pd.DataFrame({
+        "primary": ["bone_01", "bone_01.asd"],
+        "satellite": ["LAB-B-01", "LAB-B-02"],
+    }).to_csv(table_path, index=False)
+    with patch("tkinter.messagebox.showwarning"):
+        app._load_ct_pairs_table()
+    assert app.ct_pairs_rename == {"LAB-B-01": "bone_01"}
+    rows = [str(app.ct_pairs_tree.item(item, "values")[0])
+            for item in app.ct_pairs_tree.get_children()]
+    assert any("both map the primary file 'bone_01'" in r for r in rows)

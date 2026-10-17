@@ -3080,6 +3080,7 @@ class SpectralPredictApp:
         self.ct_paired = None  # PairedStandards from pair_standards_by_id
         self.ct_pair_groups = None  # primary sample ID -> group label
         self.ct_pairs_rename = None  # satellite ID -> primary ID from a pairs table
+        self.ct_pairs_collisions = None  # naming conflicts found by the pairs table
         self.ct_pair_resample_note = None  # set when pairing resampled the satellite
         self.ct_last_evaluation = None  # TransferEvaluation of the last Validate run
         self.ct_pairs_table_path_var = tk.StringVar()  # pairs-table CSV path (A1b)
@@ -50571,6 +50572,7 @@ External Validation Performance (n={n_val}):
         self.ct_pair_resample_note = None
         self.ct_pair_groups = None
         self.ct_pairs_rename = None
+        self.ct_pairs_collisions = None
         self.ct_last_evaluation = None
         self._ct_eval_context = None
         self.ct_X_primary_common = None
@@ -50668,28 +50670,68 @@ External Validation Performance (n={n_val}):
                 )
             has_group = "group" in table.columns
 
-            def index_by_norm(df):
-                return {
-                    self._ct_normalize_pair_id(ix): ix for ix in df.index
-                }
+            def index_by_norm(df, instrument):
+                """(lookup, ambiguous keys, conflict notes) for one instrument.
 
-            p_norm = index_by_norm(self.current_primary_df)
-            s_norm = index_by_norm(self.current_satellite_df)
+                Loaded files whose names fold to the same pairs-table key
+                cannot be told apart by the table; they are kept OUT of the
+                lookup (rows naming them are reported ambiguous) and the
+                collision itself is reported — never silently last-wins.
+                """
+                grouped = {}
+                for ix in df.index:
+                    grouped.setdefault(self._ct_normalize_pair_id(ix), []).append(ix)
+                lookup = {}
+                ambiguous = set()
+                notes = []
+                for key, ids in grouped.items():
+                    if len(ids) == 1:
+                        lookup[key] = ids[0]
+                    else:
+                        ambiguous.add(key)
+                        notes.append(
+                            f"{instrument} files collide under one pairs-table "
+                            f"name: {' vs '.join(str(i) for i in ids)}")
+                return lookup, ambiguous, notes
+
+            p_norm, p_ambiguous, collisions = index_by_norm(
+                self.current_primary_df, "Primary")
+            s_norm, s_ambiguous, s_collisions = index_by_norm(
+                self.current_satellite_df, "Satellite")
+            collisions.extend(s_collisions)
 
             rename = {}
             groups = dict(self.ct_pair_groups or {})
             problems = []
+            used_primary = {}
+            used_satellite = {}
             for row in table.itertuples(index=False):
                 p_key = self._ct_normalize_pair_id(row.primary)
                 s_key = self._ct_normalize_pair_id(row.satellite)
                 p_actual = p_norm.get(p_key)
                 s_actual = s_norm.get(s_key)
                 if p_actual is None or s_actual is None:
-                    problems.append(
-                        f"{row.primary} -> {row.satellite}"
-                        f"{' (primary not loaded)' if p_actual is None else ' (satellite not loaded)'}"
-                    )
+                    which = (
+                        "primary name ambiguous" if p_key in p_ambiguous
+                        else "satellite name ambiguous" if s_key in s_ambiguous
+                        else "primary not loaded" if p_actual is None
+                        else "satellite not loaded")
+                    problems.append(f"{row.primary} -> {row.satellite} ({which})")
                     continue
+                if p_actual in used_primary:
+                    collisions.append(
+                        f"table rows '{used_primary[p_actual]}' and "
+                        f"'{row.primary} -> {row.satellite}' both map the primary "
+                        f"file '{p_actual}'; the first row was kept")
+                    continue
+                if s_actual in used_satellite:
+                    collisions.append(
+                        f"table rows '{used_satellite[s_actual]}' and "
+                        f"'{row.primary} -> {row.satellite}' both map the satellite "
+                        f"file '{s_actual}'; the first row was kept")
+                    continue
+                used_primary[p_actual] = f"{row.primary} -> {row.satellite}"
+                used_satellite[s_actual] = f"{row.primary} -> {row.satellite}"
                 rename[s_actual] = p_actual
                 if has_group and pd.notna(row.group) and str(row.group).strip():
                     groups[p_actual] = str(row.group).strip()
@@ -50704,16 +50746,22 @@ External Validation Performance (n={n_val}):
                 raise ValueError("The pairs table matched none of the loaded spectra.")
             self.ct_pairs_rename = rename
             self.ct_pair_groups = groups
+            self.ct_pairs_collisions = collisions or None
             self.ct_paired = None  # forces a re-pair with the new table
             self._refresh_ct_pairs_tree()
             n_grouped = sum(1 for v in (groups or {}).values() if v) if has_group else 0
+            n_collisions = len(collisions)
             self.ct_pairs_status_label.config(
                 text=(
                     f"Pairs table loaded: {len(rename)} pairs"
                     + (f", {n_grouped} with group" if has_group and n_grouped else "")
+                    + (f", {n_collisions} naming conflict"
+                       f"{'s' if n_collisions != 1 else ''} (listed below)"
+                       if n_collisions else "")
                     + ". Click 'Pair by Sample ID'."
                 ),
-                foreground=self.colors['text'],
+                foreground=(self.colors['warning'] if n_collisions
+                            else self.colors['text']),
             )
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load pairs table:\n{str(e)}")
@@ -50722,6 +50770,15 @@ External Validation Performance (n={n_val}):
         """Fill the pairs Treeview from the current pairing state."""
         for item in self.ct_pairs_tree.get_children():
             self.ct_pairs_tree.delete(item)
+        # Naming conflicts the pairs table found (folded IDs colliding, or
+        # duplicate table rows): reported here and in the status label, never
+        # resolved by silently keeping the last match. Shown even before
+        # pairing runs — the table load itself found them.
+        for note in (getattr(self, 'ct_pairs_collisions', None) or []):
+            self.ct_pairs_tree.insert(
+                '', 'end', values=(f"! {note}", "", ""), tags=('unmatched',)
+            )
+        self.ct_pairs_tree.tag_configure('unmatched', foreground=self.colors['warning'])
         paired = self.ct_paired
         groups = self.ct_pair_groups or {}
         if paired is None:
@@ -50738,7 +50795,6 @@ External Validation Performance (n={n_val}):
             self.ct_pairs_tree.insert(
                 '', 'end', values=("(no match)", sid, ""), tags=('unmatched',)
             )
-        self.ct_pairs_tree.tag_configure('unmatched', foreground=self.colors['warning'])
 
     def _ct_set_group_on_selected(self):
         """Assign the typed group label to the selected matched pairs."""
