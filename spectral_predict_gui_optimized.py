@@ -457,6 +457,12 @@ _CT_SPECTRAL_NAME_EXTENSIONS = frozenset((
     '.dmt', '.asp', '.bsw', '.npy',
 ))
 
+# Said by the pairs status whenever a pairs table is active but none of its
+# rows resolve against the loaded files: pairing refuses until the table is
+# fixed or cleared (never a silent fall-back to ID matching).
+_CT_PAIRS_TABLE_NO_ROWS_MSG = (
+    "Pairs table active but no rows resolve; fix the table or Clear Table.")
+
 
 def _loaded_value_scale(metadata, X, data_type) -> float:
     """Reflectance scale (1 or 100) to use when converting this data.
@@ -3080,6 +3086,7 @@ class SpectralPredictApp:
         self.ct_paired = None  # PairedStandards from pair_standards_by_id
         self.ct_pair_groups = None  # primary sample ID -> group label
         self.ct_pairs_rename = None  # satellite ID -> primary ID from a pairs table
+        self.ct_pairs_table_active = False  # True while a table defines the pairs, even with 0 resolved rows
         self.ct_pairs_table_unresolved = None  # table rows without a mapping
         self.ct_pairs_collisions = None  # naming conflicts found by the pairs table
         self.ct_pair_resample_note = None  # set when pairing resampled the satellite
@@ -50625,6 +50632,10 @@ External Validation Performance (n={n_val}):
         self.ct_pair_resample_note = None
         self.ct_pair_groups = None
         self.ct_pairs_rename = None
+        # The table itself is re-applied below (or the load is skipped while
+        # an instrument is missing); the re-application decides whether it is
+        # active against the files loaded now.
+        self.ct_pairs_table_active = False
         self.ct_pairs_table_unresolved = None
         self.ct_pairs_collisions = None
         self.ct_X_primary_common = None
@@ -50695,6 +50706,15 @@ External Validation Performance (n={n_val}):
                 "No Data", "Load the primary and satellite spectra first, then the pairs table."
             )
             return
+        # From here the table defines the pairing whatever its rows resolve.
+        # A load that fails, or resolves no rows, must leave pairing REFUSED
+        # (see _pair_ct_standards) — falling back to ID matching while the
+        # table path is still set would pair files the table never named.
+        # Only Clear Table returns to ID matching.
+        self.ct_pairs_table_active = True
+        self.ct_pairs_rename = None
+        self.ct_pairs_table_unresolved = None
+        self.ct_pairs_collisions = None
         try:
             table = pd.read_csv(path)
             table.columns = [str(c).strip().lower() for c in table.columns]
@@ -50778,15 +50798,20 @@ External Validation Performance (n={n_val}):
                     + "\n  ".join(problems[:10])
                     + (f"\n  ... and {len(problems) - 10} more" if len(problems) > 10 else ""),
                 )
-            if not rename:
-                raise ValueError("The pairs table matched none of the loaded spectra.")
-            self.ct_pairs_rename = rename
+            self.ct_pairs_rename = rename or None
             self.ct_pair_groups = groups
             self.ct_pairs_collisions = collisions or None
             self.ct_pairs_table_unresolved = len(table) - len(rename)
             self.ct_paired = None  # forces a re-pair with the new table
             self._ct_invalidate_eval_state("The pairs table")
             self._refresh_ct_pairs_tree()
+            if not rename:
+                # The table stays active with zero resolved rows; pairing
+                # refuses with the same message until it is fixed or cleared.
+                self.ct_pairs_status_label.config(
+                    text=_CT_PAIRS_TABLE_NO_ROWS_MSG,
+                    foreground=self.colors['warning'])
+                return
             n_grouped = sum(1 for v in (groups or {}).values() if v) if has_group else 0
             n_collisions = len(collisions)
             self.ct_pairs_status_label.config(
@@ -50803,6 +50828,13 @@ External Validation Performance (n={n_val}):
             )
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load pairs table:\n{str(e)}")
+            if not self.ct_pairs_rename:
+                # The load failed after the previous table state was dropped;
+                # say the table is unusable rather than leaving a stale
+                # 'N pairs loaded' line above an inactive table.
+                self.ct_pairs_status_label.config(
+                    text=_CT_PAIRS_TABLE_NO_ROWS_MSG,
+                    foreground=self.colors['warning'])
 
     def _refresh_ct_pairs_tree(self):
         """Fill the pairs Treeview from the current pairing state."""
@@ -50871,8 +50903,9 @@ External Validation Performance (n={n_val}):
         When a pairs table is loaded, the TABLE defines the pairs: only its
         accepted mappings pair, and files it does not name stay unmatched —
         there is no silent fall-back to ID matching, which on a partly
-        matched table pairs files the table never named. Without a table,
-        shared sample IDs pair directly. When the two wavelength grids
+        matched table pairs files the table never named. A table whose rows
+        resolve nothing refuses pairing outright (fix the table or Clear
+        Table). Without a table, shared sample IDs pair directly. When the two wavelength grids
         differ, the satellite is resampled onto the primary grid over their
         overlap (a visible, reported operation) before pairing; a too-small
         overlap is refused. Returns the PairedStandards or None (with a
@@ -50941,9 +50974,22 @@ External Validation Performance (n={n_val}):
                 f"{target[0]:.1f}-{target[-1]:.1f} nm ({target.size} points)"
             )
 
-        if self.ct_pairs_rename:
-            sat_ids = list(self.ct_pairs_rename.keys())
-            ids = [self.ct_pairs_rename[s] for s in sat_ids]
+        if getattr(self, 'ct_pairs_table_active', False) or self.ct_pairs_rename:
+            rename = self.ct_pairs_rename or {}
+            sat_ids = list(rename.keys())
+            if not sat_ids:
+                # The table is still the ground truth even when none of its
+                # rows resolve (a reload can do this); ID matching must not
+                # take over. Only Clear Table returns to ID matching.
+                self.ct_paired = None
+                self._ct_invalidate_eval_state("The pairing")
+                self._refresh_ct_pairs_tree()
+                self.ct_pairs_status_label.config(
+                    text=_CT_PAIRS_TABLE_NO_ROWS_MSG,
+                    foreground=self.colors['warning'])
+                messagebox.showerror("Pairing Failed", _CT_PAIRS_TABLE_NO_ROWS_MSG)
+                return None
+            ids = [rename[s] for s in sat_ids]
             if len(ids) < 2:
                 msg = (f"The pairs table matched only {len(ids)} of the loaded "
                        "spectra; a transfer needs at least 2 pairs.")
@@ -50988,7 +51034,7 @@ External Validation Performance (n={n_val}):
             if self.current_primary_ids_positional
             else ""
         )
-        if self.ct_pairs_rename:
+        if getattr(self, 'ct_pairs_table_active', False) or self.ct_pairs_rename:
             # The table is the ground truth: say exactly how much of the
             # loaded data it accounts for (decision, review round 3).
             n_unresolved = int(getattr(self, 'ct_pairs_table_unresolved', 0) or 0)
@@ -51022,6 +51068,7 @@ External Validation Performance (n={n_val}):
     def _clear_ct_pairs_table(self):
         """Forget the loaded pairs table; pairing falls back to ID matching."""
         self.ct_pairs_table_path_var.set("")
+        self.ct_pairs_table_active = False
         self.ct_pairs_rename = None
         self.ct_pairs_table_unresolved = None
         self.ct_pairs_collisions = None

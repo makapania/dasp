@@ -47,6 +47,7 @@ _CT_STATE_ATTRS = (
     "ct_paired",
     "ct_pair_groups",
     "ct_pairs_rename",
+    "ct_pairs_table_active",
     "ct_pairs_collisions",
     "ct_pair_resample_note",
     "ct_pairs_table_unresolved",
@@ -1841,12 +1842,71 @@ def test_clearing_pairs_table_returns_to_id_matching(ct_app, tmp_path):
     app.ct_pairs_table_path_var.set(str(table_path))
     app._load_ct_pairs_table()
     assert app.ct_pairs_rename
+    assert app.ct_pairs_table_active is True
 
     app._clear_ct_pairs_table()
     assert app.ct_pairs_rename is None
+    assert app.ct_pairs_table_active is False
     assert app.ct_pairs_table_path_var.get() == ""
 
     paired = app._pair_ct_standards()  # no table: every shared ID pairs
+    assert paired is not None
+    assert len(paired.ids) == len(primary.index)
+
+
+def test_zero_resolution_table_after_reload_refuses_not_id_fallback(
+        ct_app, tmp_path):
+    """R4-1: a table whose rows resolve nothing after a reload keeps
+    defining the pairs.
+
+    The reload renames the satellite files to the primary IDs, so ID
+    matching would happily pair all of them — but the table path is still
+    set, and the table is the ground truth. Pairing must refuse with a
+    clear status; only Clear Table returns to ID matching.
+    """
+    app, wl, primary, satellite = ct_app
+    sat = satellite.copy()
+    sat_names = [f"LAB-{pid}" for pid in satellite.index]
+    sat.index = sat_names
+    app.current_satellite_df = sat
+    table_path = tmp_path / "pairs.csv"
+    pd.DataFrame(
+        {"primary": list(primary.index), "satellite": sat_names}
+    ).to_csv(table_path, index=False)
+    app.ct_pairs_table_path_var.set(str(table_path))
+    app._load_ct_pairs_table()
+    assert app.ct_pairs_table_active is True
+    assert len(app.ct_pairs_rename) == len(sat_names)
+    assert app._pair_ct_standards() is not None
+
+    # reload the satellite as files named exactly like the primary: no table
+    # row resolves any more, but shared-ID matching would pair all 12
+    shared = satellite.copy()
+    shared.index = list(primary.index)
+    app._last_dir_ids = list(primary.index)
+    try:
+        with (patch("tkinter.messagebox.showwarning") as warn,
+              patch("tkinter.messagebox.showerror") as err):
+            app._ct_store_loaded_standards(
+                'satellite', str(tmp_path), wl, shared.to_numpy(), None)
+    finally:
+        app._last_dir_ids = None
+    assert warn.called  # every row is reported unresolved
+    assert app.ct_pairs_table_active is True
+    assert app.ct_pairs_rename is None
+
+    with patch("tkinter.messagebox.showerror") as err:
+        paired = app._pair_ct_standards()
+    assert paired is None
+    assert app.ct_paired is None  # no ID-matched pairs behind the refusal
+    assert err.called
+    status = str(app.ct_pairs_status_label.cget("text"))
+    assert "no rows resolve" in status
+    assert "Clear Table" in status
+
+    # Clear Table is the way back to plain ID matching
+    app._clear_ct_pairs_table()
+    paired = app._pair_ct_standards()
     assert paired is not None
     assert len(paired.ids) == len(primary.index)
 
