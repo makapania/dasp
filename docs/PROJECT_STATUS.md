@@ -6,7 +6,7 @@
 
 ### 0. NOW (2026-10-16): Wave 3 — F2 part 1 (PR #97) and part 1b (PR #98, `47f82fb`) MERGED; next is F2 part 2 (GUI)
 Wave 1 + 2 (PRs #83-#96) are merged; their summary is in the archive (Batch 2). Wave 3 order (§0a): F2 part 1 ✔ →
-F2 part 1b ✔ → F2 part 2 (GUI, in progress on `zcode/f2-part2-gui`) → F2 part 2b → F1 part 1 (CVPlan) → F4/CS1/F3/F5/MW1/SP1-2. No open branches.
+F2 part 1b ✔ → F2 part 2 (GUI, in progress on `zcode/f2-part2-gui`) → F2 part 2b → F1 part 1 (CVPlan) → F4/CS1/F3/F5/MW1/SP1-2. Open branch: `zcode/f2-part2-gui` (GLM, worktree `.claude/worktrees/f2-part2-gui`).
 **F2 part 1** (plan `docs/plans/2026-10-05-F2-part1-transfer-validation-backend.md`): `transfer_evaluation`
 (`evaluate_transfer` leave-one-standard-out bake-off with "No correction" + primary reference rows, `fit_transfer`,
 `pair_standards_by_id`, `predict_fn_from_model`), centred low-rank PDS (`B_centred`), dual DS, prediction slope/bias;
