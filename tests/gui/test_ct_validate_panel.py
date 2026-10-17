@@ -1346,3 +1346,179 @@ def test_plan_standards_refuses_bad_count(ct_app):
         assert warn.called
     finally:
         app._close_ct_plan_standards()
+
+
+# ---------------------------------------------------------------------------
+# Review round 2 (2026-10-17)
+# ---------------------------------------------------------------------------
+
+
+def _fit_percent_transfer(app, primary, satellite, row_prefix):
+    """Panel-fit a transfer on percent-loaded standards; return the model.
+
+    Both instruments are loaded as percent reflectance (the panel divides to
+    0-1 for the fit), so the model records ``value_scale=1.0`` (the fit scale)
+    and ``primary_value_scale=100.0`` (the primary's loaded scale).
+    """
+    app.current_primary_df = primary * 100.0
+    app.current_satellite_df = satellite * 100.0
+    app.ct_paired = None
+    app.ct_primary_reflectance_scale = 100.0
+    app.ct_satellite_reflectance_scale = 100.0
+    app._pair_ct_standards()
+    _run_inline(app, app._run_ct_validate)
+    target = next(
+        item
+        for item in app.ct_leaderboard_tree.get_children()
+        if str(app.ct_leaderboard_tree.item(item, "values")[0]).startswith(row_prefix)
+    )
+    app.ct_leaderboard_tree.selection_set(target)
+    _run_inline(app, app._fit_ct_selected)
+    tm = app.ct_transfer_model
+    assert tm is not None
+    assert tm.meta["value_scale"] == 1.0
+    assert tm.meta["primary_value_scale"] == 100.0
+    return tm
+
+
+def _provision_equalize_ui(app):
+    """Create the Section F widgets/vars _file_equalize_batch reads.
+
+    The File Equalize helpers exist but their frame is not wired into the tab
+    (no call site creates the vars), so a test of the export path provisions
+    exactly the state a wired UI would hold. Returns a restore() callable.
+    """
+    names = ("ct_eq_tm_source_var", "ct_eq_input_dir_var", "ct_eq_output_dir_var",
+             "ct_eq_file_org_var", "ct_eq_format_var", "ct_eq_status_text")
+    saved = {name: getattr(app, name, None) for name in names
+             if hasattr(app, name)}
+    app.ct_eq_tm_source_var = tk.StringVar(value="current")
+    app.ct_eq_input_dir_var = tk.StringVar()
+    app.ct_eq_output_dir_var = tk.StringVar()
+    app.ct_eq_file_org_var = tk.StringVar(value="single")
+    app.ct_eq_format_var = tk.StringVar(value="csv")
+    app.ct_eq_status_text = tk.Text(app.root)
+
+    def restore():
+        app.ct_eq_status_text.destroy()
+        for name in names:
+            if hasattr(app, name):
+                delattr(app, name)
+        for name, value in saved.items():
+            setattr(app, name, value)
+
+    return restore
+
+
+@pytest.mark.parametrize("row_prefix", ["Physical match", "DS"])
+def test_file_equalize_exports_in_primary_scale(physical_app, tmp_path, row_prefix):
+    """R2-1: File Equalize detects the folder's scale and exports primary-scale."""
+    from spectral_predict.calibration_transfer import apply_transfer_dispatch
+
+    app, wl, primary, satellite = physical_app
+    tm = _fit_percent_transfer(app, primary, satellite, row_prefix)
+
+    # a folder of percent-reflectance satellite CSVs (one spectrum per file)
+    X_pct = (satellite * 100.0).to_numpy()
+    in_dir = tmp_path / "satellite_pct"
+    in_dir.mkdir()
+    header = ",".join(repr(float(w)) for w in wl)
+    for i, sid in enumerate(satellite.index):
+        (in_dir / f"{sid}.csv").write_text(
+            header + "\n" + ",".join(repr(float(v)) for v in X_pct[i]) + "\n",
+            encoding="utf-8")
+    out_dir = tmp_path / "equalized"
+    out_dir.mkdir()
+
+    restore = _provision_equalize_ui(app)
+    try:
+        app.ct_eq_input_dir_var.set(str(in_dir))
+        app.ct_eq_output_dir_var.set(str(out_dir))
+        with (patch("tkinter.messagebox.showinfo"),
+              patch("tkinter.messagebox.showerror") as err):
+            app._file_equalize_batch()
+        assert not err.called, err.call_args_list
+
+        (out_file,) = list(out_dir.glob("*transformed_spectra*.csv"))
+        exported = pd.read_csv(out_file, index_col=0)
+        assert exported.shape == X_pct.shape
+        # percent in -> converted to the fit scale -> transferred -> exported
+        # in the primary's loaded (percent) scale, like Mode B
+        expected = apply_transfer_dispatch(X_pct / 100.0, tm) * 100.0
+        np.testing.assert_allclose(exported.to_numpy(), expected, rtol=1e-4)
+        status = app.ct_eq_status_text.get("1.0", "end-1c")
+        assert "percent (0-100) reflectance" in status
+    finally:
+        restore()
+
+
+@pytest.mark.parametrize("row_prefix", ["Physical match", "DS"])
+def test_transfer_chain_converts_scale_and_exports_primary_scale(
+        physical_app, row_prefix):
+    """R2-1: the comparison-tab transfer chain routes through the same funnel."""
+    from spectral_predict.calibration_transfer import apply_transfer_dispatch
+
+    app, wl, primary, satellite = physical_app
+    tm = _fit_percent_transfer(app, primary, satellite, row_prefix)
+
+    data_pct = satellite * 100.0
+    saved = {
+        "comparison_data": app.comparison_data,
+        "comparison_value_scale": getattr(app, "comparison_value_scale", None),
+        "transfer_models": list(app.transfer_models),
+        "type": app.comparison_data_type.get(),
+    }
+    try:
+        app.comparison_data = data_pct
+        app.comparison_data_type.set("reflectance")
+        app.comparison_value_scale = 100.0
+        app.apply_transfer.set(True)
+        app.transfer_models = [{"path": "p", "model": tm, "description": row_prefix}]
+
+        with patch("tkinter.messagebox.showerror") as err:
+            out = app._apply_transfer_chain(data_pct)
+        assert not err.called, err.call_args_list
+
+        expected = apply_transfer_dispatch(data_pct.to_numpy() / 100.0, tm) * 100.0
+        np.testing.assert_allclose(out.to_numpy(), expected, rtol=1e-6)
+    finally:
+        app.apply_transfer.set(False)
+        app.transfer_models = saved["transfer_models"]
+        app.comparison_data = saved["comparison_data"]
+        app.comparison_value_scale = saved["comparison_value_scale"]
+        app.comparison_data_type.set(saved["type"])
+
+
+def test_legacy_transfer_scale_warning(physical_app):
+    """R2-2: files without scale keys keep old behaviour but are flagged."""
+    from spectral_predict.calibration_transfer import apply_transfer_dispatch
+
+    app, wl, primary, satellite = physical_app
+    app._pair_ct_standards()
+    _run_inline(app, app._run_ct_validate)
+    _select_physical_row(app)
+    _run_inline(app, app._fit_ct_selected)
+    tm = app.ct_transfer_model
+    tm.meta.pop("value_scale", None)
+    tm.meta.pop("primary_value_scale", None)
+
+    # reflectance apply: warned (logged by the helper); absorbance: nothing to say
+    note = app._ct_legacy_scale_note(tm, 100.0)
+    assert note and "predates value-scale recording" in note
+    assert app._ct_legacy_scale_note(tm, None) is None
+    tm.meta["value_scale"] = 1.0
+    assert app._ct_legacy_scale_note(tm, 1.0) is None
+    tm.meta.pop("value_scale", None)
+
+    # Mode B shows the same line in its stats and keeps the old behaviour:
+    # no conversion anywhere, whatever the loaded scale
+    X = satellite.to_numpy()
+    app.new_satellite_data_export = (wl, X)
+    app.ct_export_data_type.set("reflectance")
+    app.ct_export_value_scale = 1.0
+    app.ct_export_data_converted = False
+    _run_inline(app, app._transform_spectra)
+    stats = app.ct_transform_stats_text.get("1.0", "end-1c")
+    assert "predates value-scale recording" in stats
+    _wl_out, X_out = app.transformed_spectra
+    np.testing.assert_allclose(X_out, apply_transfer_dispatch(X, tm))

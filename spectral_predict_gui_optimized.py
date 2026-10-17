@@ -49331,16 +49331,46 @@ External Validation Performance (n={n_val}):
             X_satellite_resampled = resample_to_grid(X_satellite, wavelengths_satellite,
                                                   transfer_model.wavelengths_common)
 
-            # Apply transfer transformation
+            # Apply transfer transformation. This is an export path, so it
+            # follows the Mode B convention: the loaded folder's reflectance
+            # scale is detected from the reader metadata / values, the spectra
+            # are converted to the transfer's fit scale before applying, and
+            # the export comes back in the primary's loaded scale when the
+            # fit recorded it (older files: the loaded data's own scale).
+            eq_type, _, _ = _resolve_loaded_data_type(
+                getattr(self, '_last_dir_load_metadata', None), X_satellite)
+            eq_scale = (
+                _loaded_value_scale(
+                    getattr(self, '_last_dir_load_metadata', None), X_satellite, eq_type)
+                if eq_type == 'reflectance' else None)
+            legacy_note = self._ct_legacy_scale_note(transfer_model, eq_scale)
+            scale_note = None
             self.ct_eq_status_text.config(state='normal')
             self.ct_eq_status_text.insert(
                 tk.END,
                 f"Applying {ct_method_display_name(transfer_model.method)} transformation...\n",
             )
+            if legacy_note:
+                self.ct_eq_status_text.insert(tk.END, legacy_note + "\n")
             self.ct_eq_status_text.config(state='disabled')
             self.root.update()
 
-            X_transformed = self._apply_transfer_with_roi(X_satellite_resampled, transfer_model)
+            X_transformed = self._apply_transfer_with_roi(
+                X_satellite_resampled, transfer_model, value_scale=eq_scale,
+                output_scale="incoming")
+            p_scale, _fit_scale = self._ct_primary_scale_of(transfer_model)
+            if p_scale is not None and eq_scale is not None:
+                if p_scale != float(eq_scale):
+                    X_transformed = X_transformed * (p_scale / float(eq_scale))
+                scale_note = ("percent (0-100) reflectance" if p_scale == 100.0
+                              else "fraction (0-1) reflectance")
+            if scale_note:
+                self.ct_eq_status_text.config(state='normal')
+                self.ct_eq_status_text.insert(
+                    tk.END,
+                    f"Output scale: {scale_note} — like the primary "
+                    "instrument's loaded data.\n")
+                self.ct_eq_status_text.config(state='disabled')
 
             # Create model name for filename prefix
             model_name = f"{transfer_model.primary_id}_from_{transfer_model.satellite_id}_{transfer_model.method}"
@@ -52739,6 +52769,28 @@ External Validation Performance (n={n_val}):
             return float(p), float(f)
         return None, None
 
+    @staticmethod
+    def _ct_legacy_scale_note(transfer_model, value_scale):
+        """One-line warning for a transfer file that predates scale recording.
+
+        Applies to reflectance data (``value_scale`` is not None) whose
+        transfer file carries no ``meta['value_scale']``: the old behaviour
+        (transfer in the loaded scale, no percent/fraction conversion) is
+        kept, but it is now said out loud — logged here and returned so the
+        caller can show it in its status area. Never a modal per file.
+        """
+        if value_scale is None:
+            return None
+        meta = getattr(transfer_model, 'meta', None) or {}
+        if meta.get('value_scale') in (1.0, 100.0):
+            return None
+        method = getattr(transfer_model, 'method', 'transfer')
+        note = (f"Warning: the '{method}' transfer file predates value-scale "
+                "recording; spectra are transferred in their loaded scale "
+                "(no percent/fraction conversion).")
+        print(note)
+        return note
+
     def _apply_transfer_model(self, X_satellite, transfer_model, value_scale=None,
                               output_scale="fit"):
         """Apply a transfer model to transform satellite spectra to primary domain.
@@ -53475,6 +53527,7 @@ External Validation Performance (n={n_val}):
             pred_scale = (
                 float(getattr(self, 'ct_pred_value_scale', 1.0) or 1.0)
                 if self.ct_pred_data_type.get() == 'reflectance' else None)
+            self._ct_legacy_scale_note(transfer_model, pred_scale)
             X_transferred = self._apply_transfer_with_roi(
                 X_satellite, transfer_model, value_scale=pred_scale)
 
@@ -54081,6 +54134,7 @@ External Validation Performance (n={n_val}):
             export_scale = (
                 float(getattr(self, 'ct_export_value_scale', 1.0) or 1.0)
                 if self.ct_export_data_type.get() == 'reflectance' else None)
+            legacy_scale_note = self._ct_legacy_scale_note(transfer_model, export_scale)
             X_transferred = self._apply_transfer_with_roi(
                 X_satellite_resampled, transfer_model, value_scale=export_scale,
                 output_scale="incoming")
@@ -54111,6 +54165,8 @@ External Validation Performance (n={n_val}):
             if output_scale_note:
                 stats_text += (f"\nOutput scale: {output_scale_note} — like the "
                                "primary instrument's loaded data")
+            if legacy_scale_note:
+                stats_text += "\n" + legacy_scale_note
 
             self.ct_transform_stats_text.config(state='normal')
             self.ct_transform_stats_text.delete('1.0', tk.END)
@@ -56576,14 +56632,25 @@ External Validation Performance (n={n_val}):
         if not self.apply_transfer.get() or not self.transfer_models:
             return X_data
 
-        from spectral_predict import calibration_transfer
         import pandas as pd
         import numpy as np
 
         X_current = X_data.copy()
 
+        # Reflectance scale of the data entering the chain (None = absorbance
+        # or unknown). Each step converts to its transfer's fit scale through
+        # the same funnel as Mode A/B; the chain's output is an export path
+        # and comes back in the primary's loaded scale (Mode B convention).
+        data_type_var = getattr(self, 'comparison_data_type', None)
+        data_type = data_type_var.get() if data_type_var is not None else None
+        scale_current = (
+            float(getattr(self, 'comparison_value_scale', 1.0) or 1.0)
+            if data_type == 'reflectance' else None)
+
+        last_model = None
         for i, transfer_dict in enumerate(self.transfer_models):
             transfer_model = transfer_dict['model']
+            last_model = transfer_model
 
             print(f"Applying transfer {i+1}/{len(self.transfer_models)}: {transfer_dict['description']}")
 
@@ -56595,21 +56662,20 @@ External Validation Performance (n={n_val}):
                 X_values = X_current
                 sample_names = None
 
-            # Apply transfer using the dispatcher (ROI-aware)
+            # Apply through the shared funnel (value-scale conversion + ROI
+            # splice); output is in this transfer's fit scale.
             try:
-                roi_info = getattr(transfer_model, 'meta', {}).get('region_of_interest', {})
-                if roi_info.get('enabled', False):
-                    roi_indices = np.array(roi_info['indices'])
-                    X_region = X_values[:, roi_indices]
-                    X_region_transferred = calibration_transfer.apply_transfer_dispatch(X_region, transfer_model)
-                    X_transferred = X_values.copy()
-                    X_transferred[:, roi_indices] = X_region_transferred
-                else:
-                    X_transferred = calibration_transfer.apply_transfer_dispatch(X_values, transfer_model)
+                self._ct_legacy_scale_note(transfer_model, scale_current)
+                X_transferred = self._apply_transfer_with_roi(
+                    X_values, transfer_model, value_scale=scale_current)
             except Exception as e:
                 messagebox.showerror("Transfer Error",
                                    f"Failed to apply transfer model {transfer_dict['description']}: {str(e)}")
                 return X_data  # Return original data on error
+
+            fit_scale = (getattr(transfer_model, 'meta', None) or {}).get('value_scale')
+            if fit_scale in (1.0, 100.0):
+                scale_current = float(fit_scale)
 
             # Reconstruct DataFrame with new wavelengths
             if sample_names is not None:
@@ -56620,6 +56686,15 @@ External Validation Performance (n={n_val}):
                 )
             else:
                 X_current = X_transferred
+
+        if last_model is not None:
+            p_scale, _fit_scale = self._ct_primary_scale_of(last_model)
+            if (p_scale is not None and scale_current is not None
+                    and p_scale != scale_current):
+                factor = p_scale / scale_current
+                X_current = X_current * factor
+                print(f"Transfer chain output converted to the primary "
+                      f"instrument's loaded scale (x{factor:g}).")
 
         # Log the transformation
         transfer_chain_desc = " -> ".join([t['description'] for t in self.transfer_models])
