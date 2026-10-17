@@ -2,28 +2,43 @@
 
 > Historical material (completed-work narratives, old hand-offs, per-PR details, superseded sections) was moved verbatim to [PROJECT_STATUS_ARCHIVE.md](PROJECT_STATUS_ARCHIVE.md) on 2026-09-15. Grep it for history.
 
-## ▶ NEXT SESSION — START HERE (hand-off updated 2026-10-06)
+## ▶ NEXT SESSION — START HERE (hand-off updated 2026-10-16)
 
-### 0. NOW (2026-10-06): Wave 3 — F2 part 1 MERGED (PR #97, `d405299`); next is F2 part 2 (GUI)
+### 0. NOW (2026-10-16): Wave 3 — F2 part 1 (PR #97) and part 1b (PR #98, `47f82fb`) MERGED; next is F2 part 2 (GUI)
 Wave 1 + 2 (PRs #83-#96) are merged; their summary is in the archive (Batch 2). Wave 3 order (§0a): F2 part 1 ✔ →
-F2 part 2 (GUI) → F1 part 1 (CVPlan) → F4/CS1/F3/F5/MW1/SP1-2. No open branches.
-**F2 part 1** (plan `docs/plans/2026-10-05-F2-part1-transfer-validation-backend.md`; plan, code and confirm rounds
-reviewed by GLM 5.3 + DeepSeek Flash, both MERGE; full suite 5029 passed / 26 skipped / 0 failed):
-`transfer_evaluation.evaluate_transfer` (leave-one-standard-out
-bake-off, "No correction" + primary reference rows), `fit_transfer`, `pair_standards_by_id`,
-`predict_fn_from_model`; `calibration_transfer.estimate_pds_lowrank` (centred low-rank PDS, `B_centred` key),
-`estimate_ds_dual`, `estimate_prediction_correction`/`apply_prediction_correction`; all apply sites use
-`apply_transfer_dispatch`. AGENT_COMPOSITION §9. Simulated second instrument from the example data in
-`tests/test_ct_evaluate_transfer.py`.
-**Decision for the user (my call, revertible):** the board ranks by `RMSD_vs_primary` (transfer error alone, y
-units), not RMSEP, whenever a model is given; `rank_by="RMSEP"` restores the other. Why: SESSION_LOG 2026-10-05.
-**Part 2 next (GUI):** Validate/Compare panel on the CT tab, ID pairing in the loaders, "Plan transfer standards",
-delete the dead `_build_ct_transfer_model`/`_load_ct_paired_spectra`. **Part 3:** `.dasp` per-instrument adapters;
-must decide replace vs chain for a satellite slope/bias over a stored `bias_correction` (CT3 is fitted on the
-model's corrected output), and the GUI Model Development display reads `metrics_original` from a correction dict.
-**Reviewers:** Codex for MAJOR checks only; routine confirms GLM 5.3 + DeepSeek Flash via opencode (forbid shell
-redirection, writes, reads outside the repo; demand a verdict). Merge rule: well-reviewed PR → merge origin/main
-into branch, test, `gh pr create`, `gh pr merge N --merge --match-head-commit <full sha>`.
+F2 part 1b ✔ → F2 part 2 (GUI) → F1 part 1 (CVPlan) → F4/CS1/F3/F5/MW1/SP1-2. No open branches.
+**F2 part 1** (plan `docs/plans/2026-10-05-F2-part1-transfer-validation-backend.md`): `transfer_evaluation`
+(`evaluate_transfer` leave-one-standard-out bake-off with "No correction" + primary reference rows, `fit_transfer`,
+`pair_standards_by_id`, `predict_fn_from_model`), centred low-rank PDS (`B_centred`), dual DS, prediction slope/bias;
+all apply sites use `apply_transfer_dispatch`. The board ranks by `RMSD_vs_primary` when a model is given (my call,
+revertible with `rank_by="RMSEP"`; SESSION_LOG 2026-10-05).
+**F2 part 1b** (plan `docs/plans/2026-10-16-F2-part1b-physical-match-noise-joins.md`, "As built" block at the top;
+evidence SESSION_LOG 2026-10-16). Driven by SPYDER Bone's 40 bones scanned on LabSpec 4 Hi-Res and Standard-Res units
+(`C:/Users/sponheim/git/SPYDER Bone/data/Douka and Higham for Matt`, pair table in SPYDER
+`planning/work/transfer/pair_table.csv`; data stay outside the repo; the user approved using them):
+- `physical_match` (method key `physical_match`): per detector block blur + absorbance band-depth gain (+ optional
+  shift), learned from paired spectra on the mean second derivative; coarser-satellite and featureless guards;
+  dead channels filled within their block. `spectral_diagnostics`: noise maps (correlation-kernel D2 noise), noisy
+  regions per block, noise ratio, join detection from spectra, ASD header joins (`read_asd_dir` metadata
+  `detector_joins`). `evaluate_transfer(groups=, wavelengths=, space=, joins='auto', model_wavelengths=)`:
+  leave-one-group-out `*_grouped` columns (rank by them with groups), `Slope_vs_primary`, physical candidates,
+  `diagnostics`. Tool `tools/transfer_pairs_benchmark.py`. AGENT_COMPOSITION §9b.
+- SPYDER result, grouped by unit pair: physical match ranks 1-3 on all three collagen models (M2045 3.12 / slope
+  0.96 vs best DS/PDS 3.97 / 0.27; water-removed 3.46 vs 4.30; M1500 3.17 vs 5.37). Leave-one-out alone ranks DS
+  first: grouped scoring is the point. Acceptance script: session scratchpad `spyder_bench/accept.py` (gone after the
+  session; rebuild from SESSION_LOG notes + `tools/transfer_pairs_benchmark.py`).
+**Part 2 next (GUI):** Validate/Compare panel on the CT tab showing the board with groups, slope columns, noise map,
+joins (header / detected / user override) and the physical-match notes; ID pairing in the loaders (the GUI still
+pairs by row order: SPYDER found 0/40 rows correct in the user's earlier DS files — do not reuse those), a group
+column for standards, "Plan transfer standards", delete the dead `_build_ct_transfer_model`/`_load_ct_paired_spectra`.
+**Part 3:** `.dasp` per-instrument adapters; decide replace vs chain for a satellite slope/bias over a stored
+`bias_correction`; GUI Model Development reads `metrics_original` from a correction dict. When the satellite is
+coarser, offer refitting the model on primary spectra blurred to the satellite (roadmap CT5, rewritten).
+**Reviewers (user, 2026-10-16):** GLM 5.3 via the `zcode` CLI for real work and for plan/code reviews and confirm
+rounds; Codex (gpt-6-astra, codex-reviewer) as the second opinion on significant diffs (one pass; it found three
+real defects on #98 after two GLM rounds). No DeepSeek. Read-only reviews: say so in the prompt, demand a verdict.
+Merge rule: well-reviewed PR → merge origin/main into branch, test, `gh pr create`,
+`gh pr merge N --merge --match-head-commit <full sha>`.
 **Open follow-ups from Wave 1/2:** decimal-comma CSV/ASD readers; PLS + regression imbalance sample_weight;
 regression sample weighters not applied to the final refit; QW4 distances on preprocessed/PCA spectra; #86 LOWs.
 **Open questions for the user:** Import rounds wavelengths to integers and refuses sub-unit spacing (FTIR?); comma
@@ -42,27 +57,7 @@ Two whole-codebase reviews ran on `main` `449dfb1` (PR D merged as `85790dd`):
   contamination, modelling workflow, speed, GUI usability, visuals, structure). IDs QW*/F*/CT*/CS*/MW*/SP*/LF*/ST*.
 - **Selector test:** the MC-PLS selector is not adopted; its generic form is MW1 (see §4 item 3).
 
-**Combined order (Waves 1-2 done; user started Wave 3 on 2026-10-05).** Wave 1 fixes the numbers users report
-and deploy.
-1. **CV leakage:** booster early stopping on the CV test fold (R028, the root cause in cv_utils; R003, R022, R126),
-   and ensemble CV/weights fitted in-sample (R002 critical, R021, R018, R105). Reported scores will drop.
-2. **Saved model ≠ validated model:** Y-transform save paths (R001 critical, R020, R014/R019, R048), stale bias
-   correction (R010), Tab 7 wavelength matching (R009, R112), `all_vars` %g (R031, R078), numeric label encoder (R016).
-3. **QW1 + QW10, thread budget and test split.** Measured 60x per booster config and 50x for LOF; the test suite
-   should drop from ~38 min to under 10. Can go first, since it speeds up testing every later PR.
-4. **Data in:** OPUS reader returns the background, not absorbance (R017); duplicate `read_ascii_spectra` (R062);
-   GUI exclusion and dataset-switch bugs (R004-R007, R037).
-Wave 2 stops the app misleading:
-5. **QW2 + QW6:** calibration-transfer relabel, TSR default, resubstitution R² label, JYPLS-inv centring (R091), dead
-   interference controls.
-6. **QW3:** contaminant maths. EPO `pca_diff` removes noise (R024), OSC removes the predictive direction (R025), the
-   Interference tab crashes (R075), plus R113/R114. Add behavioural tests.
-7. **QW4 + QW5:** holdout direction (KS/SPXY must pick CALIBRATION; R085 starting pair), figures of merit; classification
-   metrics R029/R030.
-8. **QW7:** DPI awareness and fonts (the cheapest visible upgrade). **Merged (#85).** It adds system DPI awareness before `tk.Tk()` plus a DPI-aware manifest in the spec (the frozen build is
-   untested), the `_px`/`_px_geometry` scale helpers, and six named fonts (`self.fonts`) wired into every ttk style.
-   The literal font-tuple sweep (101 tuples) and the per-tab pixel padding are queued in
-   `docs/plans/2026-10-02-font-tuple-sweep.md`; do them after the concurrent GUI branches merge.
+**Waves 1-2 (done):** step list moved verbatim to PROJECT_STATUS_ARCHIVE.md (Batch 3, 2026-10-16).
 Wave 3 (flagships): F2 calibration transfer that validates itself (backend, then GUI), F1 CVPlan/grouped CV, F4 real
 DD-SIMCA, CS1 EMSC-with-interferent then F3 in-fold saved contaminant correction, F5 publication output, MW1 stability
 selection, SP1/SP2 PLS kernel and SPA. Structural enablers ST1a/ST2/ST4 whenever a flagship touches that area.

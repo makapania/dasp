@@ -1788,3 +1788,28 @@ Re-running `pip install -e .` removes the stale shim. Verified on the primary ma
 > (2) Optuna's `consider_endpoints` is also deprecated (removal in 6.0), but dropping
 > it changes its effective value, so it needs a numerical A/B before removal.
 
+
+
+## Batch 3 (moved 2026-10-16): Wave 1-2 step list from §0a
+
+**Combined order (Waves 1-2 done; user started Wave 3 on 2026-10-05).** Wave 1 fixes the numbers users report
+and deploy.
+1. **CV leakage:** booster early stopping on the CV test fold (R028, the root cause in cv_utils; R003, R022, R126),
+   and ensemble CV/weights fitted in-sample (R002 critical, R021, R018, R105). Reported scores will drop.
+2. **Saved model ≠ validated model:** Y-transform save paths (R001 critical, R020, R014/R019, R048), stale bias
+   correction (R010), Tab 7 wavelength matching (R009, R112), `all_vars` %g (R031, R078), numeric label encoder (R016).
+3. **QW1 + QW10, thread budget and test split.** Measured 60x per booster config and 50x for LOF; the test suite
+   should drop from ~38 min to under 10. Can go first, since it speeds up testing every later PR.
+4. **Data in:** OPUS reader returns the background, not absorbance (R017); duplicate `read_ascii_spectra` (R062);
+   GUI exclusion and dataset-switch bugs (R004-R007, R037).
+Wave 2 stops the app misleading:
+5. **QW2 + QW6:** calibration-transfer relabel, TSR default, resubstitution R² label, JYPLS-inv centring (R091), dead
+   interference controls.
+6. **QW3:** contaminant maths. EPO `pca_diff` removes noise (R024), OSC removes the predictive direction (R025), the
+   Interference tab crashes (R075), plus R113/R114. Add behavioural tests.
+7. **QW4 + QW5:** holdout direction (KS/SPXY must pick CALIBRATION; R085 starting pair), figures of merit; classification
+   metrics R029/R030.
+8. **QW7:** DPI awareness and fonts (the cheapest visible upgrade). **Merged (#85).** It adds system DPI awareness before `tk.Tk()` plus a DPI-aware manifest in the spec (the frozen build is
+   untested), the `_px`/`_px_geometry` scale helpers, and six named fonts (`self.fonts`) wired into every ttk style.
+   The literal font-tuple sweep (101 tuples) and the per-tab pixel padding are queued in
+   `docs/plans/2026-10-02-font-tuple-sweep.md`; do them after the concurrent GUI branches merge.
