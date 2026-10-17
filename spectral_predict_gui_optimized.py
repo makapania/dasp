@@ -51212,6 +51212,19 @@ External Validation Performance (n={n_val}):
             return
 
         if result is None:
+            # "No correction" must not leave a previously fitted transfer
+            # active — Mode A/B would keep silently applying the stale one.
+            self.ct_transfer_model = None
+            self.current_transfer_model = None
+            self.ct_save_tm_button.config(state='disabled')
+            self.ct_transfer_info_text.config(state='normal')
+            self.ct_transfer_info_text.delete('1.0', tk.END)
+            self.ct_transfer_info_text.insert(
+                '1.0',
+                f"No correction needed ('{label}').\nMode A/B use the raw "
+                "satellite spectra; no transfer model is active.\n")
+            self.ct_transfer_info_text.config(state='disabled')
+            self._update_active_transfer_model_status()
             self.ct_validate_status_label.config(
                 text=f"'{label}': no correction needed — predict the raw satellite spectra.",
                 foreground=self.colors['text'])

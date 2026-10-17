@@ -1067,6 +1067,46 @@ def test_old_transfer_file_without_scale_keys_behaves_as_before(physical_app, tm
 
 
 # ---------------------------------------------------------------------------
+# Review fix E: fitting "No correction" must clear the active transfer
+# ---------------------------------------------------------------------------
+
+
+def test_no_correction_fit_clears_active_transfer(physical_app):
+    """E: a previously fitted transfer must not stay active after 'No correction'."""
+    app, wl, primary, satellite = physical_app
+    app._pair_ct_standards()
+    _run_inline(app, app._run_ct_validate)
+    _select_physical_row(app)
+    _run_inline(app, app._fit_ct_selected)
+    assert app.ct_transfer_model is not None
+    assert str(app.ct_save_tm_button.cget("state")) == "normal"
+
+    target = next(
+        item
+        for item in app.ct_leaderboard_tree.get_children()
+        if "No correction" in str(app.ct_leaderboard_tree.item(item, "values")[0])
+    )
+    app.ct_leaderboard_tree.selection_set(target)
+    _run_inline(app, app._fit_ct_selected)
+
+    assert app.ct_transfer_model is None
+    assert app.current_transfer_model is None
+    assert str(app.ct_save_tm_button.cget("state")) == "disabled"
+    assert "No transfer model active" in str(
+        app.ct_mode_a_transfer_status_label.cget("text"))
+    assert "No transfer model active" in str(
+        app.ct_mode_b_transfer_status_label.cget("text"))
+    # Mode A refuses rather than silently applying the stale transfer
+    app.new_satellite_data_predict = (wl, satellite.to_numpy())
+    app.current_prediction_model_dict = {"metadata": {}}
+    app.current_prediction_model = None
+    with patch("tkinter.messagebox.showerror") as err:
+        app._run_prediction_workflow()
+    assert err.called
+    assert "transfer model" in str(err.call_args)
+
+
+# ---------------------------------------------------------------------------
 # Commit 3: Plan Transfer Standards (Kennard-Stone)
 # ---------------------------------------------------------------------------
 
