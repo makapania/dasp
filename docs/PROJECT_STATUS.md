@@ -32,12 +32,16 @@ joins (header / detected / user override) and the physical-match notes; ID pairi
 pairs by row order: SPYDER found 0/40 rows correct in the user's earlier DS files — do not reuse those), a group
 column for standards, "Plan transfer standards", delete the dead `_build_ct_transfer_model`/`_load_ct_paired_spectra`.
 **Part 2 built (branch `zcode/f2-part2-gui`, plan `docs/plans/2026-10-16-F2-part2-ct-gui.md` as-built blocks) and
-through a full review round (2026-10-17, commits `b06124d`..`7b7102f`):** prediction models are fed spectra in the
+through two review rounds (2026-10-17, `b06124d`..`7b7102f` + round 2):** prediction models are fed spectra in the
 **primary's loaded scale** (`.dasp` files don't record their training scale; fits record `meta['primary_value_scale']`;
-Mode B exports that scale), reload/conversion clears all derived CT state behind an input-generation guard, "No
-correction" clears the active transfer, non-covering satellite grids are refused instead of extrapolated, pairs-table
-names strip spectral extensions, descending grids sort ascending before pairing, and the ROI splice converts the whole
-spectrum's scale. Full suite green (5140 passed / 26 skipped, 2026-10-17).
+Mode B, File Equalize and the Model-Comparison transfer chain all export that scale), reload/conversion clears all
+derived CT state behind an input-generation guard, "No correction" clears the active transfer, non-covering satellite
+grids are refused instead of extrapolated, pairs-table names strip spectral extensions, descending grids sort ascending
+before pairing, the ROI splice converts the whole spectrum's scale, legacy transfer files (no scale keys) keep their old
+behaviour but print a one-line warning, pairs-table naming collisions (folded IDs, duplicate rows) are reported in the
+status + pairs view instead of last-wins, and closing the plan-standards dialog mid-run is harmless. Found in round 2:
+the File Equalize UI (Section F) is not wired into the tab (helpers exist; nothing creates the `ct_eq_*` vars).
+Full suite green (5148 passed / 26 skipped, 2026-10-17 round 2).
 **Part 3:** `.dasp` per-instrument adapters; decide replace vs chain for a satellite slope/bias over a stored
 `bias_correction`; GUI Model Development reads `metrics_original` from a correction dict. When the satellite is
 coarser, offer refitting the model on primary spectra blurred to the satellite (roadmap CT5, rewritten).

@@ -6,6 +6,30 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 Older entries are in [SESSION_LOG_ARCHIVE.md](SESSION_LOG_ARCHIVE.md) — grep it for historical context; batch 8 on 2026-10-03 moved every entry dated 2026-09-14 to 2026-09-28; batch 7 on 2026-09-15 moved every entry dated before 2026-09-14 plus the full round-by-round PR #79 crash-resume history (condensed here into the 2026-09-15 "PR #79 crash-resume (merged a5f9a70)" entry); batch 6 moved entries dated before 2026-09-01.
 
+## 2026-10-17 - F2 part 2 review round 2: unwired Section F; chain scale bookkeeping
+
+Branch `zcode/f2-part2-gui`, four findings on top of the round-1 fixes:
+
+- **Section F "File Equalize" is not wired into the tab.** Its helper methods
+  (`_file_equalize_batch`, `_load_ct_eq_transfer_model`, `_browse_ct_eq_*`) exist and a help
+  message points users at Section F, but no widget-creation code exists — nothing instantiates
+  the `ct_eq_*` StringVars/Text, so the path is unreachable from the UI today. The round-2 fix
+  still routed it through the value-scale funnel (it is a real export path), and the test
+  provisions the vars (`_provision_equalize_ui`) exactly as a wired frame would. If Section F is
+  ever wired up, check that its vars match those names.
+- **`_apply_transfer_chain` (Model Comparison tab) must track the scale step to step**: each
+  transfer's output is in *its* fit scale, which is the next transfer's incoming
+  `value_scale`; the final result is converted once, to the last transfer's
+  `primary_value_scale` (Mode B convention). Chaining per-step `output_scale='incoming'` would
+  undo the next step's conversion — don't.
+- **Pairs-table collisions: exclusion beats guessing.** Loaded files folding to one normalized
+  key are dropped from the lookup (table rows naming them come back "ambiguous" in the existing
+  not-found warning) rather than matched to whichever file hashed last. First-row-wins for
+  duplicate table rows is deterministic and reported; last-wins was silent.
+- Destroyed-Tk-widget checks: `winfo_exists()` is safe on a destroyed widget (returns False, no
+  TclError) — the guard in `_on_ct_plan_done` needs no try/except. Reset non-widget flags (the
+  running flag) BEFORE the early return, or a closed dialog leaves the feature wedged.
+
 ## 2026-10-16 - F2 part 2 (CT GUI): mixed-order pytest args break tests/gui fixtures; value-scale convention
 
 Branch `zcode/f2-part2-gui`. Gotchas from building the Validate & Compare panel:
