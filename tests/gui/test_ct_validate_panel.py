@@ -1251,6 +1251,54 @@ def test_descending_grids_pair_on_sorted_columns(ct_app):
 
 
 # ---------------------------------------------------------------------------
+# Review fix H: ROI apply must convert the whole row, not splice mixed scales
+# ---------------------------------------------------------------------------
+
+
+def test_roi_apply_converts_whole_spectrum_not_just_region(ct_app):
+    """H: the ROI splice works in one scale for the whole spectrum."""
+    app, wl, primary, satellite = ct_app
+    app.ct_primary_data_type.set("reflectance")
+    app.ct_satellite_data_type.set("reflectance")
+    app.ct_primary_reflectance_scale = 1.0
+    app.ct_satellite_reflectance_scale = 1.0
+    app.ct_method_var.set("tsr")
+    app.ct_tsr_n_samples_var.set("All")
+    app.ct_roi_mode_var.set("roi")
+    app.ct_roi_start_var.set(f"{wl[10]:.1f}")
+    app.ct_roi_end_var.set(f"{wl[60]:.1f}")
+    with patch.object(app, "_plot_transfer_quality"), \
+         patch("tkinter.messagebox.showinfo"):
+        app._build_transfer_model_new()
+    tm = app.ct_transfer_model
+    assert tm is not None
+    assert tm.meta["region_of_interest"]["enabled"]
+    assert tm.meta["value_scale"] == 1.0  # fitted on fraction reflectance
+
+    from spectral_predict.calibration_transfer import apply_transfer_dispatch
+
+    idx = np.array(tm.meta["region_of_interest"]["indices"])
+    inside = np.zeros(wl.size, bool)
+    inside[idx] = True
+    X_pct = satellite.to_numpy() * 100.0  # percent-scale incoming data
+
+    # Mode A asks for the fit scale: the WHOLE spectrum comes back in it
+    out_fit = app._apply_transfer_with_roi(X_pct, tm, value_scale=100.0)
+    np.testing.assert_allclose(out_fit[:, ~inside], X_pct[:, ~inside] / 100.0)
+    np.testing.assert_allclose(
+        out_fit[:, inside],
+        apply_transfer_dispatch(X_pct[:, idx] / 100.0, tm))
+
+    # Mode B asks for the incoming scale: the whole spectrum comes back in it
+    out_in = app._apply_transfer_with_roi(
+        X_pct, tm, value_scale=100.0, output_scale="incoming")
+    np.testing.assert_allclose(out_in[:, ~inside], X_pct[:, ~inside])
+    np.testing.assert_allclose(
+        out_in[:, inside],
+        apply_transfer_dispatch(X_pct[:, idx] / 100.0, tm) * 100.0)
+
+
+# ---------------------------------------------------------------------------
 # Commit 3: Plan Transfer Standards (Kennard-Stone)
 # ---------------------------------------------------------------------------
 

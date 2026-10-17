@@ -52782,25 +52782,39 @@ External Validation Performance (n={n_val}):
                                  output_scale="fit"):
         """Apply transfer model, handling ROI splice if the model was built with one.
 
-        If the transfer model was built on a region of interest, this extracts
-        the ROI columns, applies the transfer to just those columns, and splices
-        the result back into the full spectrum. If no ROI was used, it falls
-        through to the standard apply. ``value_scale`` and ``output_scale``
-        reach the apply with the same meaning as in ``_apply_transfer_model``.
+        If the transfer model was built on a region of interest, the WHOLE
+        incoming row is converted to the transfer's fit scale first, the ROI
+        columns are extracted, transferred and spliced back in, and the whole
+        result is converted to the requested output scale — one scale per
+        spectrum, never a percent outside and a fraction inside the region.
+        With no ROI this is plain ``_apply_transfer_model``. ``value_scale``
+        and ``output_scale`` mean what they mean there.
         """
-        roi_info = getattr(transfer_model, 'meta', {}).get('region_of_interest', {})
-        if roi_info.get('enabled', False):
-            roi_indices = np.array(roi_info['indices'])
-            X_region = X_satellite[:, roi_indices]
-            X_region_transferred = self._apply_transfer_model(
-                X_region, transfer_model, value_scale=value_scale,
+        from spectral_predict.calibration_transfer import apply_transfer_dispatch
+
+        meta = getattr(transfer_model, 'meta', None) or {}
+        roi_info = meta.get('region_of_interest', {})
+        if not roi_info.get('enabled', False):
+            return self._apply_transfer_model(
+                X_satellite, transfer_model, value_scale=value_scale,
                 output_scale=output_scale)
-            X_out = X_satellite.copy()
-            X_out[:, roi_indices] = X_region_transferred
-            return X_out
-        return self._apply_transfer_model(
-            X_satellite, transfer_model, value_scale=value_scale,
-            output_scale=output_scale)
+
+        fit_scale = meta.get('value_scale')
+        factor = None
+        if (fit_scale in (1.0, 100.0) and value_scale in (1.0, 100.0)
+                and float(value_scale) != float(fit_scale)):
+            factor = float(fit_scale) / float(value_scale)
+        X_work = np.asarray(X_satellite, dtype=float)
+        if factor is not None:
+            X_work = X_work * factor
+        roi_indices = np.array(roi_info['indices'])
+        X_region_transferred = apply_transfer_dispatch(
+            X_work[:, roi_indices], transfer_model)
+        X_out = X_work.copy()
+        X_out[:, roi_indices] = X_region_transferred
+        if factor is not None and output_scale == "incoming":
+            X_out = X_out / factor
+        return X_out
 
     # ========================================================================
     # STEP 3A HELPER METHODS: Prediction Workflow
