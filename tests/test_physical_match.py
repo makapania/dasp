@@ -108,7 +108,19 @@ def test_a_dead_satellite_channel_does_not_steer_the_fit(bad):
     assert prm["sigma_nm"][0] <= 1.0
     assert prm["gain"][0] == pytest.approx(0.7, rel=0.02)
     assert not prm["fit_mask"][np.abs(wl - 1400) <= 15].any()
-    assert np.isfinite(pm.apply_physical_match(Rs, prm, wl)).all()
+    out = pm.apply_physical_match(Rs, prm, wl)
+    assert np.isfinite(out).all()
+    clean = pm.apply_physical_match(_broadband_pair()[2], prm, wl)
+    far = np.abs(wl - 1400) > 40  # applying must not spread the dead channel either
+    np.testing.assert_allclose(out[:, far], clean[:, far], rtol=1e-12)
+
+
+def test_exclude_accepts_an_array():
+    wl, Rp, Rs = _broadband_pair()
+    prm = pm.estimate_physical_match(
+        Rp, Rs, wl, space="reflectance", sigma=0.0, exclude=np.array([[1280.0, 1320.0]])
+    )
+    assert not prm["fit_mask"][(wl >= 1280) & (wl <= 1320)].any()
 
 
 def test_nan_in_absorbance_input_is_filled_not_propagated():

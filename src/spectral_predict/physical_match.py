@@ -168,6 +168,8 @@ def apply_physical_match(
     sh = np.atleast_1d(np.asarray(params["shift_nm"], dtype=np.float64))
     g = np.atleast_1d(np.asarray(params["gain"], dtype=np.float64))
     c = np.atleast_1d(np.asarray(params["offset"], dtype=np.float64))
+    A, valid = sd.to_absorbance(X, space)
+    X, _ = _fill_invalid(X, A, valid, wl, space)  # a dead channel must not spread
     out = np.empty_like(X)
     for b, slc in enumerate(_block_bounds(params, wl)):
         A = _transform_block(X[:, slc], wl[slc], space, float(sig[b]), float(sh[b]))
@@ -388,7 +390,7 @@ def estimate_physical_match(
     noisy = sd.regions_mask(
         sd.noisy_regions(ne_p.channel_sd, wl, joins, factor=noisy_factor), wl
     ) | sd.regions_mask(sd.noisy_regions(ne_s.channel_sd, wl, joins, factor=noisy_factor), wl)
-    excl = sd.regions_mask(exclude or (), wl)
+    excl = sd.regions_mask(() if exclude is None else exclude, wl)
 
     if fwhm is not None:
         fixed = _sigma_from_fwhm(fwhm, B)
