@@ -504,6 +504,22 @@ def physical_app(gui_app):
             "ct_eval_model_dict",
             "_ct_eval_context",
             "_ct_validate_running",
+            "ct_primary_reflectance_scale",
+            "ct_satellite_reflectance_scale",
+            "new_satellite_data_predict",
+            "new_satellite_data_export",
+            "current_prediction_model_dict",
+            "current_prediction_model",
+            "ct_pred_value_scale",
+            "ct_pred_data_type",
+            "ct_pred_data_converted",
+            "ct_pred_source_data_type",
+            "ct_pred_y_pred",
+            "ct_export_value_scale",
+            "ct_export_data_type",
+            "ct_export_data_converted",
+            "transformed_spectra",
+            "transformed_spectra_type",
         )
     }
     wl, primary, satellite = _physical_standards()
@@ -683,7 +699,11 @@ def test_physical_match_mode_a_prediction_end_to_end(physical_app, tmp_path):
 
 
 def test_physical_match_mode_b_export_end_to_end(physical_app):
-    """Requirement B: Mode B transforms and exports in the loaded scale."""
+    """Requirement B: Mode B transforms and exports in the primary's scale.
+
+    The primary loaded as fraction reflectance here, so the export is fraction
+    even though the new satellite data came in as percent.
+    """
     from spectral_predict.calibration_transfer import apply_transfer_dispatch
 
     app, wl, primary, satellite = physical_app
@@ -703,8 +723,10 @@ def test_physical_match_mode_b_export_end_to_end(physical_app):
 
     wl_out, X_out = app.transformed_spectra
     assert len(wl_out) == len(tm.wavelengths_common)
-    expected = apply_transfer_dispatch(X_new_percent / 100.0, tm) * 100.0
+    expected = apply_transfer_dispatch(X_new_percent / 100.0, tm)
     np.testing.assert_allclose(X_out, expected)
+    assert "fraction" in app.ct_transform_stats_text.get("1.0", "end-1c")
+    assert app.transformed_spectra_type["value_scale"] == 1.0
 
 
 def test_eval_model_loader_rejects_non_regression(ct_app, tmp_path):
@@ -869,6 +891,179 @@ def test_stale_fit_result_discarded(ct_app):
     assert app.ct_transfer_model is None and app.current_transfer_model is None
     assert app._ct_validate_running is False
     assert "discarded" in str(app.ct_validate_status_label.cget("text"))
+
+
+# ---------------------------------------------------------------------------
+# Review fix A: prediction-model scale (percent-trained .dasp models)
+# ---------------------------------------------------------------------------
+
+
+def _regression_model_on(tmp_path, X, y, wl, name="PLS"):
+    """A fitted, saved and loaded regression model trained on X."""
+    from sklearn.cross_decomposition import PLSRegression
+    from spectral_predict import model_io
+
+    pls = PLSRegression(n_components=2).fit(X, y)
+    path = tmp_path / f"{name}.dasp"
+    model_io.save_model(
+        pls, None,
+        {
+            "model_name": name,
+            "task_type": "regression",
+            "wavelengths": [float(w) for w in wl],
+            "n_vars": len(wl),
+            "target_name": "y",
+        },
+        str(path),
+    )
+    return model_io.load_model(str(path))
+
+
+def test_board_scales_percent_trained_model_back_up(inline_workers, tmp_path):
+    """A: a percent-trained model must see percent-scale spectra on the board."""
+    app, wl, primary, satellite = inline_workers
+    # load both instruments as percent reflectance (values 0-100)
+    primary_pct, satellite_pct = primary * 100.0, satellite * 100.0
+    app.current_primary_df = primary_pct
+    app.current_satellite_df = satellite_pct
+    app.current_primary_data = (wl, primary_pct.to_numpy())
+    app.current_satellite_data = (wl, satellite_pct.to_numpy())
+    app.ct_paired = None
+    app.ct_primary_reflectance_scale = 100.0
+    app.ct_satellite_reflectance_scale = 100.0
+    y = np.linspace(1.0, 9.0, primary.shape[0])
+    model = _regression_model_on(tmp_path, primary_pct.to_numpy(), y, wl)
+    app.ct_eval_model_dict = model
+    with patch("tkinter.messagebox.showerror") as err:
+        app._run_ct_validate()
+    assert not err.called, err.call_args_list
+
+    board = app.ct_last_evaluation.leaderboard
+    got = float(board.loc[board["method"] == "none", "RMSD_vs_primary"].iloc[0])
+    pls = model["model"]
+    # the model was trained on the primary's loaded (percent) data, so both the
+    # satellite predictions and the primary reference rows are percent-scale;
+    # the paired arrays are in primary order (the satellite df is shuffled) and
+    # already carry the loaded percent values
+    pred_sat = pls.predict(app.ct_paired.X_satellite).ravel()
+    pred_primary = pls.predict(app.ct_paired.X_primary).ravel()
+    expected = float(np.sqrt(np.mean((pred_sat - pred_primary) ** 2)))
+    assert got == pytest.approx(expected, rel=1e-8)
+
+
+def test_mode_a_scales_transferred_spectra_to_primary_scale(physical_app, tmp_path):
+    """A: Mode A hands a percent-trained model percent-scale transferred spectra."""
+    from spectral_predict.calibration_transfer import apply_transfer_dispatch
+
+    app, wl, primary, satellite = physical_app
+    # both instruments loaded as percent reflectance (values 0-100); the panel
+    # fits on the divided 0-1 spectra
+    primary_pct, satellite_pct = primary * 100.0, satellite * 100.0
+    app.current_primary_df = primary_pct
+    app.current_satellite_df = satellite_pct
+    app.ct_paired = None
+    app.ct_primary_reflectance_scale = 100.0
+    app.ct_satellite_reflectance_scale = 100.0
+    app._pair_ct_standards()
+    _run_inline(app, app._run_ct_validate)
+    _select_physical_row(app)
+    _run_inline(app, app._fit_ct_selected)
+    tm = app.ct_transfer_model
+    assert tm is not None
+    assert tm.meta["value_scale"] == 1.0  # the fit scale
+    assert tm.meta["primary_value_scale"] == 100.0  # the primary's loaded scale
+
+    # a model trained on the primary's loaded (percent) data
+    y = np.linspace(1.0, 9.0, primary.shape[0])
+    model = _regression_model_on(tmp_path, primary_pct.to_numpy(), y, wl)
+    app.current_prediction_model_dict = model
+    app.current_prediction_model = model["model"]
+
+    X_new_percent = satellite_pct.to_numpy()
+    app.new_satellite_data_predict = (wl, X_new_percent)
+    app.ct_pred_data_type.set("reflectance")
+    app.ct_pred_value_scale = 100.0
+    app.ct_pred_data_converted = False
+    app.ct_pred_source_data_type = None
+
+    with patch("tkinter.messagebox.showwarning"):
+        _run_inline(app, app._run_prediction_workflow)
+
+    pls = model["model"]
+    expected = pls.predict(
+        apply_transfer_dispatch(X_new_percent / 100.0, tm) * 100.0).ravel()
+    np.testing.assert_allclose(np.asarray(app.ct_pred_y_pred), expected, rtol=1e-6)
+
+
+def test_mode_b_exports_in_primary_scale_with_note(physical_app):
+    """A: Mode B writes transferred spectra in the primary's loaded scale."""
+    from spectral_predict.calibration_transfer import apply_transfer_dispatch
+
+    app, wl, primary, satellite = physical_app
+    primary_pct, satellite_pct = primary * 100.0, satellite * 100.0
+    app.current_primary_df = primary_pct
+    app.current_satellite_df = satellite_pct
+    app.ct_paired = None
+    app.ct_primary_reflectance_scale = 100.0
+    app.ct_satellite_reflectance_scale = 100.0
+    app._pair_ct_standards()
+    _run_inline(app, app._run_ct_validate)
+    _select_physical_row(app)
+    _run_inline(app, app._fit_ct_selected)
+    tm = app.ct_transfer_model
+
+    # the NEW satellite data loads as fraction reflectance while the transfer's
+    # primary was percent: the export must still look like primary-instrument data
+    X_new_fraction = satellite.to_numpy()
+    app.new_satellite_data_export = (wl, X_new_fraction)
+    app.ct_export_data_type.set("reflectance")
+    app.ct_export_value_scale = 1.0
+    app.ct_export_data_converted = False
+
+    _run_inline(app, app._transform_spectra)
+
+    wl_out, X_out = app.transformed_spectra
+    assert len(wl_out) == len(tm.wavelengths_common)
+    expected = apply_transfer_dispatch(X_new_fraction, tm) * 100.0
+    np.testing.assert_allclose(X_out, expected)
+    stats = app.ct_transform_stats_text.get("1.0", "end-1c")
+    assert "percent" in stats
+    assert app.transformed_spectra_type["value_scale"] == 100.0
+
+
+def test_old_transfer_file_without_scale_keys_behaves_as_before(physical_app, tmp_path):
+    """A: transfer files recording neither scale key get no conversion at all."""
+    from spectral_predict.calibration_transfer import apply_transfer_dispatch
+
+    app, wl, primary, satellite = physical_app
+    app._pair_ct_standards()
+    _run_inline(app, app._run_ct_validate)
+    _select_physical_row(app)
+    _run_inline(app, app._fit_ct_selected)
+    tm = app.ct_transfer_model
+    tm.meta.pop("value_scale", None)
+    tm.meta.pop("primary_value_scale", None)
+
+    # apply: fraction in -> fraction out, no conversion anywhere
+    X = satellite.to_numpy()
+    np.testing.assert_allclose(
+        app._apply_transfer_model(X, tm, value_scale=1.0),
+        apply_transfer_dispatch(X, tm))
+
+    # Mode A: the model is fed exactly what the apply produced
+    y = np.linspace(1.0, 9.0, primary.shape[0])
+    model = _regression_model_on(tmp_path, primary.to_numpy(), y, wl)
+    app.current_prediction_model_dict = model
+    app.current_prediction_model = model["model"]
+    app.new_satellite_data_predict = (wl, X)
+    app.ct_pred_data_type.set("reflectance")
+    app.ct_pred_value_scale = 1.0
+    app.ct_pred_data_converted = False
+    app.ct_pred_source_data_type = None
+    with patch("tkinter.messagebox.showwarning"):
+        _run_inline(app, app._run_prediction_workflow)
+    expected = model["model"].predict(apply_transfer_dispatch(X, tm)).ravel()
+    np.testing.assert_allclose(np.asarray(app.ct_pred_y_pred), expected, rtol=1e-6)
 
 
 # ---------------------------------------------------------------------------

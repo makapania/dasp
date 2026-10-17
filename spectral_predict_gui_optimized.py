@@ -50952,6 +50952,9 @@ External Validation Performance (n={n_val}):
         Xp = np.array(paired.X_primary, dtype=float, copy=True)
         Xs = np.array(paired.X_satellite, dtype=float, copy=True)
         scale_note = None
+        primary_value_scale = (
+            float(getattr(self, 'ct_primary_reflectance_scale', 1.0) or 1.0)
+            if space == 'reflectance' else 1.0)
         if space == 'reflectance':
             notes = []
             for name, arr, attr in (
@@ -50986,6 +50989,22 @@ External Validation Performance (n={n_val}):
                     "regression .dasp, or clear the model to validate with "
                     "spectral scores only.")
                 return
+            if space == 'reflectance' and primary_value_scale == 100.0:
+                # A .dasp model does not record the reflectance scale it was
+                # trained on; the safe assumption is the primary instrument's
+                # loaded scale (that is what it was built on). The board feeds
+                # the model 0-1 spectra, so scale them back up before
+                # predicting — this covers the transferred rows and the
+                # primary reference rows alike.
+                inner_predict = predict
+
+                def predict(Z, _inner=inner_predict, _scale=primary_value_scale):
+                    return _inner(np.asarray(Z, dtype=float) * _scale)
+
+                if scale_note:
+                    scale_note += (
+                        f"; prediction model receives x{primary_value_scale:g} "
+                        "spectra (the primary's loaded scale)")
             mw = np.array((self.ct_eval_model_dict.get('metadata', {}) or {})
                           .get('wavelengths', []), dtype=float)
             if mw.size:
@@ -51000,6 +51019,7 @@ External Validation Performance (n={n_val}):
             ids=list(paired.ids), scale_note=scale_note,
             resample_note=self.ct_pair_resample_note,
             generation=self._ct_input_generation,
+            primary_value_scale=primary_value_scale,
             primary_id=os.path.basename(self.ct_primary_data_path_var.get()) or 'primary',
             satellite_id=os.path.basename(self.ct_satellite_data_path_var.get()) or 'satellite',
         )
@@ -51208,8 +51228,12 @@ External Validation Performance (n={n_val}):
 
         # The panel normalizes reflectance to 0-1 before fitting, so the model
         # works in fraction units (absorbance has no scale). Apply sites read
-        # this to convert incoming data the same way.
+        # this to convert incoming data the same way. primary_value_scale is
+        # the primary's LOADED scale — the scale a prediction model built on
+        # the primary instrument expects (a .dasp does not record it).
         result.meta['value_scale'] = 1.0
+        result.meta['primary_value_scale'] = float(
+            context.get('primary_value_scale', 1.0) or 1.0)
         result.meta['spectral_data_type'] = context['space']
         result.meta['validated_by'] = (
             f"leave-one-out board, ranked by {self.ct_last_evaluation.score_column}")
@@ -51235,6 +51259,11 @@ External Validation Performance (n={n_val}):
             info_lines.append(f"Notes: {notes}")
         if context.get('scale_note'):
             info_lines.append(context['scale_note'] + " (model works in 0-1 reflectance)")
+        if float(context.get('primary_value_scale', 1.0) or 1.0) == 100.0:
+            info_lines.append(
+                "Primary was loaded in percent reflectance: Mode A feeds "
+                "prediction models percent-scale spectra and Mode B exports "
+                "percent-scale spectra (the primary's loaded scale).")
         info_text = "\n".join(info_lines) + "\n"
         self.ct_transfer_info_text.config(state='normal')
         self.ct_transfer_info_text.delete('1.0', tk.END)
@@ -51783,10 +51812,15 @@ External Validation Performance (n={n_val}):
             from datetime import datetime
             # The scale of the satellite data this transfer was fitted on (1 or
             # 100); apply sites convert incoming data to it. Absorbance has no
-            # scale, so it records 1.
+            # scale, so it records 1. primary_value_scale is the primary's
+            # loaded scale — what a prediction model built on the primary
+            # instrument expects.
             build_value_scale = (
                 float(getattr(self, 'ct_satellite_reflectance_scale', 1.0) or 1.0)
                 if self.ct_satellite_data_type.get() == 'reflectance' else 1.0)
+            build_primary_value_scale = (
+                float(getattr(self, 'ct_primary_reflectance_scale', 1.0) or 1.0)
+                if self.ct_primary_data_type.get() == 'reflectance' else 1.0)
             transfer_meta = {
                 'spectral_data_type': primary_type,
                 'original_primary_type': self.ct_primary_original_data_type,
@@ -51794,6 +51828,7 @@ External Validation Performance (n={n_val}):
                 'primary_was_converted': self.ct_primary_was_converted,
                 'satellite_was_converted': self.ct_satellite_was_converted,
                 'value_scale': build_value_scale,
+                'primary_value_scale': build_primary_value_scale,
                 'build_date': datetime.now().isoformat(),
                 'pairing': {
                     'by': 'sample_id',
@@ -52649,6 +52684,21 @@ External Validation Performance (n={n_val}):
             raise ValueError(f"ROI Start ({start}) must be less than End ({end}).")
         return {'enabled': True, 'start': start, 'end': end}
 
+    @staticmethod
+    def _ct_primary_scale_of(transfer_model):
+        """(primary_value_scale, fit value_scale) recorded at fit time.
+
+        Both are 1.0 or 100.0. Older transfer files record neither key;
+        ``(None, None)`` says so and every scale conversion is skipped — their
+        historical behaviour.
+        """
+        meta = getattr(transfer_model, 'meta', None) or {}
+        p = meta.get('primary_value_scale')
+        f = meta.get('value_scale')
+        if p in (1.0, 100.0) and f in (1.0, 100.0):
+            return float(p), float(f)
+        return None, None
+
     def _apply_transfer_model(self, X_satellite, transfer_model, value_scale=None,
                               output_scale="fit"):
         """Apply a transfer model to transform satellite spectra to primary domain.
@@ -53338,6 +53388,15 @@ External Validation Performance (n={n_val}):
             X_transferred = self._apply_transfer_with_roi(
                 X_satellite, transfer_model, value_scale=pred_scale)
 
+            # The prediction model was trained on the primary instrument's
+            # loaded data, and a .dasp does not record that scale; hand it
+            # transferred spectra in the primary's loaded scale (files without
+            # the fit-time keys get no conversion — their old behaviour).
+            p_scale, f_scale = self._ct_primary_scale_of(transfer_model)
+            X_for_model = X_transferred
+            if p_scale is not None and p_scale != f_scale:
+                X_for_model = X_transferred * (p_scale / f_scale)
+
             # Step 2: Use prediction model to predict properties
             if self.current_prediction_model_dict is not None:
                 from spectral_predict.model_io import (
@@ -53360,14 +53419,14 @@ External Validation Performance (n={n_val}):
                 if required_wl:
                     target_wl = np.array(required_wl, dtype=float)
                     if source_wl is not None and len(target_wl) > 0:
-                        X_for_prediction = resample_to_grid(X_transferred, source_wl, target_wl)
+                        X_for_prediction = resample_to_grid(X_for_model, source_wl, target_wl)
                     else:
-                        X_for_prediction = X_transferred
+                        X_for_prediction = X_for_model
                     y_pred = predict_with_model(self.current_prediction_model_dict, X_for_prediction, validate_wavelengths=True)
                 else:
-                    y_pred = predict_with_model(self.current_prediction_model_dict, X_transferred, validate_wavelengths=False)
+                    y_pred = predict_with_model(self.current_prediction_model_dict, X_for_model, validate_wavelengths=False)
             else:
-                y_pred = self.current_prediction_model.predict(X_transferred)
+                y_pred = self.current_prediction_model.predict(X_for_model)
 
             # Step 3: Display results
             # Clear existing results
@@ -53912,18 +53971,30 @@ External Validation Performance (n={n_val}):
                 model_wavelengths = wavelengths_satellite
 
             # Apply transfer (ROI-aware: splices region back into full spectrum).
-            # Exported spectra come back in the loaded data's own reflectance scale.
+            # The exported spectra are meant to look like primary-instrument
+            # data, so they come back in the primary's loaded reflectance scale
+            # when the fit recorded it (older files: the loaded data's own scale).
             export_scale = (
                 float(getattr(self, 'ct_export_value_scale', 1.0) or 1.0)
                 if self.ct_export_data_type.get() == 'reflectance' else None)
             X_transferred = self._apply_transfer_with_roi(
                 X_satellite_resampled, transfer_model, value_scale=export_scale,
                 output_scale="incoming")
+            output_scale_note = None
+            out_scale = export_scale
+            p_scale, _f_scale = self._ct_primary_scale_of(transfer_model)
+            if p_scale is not None and export_scale is not None:
+                out_scale = p_scale
+                if export_scale in (1.0, 100.0) and p_scale != export_scale:
+                    X_transferred = X_transferred * (p_scale / float(export_scale))
+                output_scale_note = (
+                    "percent (0-100) reflectance" if p_scale == 100.0
+                    else "fraction (0-1) reflectance")
 
             # Store transformed spectra, with the data type they carry (after any
             # conversion), for "use as working data"
             self.transformed_spectra = (model_wavelengths, X_transferred)
-            self._record_transformed_spectra_type()
+            self._record_transformed_spectra_type(value_scale=out_scale)
 
             # Calculate statistics
             rmse = np.sqrt(np.mean((X_transferred - X_satellite_resampled) ** 2))
@@ -53933,6 +54004,9 @@ External Validation Performance (n={n_val}):
             stats_text = f"Transformation Complete!\n"
             stats_text += f"RMSE: {rmse:.6f}\n"
             stats_text += f"Coverage: {coverage:.1f}% ({X_transferred.shape[0]} samples)"
+            if output_scale_note:
+                stats_text += (f"\nOutput scale: {output_scale_note} — like the "
+                               "primary instrument's loaded data")
 
             self.ct_transform_stats_text.config(state='normal')
             self.ct_transform_stats_text.delete('1.0', tk.END)
@@ -53965,12 +54039,13 @@ External Validation Performance (n={n_val}):
         else:
             self.ct_use_as_working_btn.config(state='disabled')
 
-    def _record_transformed_spectra_type(self):
+    def _record_transformed_spectra_type(self, value_scale=None):
         """Record the Mode B data type (after any conversion) with the transformed spectra.
 
         "Use as working data" applies it instead of re-detecting from values; the
         value scale travels with it so percent reflectance converted to absorbance
-        converts back to percent.
+        converts back to percent. ``value_scale`` overrides the loaded scale when
+        the export came back in another scale (the primary's loaded scale).
         """
         export_type = self.ct_export_data_type.get()
         self.transformed_spectra_type = {
@@ -53980,7 +54055,10 @@ External Validation Performance (n={n_val}):
                 None if self.ct_export_data_converted
                 else getattr(self, 'ct_export_source_data_type', None)
             ),
-            'value_scale': getattr(self, 'ct_export_value_scale', 1.0),
+            'value_scale': (
+                value_scale if value_scale is not None
+                else getattr(self, 'ct_export_value_scale', 1.0)
+            ),
         } if export_type else None
 
     def _ct_use_as_working_data(self):
