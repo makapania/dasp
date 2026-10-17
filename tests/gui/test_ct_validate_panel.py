@@ -2154,6 +2154,42 @@ def test_failed_table_reload_invalidates_pairing_and_board(inline_workers,
     assert paired is not None and len(paired.ids) == len(primary.index)
 
 
+def test_table_reload_keeps_manual_group_overrides(ct_app, tmp_path):
+    """R5-2: manual group edits win over a table reload of the same rows."""
+    app, wl, primary, satellite = ct_app
+    sat = satellite.copy()
+    sat.index = [f"LAB-{pid}" for pid in satellite.index]
+    app.current_satellite_df = sat
+    table_path = tmp_path / "pairs.csv"
+    pd.DataFrame({
+        "primary": list(primary.index),
+        "satellite": [f"LAB-{pid}" for pid in primary.index],
+        "group": ["unitA"] * len(primary),
+    }).to_csv(table_path, index=False)
+    app.ct_pairs_table_path_var.set(str(table_path))
+    app._load_ct_pairs_table()
+    assert app.ct_pair_groups["bone_01"] == "unitA"
+
+    app._pair_ct_standards()
+    app.ct_pair_group_entry_var.set("manualA")
+    app.ct_pairs_tree.selection_set((app.ct_pairs_tree.get_children()[0],))
+    app._ct_set_group_on_selected()
+    assert app.ct_pair_groups["bone_01"] == "manualA"
+    assert "bone_01" not in (app.ct_pair_groups_table_keys or set())
+
+    # reloading the table must not overwrite the manual label
+    app._load_ct_pairs_table()
+    assert app.ct_pair_groups["bone_01"] == "manualA"
+    assert "bone_01" not in (app.ct_pair_groups_table_keys or set())
+    assert app.ct_pair_groups["bone_02"] == "unitA"  # other rows re-seeded
+    assert set(app.ct_pair_groups_table_keys) == set(primary.index) - {"bone_01"}
+
+    # Clear Table keeps the manual edit (round 4 rule)
+    app._clear_ct_pairs_table()
+    assert app.ct_pair_groups == {"bone_01": "manualA"}
+    assert app.ct_pair_groups_table_keys is None
+
+
 class _chain_state:
     """Point the comparison tab at a transfer chain over percent data."""
 

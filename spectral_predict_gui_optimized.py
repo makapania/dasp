@@ -50778,10 +50778,12 @@ External Validation Performance (n={n_val}):
 
             rename = {}
             # The previous table's group labels go with that table; manual
-            # Treeview edits survive a table (re)load.
+            # Treeview edits survive a table (re)load and WIN over the
+            # table's label for the same pair (decision, review round 5).
             groups = {k: v for k, v in (self.ct_pair_groups or {}).items()
                       if k not in (getattr(self, 'ct_pair_groups_table_keys',
                                            None) or set())}
+            manual_keys = set(groups)
             table_group_keys = set()
             problems = []
             used_primary = {}
@@ -50823,7 +50825,8 @@ External Validation Performance (n={n_val}):
                 used_primary[p_actual] = f"{row.primary} -> {row.satellite}"
                 used_satellite[s_actual] = f"{row.primary} -> {row.satellite}"
                 rename[s_actual] = p_actual
-                if has_group and pd.notna(row.group) and str(row.group).strip():
+                if (has_group and pd.notna(row.group) and str(row.group).strip()
+                        and p_actual not in manual_keys):
                     groups[p_actual] = str(row.group).strip()
                     table_group_keys.add(p_actual)
             if problems:
