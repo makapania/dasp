@@ -50722,13 +50722,19 @@ External Validation Performance (n={n_val}):
         # A load that fails, or resolves no rows, must leave pairing REFUSED
         # (see _pair_ct_standards) — falling back to ID matching while the
         # table path is still set would pair files the table never named.
-        # Only Clear Table returns to ID matching.
+        # Only Clear Table returns to ID matching. The attempt itself
+        # supersedes the old table: the old pairing and everything derived
+        # from it are dropped NOW, not only after a successful parse, so a
+        # failed load cannot leave a stale pairing usable behind a stale
+        # board; a run still in flight on the old inputs is abandoned.
         self.ct_pairs_table_active = True
         self.ct_pairs_rename = None
         self.ct_pairs_table_unresolved = None
         self.ct_pairs_table_named_primary = None
         self.ct_pairs_table_named_satellite = None
         self.ct_pairs_collisions = None
+        self.ct_paired = None
+        self._ct_invalidate_eval_state("The pairs table")
         try:
             table = pd.read_csv(path)
             table.columns = [str(c).strip().lower() for c in table.columns]
@@ -50836,8 +50842,6 @@ External Validation Performance (n={n_val}):
             self.ct_pairs_table_named_satellite = named_satellite
             self.ct_pairs_collisions = collisions or None
             self.ct_pairs_table_unresolved = len(table) - len(rename)
-            self.ct_paired = None  # forces a re-pair with the new table
-            self._ct_invalidate_eval_state("The pairs table")
             self._refresh_ct_pairs_tree()
             if not rename:
                 # The table stays active with zero resolved rows; pairing

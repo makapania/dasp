@@ -2083,6 +2083,77 @@ def test_clear_table_keeps_manual_groups_drops_table_groups(ct_app, tmp_path):
     assert app.ct_pair_groups_table_keys is None
 
 
+# ---------------------------------------------------------------------------
+# Review round 5
+# ---------------------------------------------------------------------------
+
+
+def test_failed_table_reload_invalidates_pairing_and_board(inline_workers,
+                                                           tmp_path):
+    """R5-1: a failed table reload must not leave the old pairing usable.
+
+    The load attempt itself supersedes the old table: a malformed
+    replacement file clears the pairing and the board (and abandons a run
+    in flight) on the error path too, not only after a successful parse.
+    """
+    app, wl, primary, satellite = inline_workers
+    # an identity table: the same IDs on both instruments
+    table_path = tmp_path / "pairs.csv"
+    pd.DataFrame({
+        "primary": list(primary.index),
+        "satellite": list(primary.index),
+    }).to_csv(table_path, index=False)
+    app.ct_pairs_table_path_var.set(str(table_path))
+    app._load_ct_pairs_table()
+    assert app._pair_ct_standards() is not None
+    with patch("tkinter.messagebox.showerror") as err:
+        app._run_ct_validate()
+    assert not err.called, err.call_args_list
+    assert app.ct_last_evaluation is not None
+    app.ct_leaderboard_tree.selection_set(app.ct_leaderboard_tree.get_children()[0])
+
+    payload, ctx = _captured_validate_run(app)  # a second run is in flight
+
+    # the replacement file is malformed (no primary/satellite columns)
+    bad = tmp_path / "bad.csv"
+    bad.write_text("this is not,a pairs table\n1,2,3\n", encoding="utf-8")
+    app.ct_pairs_table_path_var.set(str(bad))
+    with patch("tkinter.messagebox.showerror") as err:
+        app._load_ct_pairs_table()
+    assert err.called  # the parse failure is reported
+
+    # the old pairing and board are gone; the in-flight run was abandoned
+    assert app.ct_paired is None
+    assert app.ct_last_evaluation is None and app._ct_eval_context is None
+    assert app._ct_active_run_id is None
+    assert not app.ct_leaderboard_tree.get_children()
+    assert "cleared" in str(app.ct_validate_status_label.cget("text"))
+    status_before = str(app.ct_validate_status_label.cget("text"))
+    app._on_ct_validate_done(payload, ctx)  # the abandoned run reports late
+    assert app.ct_last_evaluation is None
+    assert str(app.ct_validate_status_label.cget("text")) == status_before
+
+    # the failed table stays active (round 4): no silent ID fallback
+    assert app.ct_pairs_table_active is True
+    assert app.ct_pairs_rename is None
+    assert "no rows resolve" in str(app.ct_pairs_status_label.cget("text"))
+
+    # Validate refuses until the table is fixed or cleared; Fit has no board
+    with patch("tkinter.messagebox.showerror") as err:
+        app._run_ct_validate()
+    assert err.called
+    assert app.ct_last_evaluation is None
+    with patch("tkinter.messagebox.showwarning") as warn:
+        app._fit_ct_selected()
+    assert warn.called
+    assert "Validate & Compare" in str(warn.call_args)
+
+    # Clear Table is the way back to a working panel
+    app._clear_ct_pairs_table()
+    paired = app._pair_ct_standards()
+    assert paired is not None and len(paired.ids) == len(primary.index)
+
+
 class _chain_state:
     """Point the comparison tab at a transfer chain over percent data."""
 
