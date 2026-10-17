@@ -1593,3 +1593,27 @@ def test_pairs_table_reports_duplicate_row_mappings(ct_app, tmp_path):
     rows = [str(app.ct_pairs_tree.item(item, "values")[0])
             for item in app.ct_pairs_tree.get_children()]
     assert any("both map the primary file 'bone_01'" in r for r in rows)
+
+
+def test_plan_done_after_dialog_closed_does_not_touch_dead_widgets(gui_app):
+    """R2-4: closing the plan dialog mid-run must not raise on destroyed widgets."""
+    app = gui_app
+    app._open_ct_plan_standards()
+    dialog = app._ct_plan_dialog
+    try:
+        dialog.destroy()  # closed without the handler that clears the reference
+        assert not dialog.winfo_exists()
+        with patch("tkinter.messagebox.showerror") as err:
+            app._on_ct_plan_done((True, ["s1", "s2"], ""))
+            app._on_ct_plan_done((False, None, "boom"))
+        assert not err.called
+        # and the cleared-reference case
+        app._ct_plan_dialog = None
+        with patch("tkinter.messagebox.showerror") as err:
+            app._on_ct_plan_done((True, ["s1"], ""))
+        assert not err.called
+        assert not app._ct_plan_running
+    finally:
+        if app._ct_plan_dialog is not None and app._ct_plan_dialog.winfo_exists():
+            app._ct_plan_dialog.destroy()
+        app._ct_plan_dialog = None

@@ -51577,6 +51577,11 @@ External Validation Performance (n={n_val}):
 
         ok, chosen, err = payload
         self._ct_plan_running = False
+        dialog = getattr(self, '_ct_plan_dialog', None)
+        if dialog is None or not dialog.winfo_exists():
+            # The dialog was closed while Kennard-Stone ran; its status label
+            # and tree are gone, so there is nothing (and no one) to update.
+            return
         if not ok:
             self.ct_plan_status_label.config(text="Kennard-Stone failed.",
                                              foreground=self.colors['warning'])
