@@ -1646,6 +1646,18 @@ def _captured_validate_run(app):
     return captured[0]
 
 
+def _captured_fit_run(app):
+    """Run Fit Selected inline, returning its (payload, label, context)."""
+    captured = []
+    with (patch.object(app, "_on_ct_fit_done",
+                       lambda payload, label, context: captured.append(
+                           (payload, label, context))),
+          patch("tkinter.messagebox.showerror")):
+        app._fit_ct_selected()
+    assert captured
+    return captured[0]
+
+
 def test_pairs_table_reload_discards_inflight_validate(inline_workers, tmp_path):
     """R3-1: loading a different pairs table invalidates a run in flight."""
     app, wl, primary, satellite = inline_workers
@@ -1795,42 +1807,80 @@ def test_eval_model_load_discards_board(inline_workers, tmp_path):
 
 
 def test_stale_callback_does_not_unlock_newer_run(inline_workers):
-    """R3-2: an old callback must leave the newer run's busy state alone."""
+    """R3-2: an old callback must leave the newer run's busy state alone.
+
+    Both launches go through the real `_run_ct_validate` (R5-4): run 1
+    completes and installs its board, run 2 launches with its callback
+    withheld, and run 1's callback is then delivered again — it must touch
+    nothing while run 2 owns the panel.
+    """
     app, wl, primary, satellite = inline_workers
     app._pair_ct_standards()
     payload1, ctx1 = _captured_validate_run(app)
+    app._on_ct_validate_done(payload1, ctx1)  # run 1 completes for real
+    assert app.ct_last_evaluation is payload1[1]
+    assert app._ct_validate_running is False
 
-    # a newer run is in flight when run 1's callback finally arrives
-    app._ct_active_run_id = ctx1["run_id"] + 1
-    app._ct_validate_running = True
-    app._set_ct_validate_busy(True, "Running evaluate_transfer ...")
-    app._on_ct_validate_done(payload1, ctx1)
-
+    payload2, ctx2 = _captured_validate_run(app)  # run 2 in flight
+    assert ctx2["run_id"] != ctx1["run_id"]
     assert app._ct_validate_running is True
     assert str(app.ct_validate_button.cget("state")) == "disabled"
-    assert app.ct_last_evaluation is None
 
-    # the newer run's callback still installs and unlocks normally
-    app._on_ct_validate_done(payload1, dict(ctx1, run_id=app._ct_active_run_id))
-    assert app.ct_last_evaluation is payload1[1]
+    app._on_ct_validate_done(payload1, ctx1)  # run 1's callback, late
+
+    assert app._ct_validate_running is True  # run 2 still owns the panel
+    assert str(app.ct_validate_button.cget("state")) == "disabled"
+    assert app.ct_last_evaluation is payload1[1]  # nothing re-installed
+
+    # the live run's callback still installs and unlocks normally
+    app._on_ct_validate_done(payload2, ctx2)
+    assert app.ct_last_evaluation is payload2[1]
     assert app._ct_validate_running is False
     assert str(app.ct_validate_button.cget("state")) == "normal"
 
 
-def test_stale_fit_callback_does_not_unlock_newer_run(ct_app):
-    """R3-2: a stale fit callback must not re-enable controls mid-run."""
-    app, *_ = ct_app
-    app._ct_active_run_id = 3
-    app._ct_validate_running = True
-    app._set_ct_validate_busy(True, "Fitting DS ...")
+def test_stale_fit_callback_does_not_unlock_newer_run(inline_workers):
+    """R3-2: a stale fit callback must not re-enable controls mid-run.
 
-    app._on_ct_fit_done((True, None, ""), "No correction",
-                        {"generation": getattr(app, "_ct_input_generation", 0),
-                         "run_id": 2})
+    Both launches go through the real `_fit_ct_selected` (R5-4): fit run 1
+    installs its transfer model, fit run 2 launches with its callback
+    withheld, and run 1's callback is then delivered again — run 2 must
+    stay busy and untouched.
+    """
+    app, wl, primary, satellite = inline_workers
+    app._pair_ct_standards()
+    with patch("tkinter.messagebox.showerror") as err:
+        app._run_ct_validate()
+    assert not err.called, err.call_args_list
+    target = next(
+        item for item in app.ct_leaderboard_tree.get_children()
+        if str(app.ct_leaderboard_tree.item(item, "values")[0]).startswith("DS")
+    )
+    app.ct_leaderboard_tree.selection_set(target)
 
+    payload1, label1, ctx1 = _captured_fit_run(app)
+    app._on_ct_fit_done(payload1, label1, ctx1)  # run 1 installs for real
+    assert app.ct_transfer_model is payload1[1]
+    assert app._ct_validate_running is False
+
+    payload2, label2, ctx2 = _captured_fit_run(app)  # run 2 in flight
+    assert ctx2["run_id"] != ctx1["run_id"]
     assert app._ct_validate_running is True
     assert str(app.ct_validate_button.cget("state")) == "disabled"
     assert str(app.ct_fit_selected_button.cget("state")) == "disabled"
+
+    app._on_ct_fit_done(payload1, label1, ctx1)  # run 1's callback, late
+
+    assert app._ct_validate_running is True  # run 2 still owns the panel
+    assert str(app.ct_validate_button.cget("state")) == "disabled"
+    assert str(app.ct_fit_selected_button.cget("state")) == "disabled"
+    assert app.ct_transfer_model is payload1[1]  # nothing re-installed
+
+    # the live run's callback installs and unlocks normally
+    app._on_ct_fit_done(payload2, label2, ctx2)
+    assert app.ct_transfer_model is payload2[1]
+    assert app._ct_validate_running is False
+    assert str(app.ct_validate_button.cget("state")) == "normal"
 
 
 def test_invalidation_abandons_inflight_run(inline_workers):
