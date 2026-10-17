@@ -6,7 +6,7 @@
 
 ### 0. NOW (2026-10-16): Wave 3 — F2 part 1 (PR #97) and part 1b (PR #98, `47f82fb`) MERGED; next is F2 part 2 (GUI)
 Wave 1 + 2 (PRs #83-#96) are merged; their summary is in the archive (Batch 2). Wave 3 order (§0a): F2 part 1 ✔ →
-F2 part 1b ✔ → F2 part 2 (GUI) → F1 part 1 (CVPlan) → F4/CS1/F3/F5/MW1/SP1-2. No open branches.
+F2 part 1b ✔ → F2 part 2 (GUI, in progress on `zcode/f2-part2-gui`) → F2 part 2b → F1 part 1 (CVPlan) → F4/CS1/F3/F5/MW1/SP1-2. Open branch: `zcode/f2-part2-gui` (GLM, worktree `.claude/worktrees/f2-part2-gui`).
 **F2 part 1** (plan `docs/plans/2026-10-05-F2-part1-transfer-validation-backend.md`): `transfer_evaluation`
 (`evaluate_transfer` leave-one-standard-out bake-off with "No correction" + primary reference rows, `fit_transfer`,
 `pair_standards_by_id`, `predict_fn_from_model`), centred low-rank PDS (`B_centred`), dual DS, prediction slope/bias;
@@ -31,38 +31,18 @@ evidence SESSION_LOG 2026-10-16). Driven by SPYDER Bone's 40 bones scanned on La
 joins (header / detected / user override) and the physical-match notes; ID pairing in the loaders (the GUI still
 pairs by row order: SPYDER found 0/40 rows correct in the user's earlier DS files — do not reuse those), a group
 column for standards, "Plan transfer standards", delete the dead `_build_ct_transfer_model`/`_load_ct_paired_spectra`.
-**Part 2 built (branch `zcode/f2-part2-gui`, plan `docs/plans/2026-10-16-F2-part2-ct-gui.md` as-built blocks) and
-through three review rounds (2026-10-17):** prediction models are fed spectra in the **primary's loaded scale**
-(`.dasp` files don't record their training scale; fits record `meta['primary_value_scale']`; Mode B, File Equalize
-and the Model-Comparison transfer chain all export that scale), reload/conversion clears all derived CT state
-behind an input-generation guard, "No correction" clears the active transfer, non-covering satellite grids are
-refused instead of extrapolated, pairs-table names strip spectral extensions, descending grids sort ascending
-before pairing, the ROI splice converts the whole spectrum's scale, legacy transfer files (no scale keys) keep
-their old behaviour but print a one-line warning, pairs-table naming collisions (folded IDs, duplicate rows) are
-reported in the status + pairs view instead of last-wins, and closing the plan-standards dialog mid-run is
-harmless. Round 3 (Codex confirm on rounds 1-2): one invalidation entry point + per-launch run ids make every
-pairing-input change (pairs table, re-pair, groups, eval model/settings) discard stale validate/fit results
-without a stale callback unlocking a newer run; **an active pairs table now DEFINES the pairs** (only its rows
-pair, unmatched files/rows are listed, "Clear Table" returns to ID matching — no silent fallback); a legacy chain
-step receives the previous recorded transfer's primary scale; descending new-data grids resample instead of
-"no overlap"; pairing keeps the table's conflict count; the older `_load_and_predict_ct` path uses the same
-scale funnel + legacy warning (like File Equalize, its frame is unwired — helpers + tests only).
-**Round 4 (Codex confirm on round 3, 2026-10-17):** a pairs table stays active even when zero rows resolve
-(after a reload or a failed parse) — pairing refuses with "fix the table or Clear Table" instead of silently
-reverting to ID matching; the "Custom (nm)" joins entry invalidates the board like the comboboxes (its
-variable is traced); invalidation abandons the active validate/fit run (stale callbacks touch nothing,
-buttons usable immediately); Clear Table drops table-derived group labels and keeps manual edits (group
-provenance is tracked); "files not in the table" counts only files no table row names.
-**Round 5 (Codex confirm on round 4, 2026-10-17):** a FAILED pairs-table reload now drops the old
-pairing, board and in-flight runs the moment the load attempt supersedes the old table (before the
-parse, error path included) while the failed table stays active, so Validate and Fit refuse until it
-is fixed or cleared; manual group edits win over a table reload (provenance-tracked, kept by Clear
-Table); ambiguous folded names count as "in the table" while still refusing to pair; the
-stale-callback tests launch both runs through the real validate/fit handlers.
-Found in round 2: the File Equalize UI (Section F) is not wired into the tab (helpers exist; nothing creates
-the `ct_eq_*` vars); round 3 found the same for `_load_and_predict_ct`'s `ct_new_satellite_dir_var` /
-`ct_prediction_text`.
-Full suite green (5173 passed / 26 skipped / 97 deselected, 2026-10-17 round 5; round 4 was 5170).
+**Part 2 built** (branch `zcode/f2-part2-gui`, plan `docs/plans/2026-10-16-F2-part2-ct-gui.md`, as-built blocks per
+review round): ID pairing in the loaders plus a pairs table (an active table alone defines the pairs; "Clear Table"
+returns to ID matching), group column, Validate & Compare panel (worker thread, leaderboard, joins control, Fit
+Selected), Plan Transfer Standards (Kennard-Stone), dead row-order code deleted. Prediction models get spectra in
+the **primary's loaded scale** (fits record `meta['primary_value_scale']`; legacy transfer files keep old behaviour
+with a one-line warning). Every input change goes through one invalidation entry point with per-launch run ids.
+Five review rounds (GLM, then Codex confirms) to a Codex MERGE verdict; full suite 5173 passed / 26 skipped.
+**Follow-ups:** the File Equalize UI (Section F) and `_load_and_predict_ct` have helpers and tests but no widgets in
+the tab (nothing creates `ct_eq_*`, `ct_new_satellite_dir_var`, `ct_prediction_text`): wire them or delete them.
+**Part 2b (after part 2):** `docs/plans/2026-10-17-F2-part2b-transfer-fit-regions-dn-joins.md`: a fit-regions option
+for the physical-match gain ("exclude water bands"), and detector joins from raw DN (Trek). Both found on SPYDER's
+Beasley FieldSpec 3/Trek pairs; no bone-specific mode.
 **Part 3:** `.dasp` per-instrument adapters; decide replace vs chain for a satellite slope/bias over a stored
 `bias_correction`; GUI Model Development reads `metrics_original` from a correction dict. When the satellite is
 coarser, offer refitting the model on primary spectra blurred to the satellite (roadmap CT5, rewritten).
