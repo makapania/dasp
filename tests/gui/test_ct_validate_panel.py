@@ -2050,6 +2050,29 @@ def test_pairing_keeps_collision_count_in_status(ct_app, tmp_path):
         app.colors["warning"])
 
 
+def _provision_load_and_predict_dir(app):
+    """Create the widgets/vars _load_and_predict_ct touches (its frame is not
+    wired into the tab either — same state a wired UI would hold)."""
+    saved_var = getattr(app, "ct_new_satellite_dir_var", None)
+    had_text = hasattr(app, "ct_prediction_text")
+    saved_text = getattr(app, "ct_prediction_text", None) if had_text else None
+    app.ct_new_satellite_dir_var = tk.StringVar()
+    app.ct_prediction_text = tk.Text(app.root)
+
+    def restore():
+        app.ct_prediction_text.destroy()
+        if saved_var is None:
+            delattr(app, "ct_new_satellite_dir_var")
+        else:
+            app.ct_new_satellite_dir_var = saved_var
+        if had_text:
+            app.ct_prediction_text = saved_text
+        else:
+            delattr(app, "ct_prediction_text")
+
+    return restore
+
+
 def _percent_satellite_dir(tmp_path, wl, satellite):
     """Directory of percent-reflectance satellite CSVs (header = wavelengths)."""
     X_pct = (satellite * 100.0).to_numpy()
@@ -2074,6 +2097,7 @@ def test_load_and_predict_routes_through_scale_funnel(physical_app, tmp_path):
     model = _regression_model_on(tmp_path, (primary * 100.0).to_numpy(), y, wl)
     app.ct_primary_model_dict = model
     d, X_pct = _percent_satellite_dir(tmp_path, wl, satellite)
+    restore_dir_var = _provision_load_and_predict_dir(app)
     app.ct_new_satellite_dir_var.set(str(d))
     app.ct_pred_y_pred = None
 
@@ -2089,7 +2113,7 @@ def test_load_and_predict_routes_through_scale_funnel(physical_app, tmp_path):
         np.testing.assert_allclose(np.asarray(app.ct_pred_y_pred), expected,
                                    rtol=1e-6)
     finally:
-        app.ct_new_satellite_dir_var.set("")
+        restore_dir_var()
 
 
 def test_load_and_predict_warns_on_legacy_transfer_file(physical_app, tmp_path,
@@ -2106,6 +2130,7 @@ def test_load_and_predict_warns_on_legacy_transfer_file(physical_app, tmp_path,
     model = _regression_model_on(tmp_path, (primary * 100.0).to_numpy(), y, wl)
     app.ct_primary_model_dict = model
     d, X_pct = _percent_satellite_dir(tmp_path, wl, satellite)
+    restore_dir_var = _provision_load_and_predict_dir(app)
     app.ct_new_satellite_dir_var.set(str(d))
     app.ct_pred_y_pred = None
 
@@ -2123,5 +2148,5 @@ def test_load_and_predict_warns_on_legacy_transfer_file(physical_app, tmp_path,
         np.testing.assert_allclose(np.asarray(app.ct_pred_y_pred), expected,
                                    rtol=1e-6)
     finally:
-        app.ct_new_satellite_dir_var.set("")
+        restore_dir_var()
 

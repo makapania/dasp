@@ -49047,14 +49047,21 @@ External Validation Performance (n={n_val}):
             X_satellite_common = resample_to_grid(X_satellite_new, wavelengths_satellite, common_wl)
 
             # Apply transfer model (ROI-aware: splices region back into full
-            # spectrum), converting percent reflectance to the fit scale
+            # spectrum) through the same funnel as Mode A: convert the loaded
+            # scale to the fit scale, warn about legacy files that predate
+            # scale recording, and hand the prediction model spectra in the
+            # primary's loaded scale.
             dir_metadata = getattr(self, '_last_dir_load_metadata', None)
             loaded_type, _, _ = _resolve_loaded_data_type(dir_metadata, X_satellite_new)
             new_scale = (
                 _loaded_value_scale(dir_metadata, X_satellite_new, loaded_type)
                 if loaded_type == 'reflectance' else None)
+            self._ct_legacy_scale_note(self.ct_pred_transfer_model, new_scale)
             X_transferred = self._apply_transfer_with_roi(
                 X_satellite_common, self.ct_pred_transfer_model, value_scale=new_scale)
+            p_scale, f_scale = self._ct_primary_scale_of(self.ct_pred_transfer_model)
+            if p_scale is not None and p_scale != f_scale:
+                X_transferred = X_transferred * (p_scale / f_scale)
 
             # Resample transferred spectra to primary model's wavelength grid
             metadata = self.ct_primary_model_dict.get('metadata', {})
