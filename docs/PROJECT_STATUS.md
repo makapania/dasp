@@ -53,10 +53,16 @@ reverting to ID matching; the "Custom (nm)" joins entry invalidates the board li
 variable is traced); invalidation abandons the active validate/fit run (stale callbacks touch nothing,
 buttons usable immediately); Clear Table drops table-derived group labels and keeps manual edits (group
 provenance is tracked); "files not in the table" counts only files no table row names.
+**Round 5 (Codex confirm on round 4, 2026-10-17):** a FAILED pairs-table reload now drops the old
+pairing, board and in-flight runs the moment the load attempt supersedes the old table (before the
+parse, error path included) while the failed table stays active, so Validate and Fit refuse until it
+is fixed or cleared; manual group edits win over a table reload (provenance-tracked, kept by Clear
+Table); ambiguous folded names count as "in the table" while still refusing to pair; the
+stale-callback tests launch both runs through the real validate/fit handlers.
 Found in round 2: the File Equalize UI (Section F) is not wired into the tab (helpers exist; nothing creates
 the `ct_eq_*` vars); round 3 found the same for `_load_and_predict_ct`'s `ct_new_satellite_dir_var` /
 `ct_prediction_text`.
-Full suite green (5170 passed / 26 skipped / 97 deselected, 2026-10-17 round 4; round 3 was 5164).
+Full suite green (5173 passed / 26 skipped / 97 deselected, 2026-10-17 round 5; round 4 was 5170).
 **Part 3:** `.dasp` per-instrument adapters; decide replace vs chain for a satellite slope/bias over a stored
 `bias_correction`; GUI Model Development reads `metrics_original` from a correction dict. When the satellite is
 coarser, offer refitting the model on primary spectra blurred to the satellite (roadmap CT5, rewritten).

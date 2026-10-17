@@ -1256,3 +1256,22 @@ is `planning/08_transfer.md` there.
   create exactly that state.
 - pytest heredoc gotcha (again): a bash heredoc carrying test code with em-dashes/quotes truncated
   mid-write on Windows Git Bash; prefer the Edit tool or `python - << PYEOF` file rewrites.
+
+## 2026-10-17 (c) — F2 part 2 review round 5 (Codex confirm on round 4)
+- **Invalidation keys off the ATTEMPT, not the success** (HIGH): `_load_ct_pairs_table` cleared the
+  rename mapping before parsing but only invalidated `ct_paired`/board after a good parse, so a
+  malformed replacement file left the previous pairing usable behind a fit-ready board (Validate
+  reused cached `ct_paired`). Rule: the moment an input change supersedes old state, run the
+  invalidation entry point — error paths included; the failed table still stays active (round 4),
+  so pairing refuses until fixed or cleared.
+- **Manual edits beat re-applied file state** (MEDIUM): a pairs-table reload re-seeds group labels
+  and had been overwriting manual Treeview overrides. Decision: manual wins — the reload skips IDs
+  whose label is not in table provenance (`ct_pair_groups_table_keys`), on first load and reload
+  alike; Clear Table keeps them too.
+- **Ambiguous folded names are still "named by the table"** (LOW): the collision lookup rightly
+  excludes them from pairing, but the named-file sets must include the colliding ids (the lookup
+  now returns key → ids for ambiguous names) or the status over-counts "files not in the table".
+- Test smell (round 5): stale-callback tests that assign run ids/busy state directly prove the
+  guard but not the launch bookkeeping. `_captured_validate_run` / new `_captured_fit_run` (patch
+  only the completion handler, workers inline) launch real runs with callbacks withheld — both
+  launches in both stale tests now go through the real `_run_ct_validate` / `_fit_ct_selected`.
