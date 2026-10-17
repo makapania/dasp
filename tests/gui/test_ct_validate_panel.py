@@ -1966,7 +1966,7 @@ def _descending_csv(tmp_path, name, wl, X_sat, n_samples=4):
     values = resample_to_grid(X_sat[:n_samples], wl, coarse)  # columns follow coarse
     lines = ["wavelength," + ",".join(f"s{i + 1}" for i in range(n_samples))]
     for j, w in enumerate(coarse):
-        lines.append(",".join(repr(float(w)))
+        lines.append(repr(float(w))
                      + "," + ",".join(repr(float(v)) for v in values[:, j]))
     path = tmp_path / name
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1993,7 +1993,7 @@ def test_mode_a_load_handler_accepts_descending_grid(physical_app, tmp_path):
 
     stored_wl, stored_X = app.new_satellite_data_predict
     np.testing.assert_allclose(stored_wl, tm.wavelengths_common)
-    expected = rgrid(values, coarse[::-1], tm.wavelengths_common)
+    expected = rgrid(values, coarse, tm.wavelengths_common)
     np.testing.assert_allclose(stored_X, expected, rtol=1e-6)
 
 
@@ -2021,7 +2021,7 @@ def test_mode_b_load_handler_accepts_descending_grid(physical_app, tmp_path):
 
     stored_wl, stored_X = app.new_satellite_data_export
     np.testing.assert_allclose(stored_wl, tm.wavelengths_common)
-    expected = rgrid(values, coarse[::-1], tm.wavelengths_common)
+    expected = rgrid(values, coarse, tm.wavelengths_common)
     np.testing.assert_allclose(stored_X, expected, rtol=1e-6)
 
 

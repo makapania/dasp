@@ -53355,8 +53355,17 @@ External Validation Performance (n={n_val}):
             if expected_wl is not None:
                 if len(wavelengths) != len(expected_wl) or not np.allclose(wavelengths, expected_wl, rtol=1e-3):
                     # Wavelengths don't match - offer to resample
-                    wl_range_loaded = f"{wavelengths[0]:.1f}-{wavelengths[-1]:.1f}"
-                    wl_range_expected = f"{expected_wl[0]:.1f}-{expected_wl[-1]:.1f}"
+                    # Some instruments write descending grids; the coverage
+                    # gate above compares min/max, so sort the grid (with the
+                    # data) ascending first and compare min/max here too —
+                    # otherwise a covering descending grid reads as no overlap.
+                    wl_arr = np.asarray(wavelengths, dtype=float)
+                    if wl_arr.size >= 2 and wl_arr[0] > wl_arr[-1]:
+                        order = np.argsort(wl_arr, kind='stable')
+                        wavelengths = wl_arr[order]
+                        X = np.asarray(X, dtype=float)[:, order]
+                    wl_range_loaded = f"{np.min(wavelengths):.1f}-{np.max(wavelengths):.1f}"
+                    wl_range_expected = f"{np.min(expected_wl):.1f}-{np.max(expected_wl):.1f}"
 
                     # Refuse outright when resampling would extrapolate outside
                     # the fitted range (interpolation inside it is fine)
@@ -53365,8 +53374,8 @@ External Validation Performance (n={n_val}):
                         return
 
                     # Check if ranges overlap enough for reasonable resampling
-                    overlap_start = max(wavelengths[0], expected_wl[0])
-                    overlap_end = min(wavelengths[-1], expected_wl[-1])
+                    overlap_start = max(np.min(wavelengths), np.min(expected_wl))
+                    overlap_end = min(np.max(wavelengths), np.max(expected_wl))
 
                     if overlap_start < overlap_end:
                         # Reasonable overlap - offer resampling
@@ -53396,7 +53405,7 @@ External Validation Performance (n={n_val}):
                             f"Wavelength ranges don't overlap!\n\n"
                             f"Loaded: {wl_range_loaded} nm\n"
                             f"Expected: {wl_range_expected} nm\n\n"
-                            f"Cannot proceed - data is incompatible."
+                            "Cannot proceed - data is incompatible."
                         )
                         return
             elif transfer_model is None:
@@ -54132,8 +54141,15 @@ External Validation Performance (n={n_val}):
                     # Wavelengths don't match - offer to resample
                     from spectral_predict.calibration_transfer import resample_to_grid
 
-                    wl_range_loaded = f"{wavelengths[0]:.1f}-{wavelengths[-1]:.1f}"
-                    wl_range_expected = f"{expected_wl[0]:.1f}-{expected_wl[-1]:.1f}"
+                    # Descending grids: sort ascending (with the data) and
+                    # compare min/max, or a covering grid reads as no overlap
+                    wl_arr = np.asarray(wavelengths, dtype=float)
+                    if wl_arr.size >= 2 and wl_arr[0] > wl_arr[-1]:
+                        order = np.argsort(wl_arr, kind='stable')
+                        wavelengths = wl_arr[order]
+                        X = np.asarray(X, dtype=float)[:, order]
+                    wl_range_loaded = f"{np.min(wavelengths):.1f}-{np.max(wavelengths):.1f}"
+                    wl_range_expected = f"{np.min(expected_wl):.1f}-{np.max(expected_wl):.1f}"
 
                     # Refuse outright when resampling would extrapolate outside
                     # the fitted range (interpolation inside it is fine)
@@ -54142,8 +54158,8 @@ External Validation Performance (n={n_val}):
                         return
 
                     # Check if ranges overlap enough for reasonable resampling
-                    overlap_start = max(wavelengths[0], expected_wl[0])
-                    overlap_end = min(wavelengths[-1], expected_wl[-1])
+                    overlap_start = max(np.min(wavelengths), np.min(expected_wl))
+                    overlap_end = min(np.max(wavelengths), np.max(expected_wl))
 
                     if overlap_start < overlap_end:
                         # Reasonable overlap - offer resampling
@@ -54173,7 +54189,7 @@ External Validation Performance (n={n_val}):
                             f"Wavelength ranges don't overlap!\n\n"
                             f"Loaded: {wl_range_loaded} nm\n"
                             f"Expected: {wl_range_expected} nm\n\n"
-                            f"Cannot proceed - data is incompatible."
+                            "Cannot proceed - data is incompatible."
                         )
                         return
             elif transfer_model is None:
