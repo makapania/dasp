@@ -3084,6 +3084,7 @@ class SpectralPredictApp:
         self.ct_eval_joins_custom_var = tk.StringVar(value="1000, 1800")
         self._ct_validate_running = False  # guards Validate/Fit double launches
         self._ct_eval_context = None  # frozen inputs of the last Validate run (for Fit)
+        self._ct_input_generation = 0  # bumped whenever the loaded standards change
         self._ct_plan_dialog = None  # Plan Transfer Standards Toplevel, if open
         self._ct_plan_running = False
         self.ct_plan_source_var = tk.StringVar(value="primary")
@@ -50479,8 +50480,9 @@ External Validation Performance (n={n_val}):
         Directory readers supply the IDs (file stems); sources with no IDs (a
         single CSV/NPY file) get positional row_N IDs and are flagged so pairing
         can say so. Header detector joins are captured here, once per load, and
-        never re-read from the shared metadata attribute later. Any previously
-        built pairing no longer matches the data and is cleared.
+        never re-read from the shared metadata attribute later. Any state built
+        from the previously loaded standards no longer matches the data and is
+        cleared (see ``_ct_invalidate_standards_state``).
         """
         ids = getattr(self, "_last_dir_ids", None) if os.path.isdir(path) else None
         if ids is None or len(ids) != X.shape[0]:
@@ -50502,8 +50504,77 @@ External Validation Performance (n={n_val}):
             self.current_satellite_df = df
             self.current_satellite_ids_positional = positional
             self.ct_satellite_header_joins = header_joins
-        self.ct_paired = None
+        self._ct_invalidate_standards_state()
         return df, positional
+
+    def _ct_invalidate_standards_state(self):
+        """Drop every piece of state derived from the previously loaded standards.
+
+        A reload or a Convert-button conversion changes the data the pairing,
+        the board and the fitted transfer were built from; keeping any of it
+        would silently mix sources. The input generation is bumped so a worker
+        still running on the old inputs has its result discarded. A loaded
+        pairs-table CSV is re-applied to the files loaded now (its rows are
+        re-checked and problems re-reported); manual Treeview groups belonged
+        to the old pairing and go with it. A transfer model loaded from a file
+        is kept — it is not panel state; the panel-fitted one is cleared.
+        """
+        self._ct_input_generation = getattr(self, '_ct_input_generation', 0) + 1
+        panel_model = self.ct_transfer_model
+        had_derived = any((
+            self.ct_paired is not None,
+            self.ct_last_evaluation is not None,
+            self.ct_pair_groups is not None,
+            self.ct_pairs_rename is not None,
+            panel_model is not None,
+        ))
+        self.ct_paired = None
+        self.ct_pair_resample_note = None
+        self.ct_pair_groups = None
+        self.ct_pairs_rename = None
+        self.ct_last_evaluation = None
+        self._ct_eval_context = None
+        self.ct_X_primary_common = None
+        self.ct_X_satellite_common = None
+        self.ct_wavelengths_common = None
+        if panel_model is not None:
+            self.ct_transfer_model = None
+            if self.current_transfer_model is panel_model:
+                self.current_transfer_model = None
+            self.ct_transfer_info_text.config(state='normal')
+            self.ct_transfer_info_text.delete('1.0', tk.END)
+            self.ct_transfer_info_text.config(state='disabled')
+            self.ct_save_tm_button.config(state='disabled')
+            self._update_active_transfer_model_status()
+        self._refresh_ct_pairs_tree()
+        self.ct_pairs_status_label.config(
+            text=("Standards changed — pairing, leaderboard and fitted transfer "
+                  "cleared." if had_derived else ""),
+            foreground=self.colors['text'])
+        for item in self.ct_leaderboard_tree.get_children():
+            self.ct_leaderboard_tree.delete(item)
+        self.ct_leaderboard_header_label.config(text="")
+        self.ct_diagnostics_text.config(state='normal')
+        self.ct_diagnostics_text.delete('1.0', tk.END)
+        self.ct_diagnostics_text.config(state='disabled')
+        self._set_ct_validate_busy(False)
+        if (self.ct_pairs_table_path_var.get()
+                and self.current_primary_df is not None
+                and self.current_satellite_df is not None):
+            self._load_ct_pairs_table()
+
+    def _ct_sync_converted_standards(self, which, X_converted):
+        """Write a Convert-button conversion into the pairing DataFrame.
+
+        Sample IDs and the wavelength grid are unchanged by the conversion, so
+        the existing index/columns are kept and only the values are replaced.
+        """
+        df_attr = 'current_primary_df' if which == 'primary' else 'current_satellite_df'
+        df = getattr(self, df_attr, None)
+        converted = np.asarray(X_converted, dtype=float)
+        if df is not None and df.shape == converted.shape:
+            setattr(self, df_attr, pd.DataFrame(
+                converted, index=df.index, columns=df.columns))
 
     @staticmethod
     def _ct_normalize_pair_id(name) -> str:
@@ -50928,6 +50999,7 @@ External Validation Performance (n={n_val}):
             predict=predict, model_wavelengths=model_wavelengths,
             ids=list(paired.ids), scale_note=scale_note,
             resample_note=self.ct_pair_resample_note,
+            generation=self._ct_input_generation,
             primary_id=os.path.basename(self.ct_primary_data_path_var.get()) or 'primary',
             satellite_id=os.path.basename(self.ct_satellite_data_path_var.get()) or 'satellite',
         )
@@ -50954,6 +51026,16 @@ External Validation Performance (n={n_val}):
         from tkinter import messagebox
 
         ok, ev, err = payload
+        if context.get('generation') != getattr(self, '_ct_input_generation', 0):
+            # The standards were reloaded or converted while the worker ran;
+            # the board was computed on inputs that no longer exist.
+            self._ct_validate_running = False
+            self._set_ct_validate_busy(False)
+            self.ct_validate_status_label.config(
+                text="The loaded standards changed while validating; result "
+                     "discarded. Run Validate & Compare again.",
+                foreground=self.colors['warning'])
+            return
         self._ct_validate_running = False
         if not ok:
             self._set_ct_validate_busy(False)
@@ -51092,6 +51174,15 @@ External Validation Performance (n={n_val}):
         from spectral_predict.calibration_transfer import TransferModel
 
         ok, result, err = payload
+        if context.get('generation') != getattr(self, '_ct_input_generation', 0):
+            # The standards were reloaded or converted while the fit ran.
+            self._ct_validate_running = False
+            self._set_ct_validate_busy(False)
+            self.ct_validate_status_label.config(
+                text="The loaded standards changed while fitting; result "
+                     "discarded. Nothing was installed.",
+                foreground=self.colors['warning'])
+            return
         self._ct_validate_running = False
         self._set_ct_validate_busy(False)
         if not ok:
@@ -54186,6 +54277,10 @@ External Validation Performance (n={n_val}):
         self.current_primary_data = (wavelengths, X_converted)
         self.ct_primary_data_type.set(target)
         self.ct_primary_was_converted = True
+        # Keep the pairing DataFrame in step and drop everything fitted on the
+        # unconverted values (pairing, board, fitted transfer)
+        self._ct_sync_converted_standards('primary', X_converted)
+        self._ct_invalidate_standards_state()
 
         # Update UI
         self.ct_primary_type_status_label.config(
@@ -54262,6 +54357,10 @@ External Validation Performance (n={n_val}):
         self.current_satellite_data = (wavelengths, X_converted)
         self.ct_satellite_data_type.set(target)
         self.ct_satellite_was_converted = True
+        # Keep the pairing DataFrame in step and drop everything fitted on the
+        # unconverted values (pairing, board, fitted transfer)
+        self._ct_sync_converted_standards('satellite', X_converted)
+        self._ct_invalidate_standards_state()
 
         # Update UI
         self.ct_satellite_type_status_label.config(

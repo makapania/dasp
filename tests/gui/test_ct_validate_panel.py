@@ -56,6 +56,14 @@ _CT_STATE_ATTRS = (
     "ct_X_satellite_common",
     "ct_pairs_table_path_var",
     "ct_pair_group_entry_var",
+    "_ct_input_generation",
+    "ct_primary_reflectance_scale",
+    "ct_satellite_reflectance_scale",
+    "new_satellite_data_predict",
+    "current_prediction_model_dict",
+    "current_prediction_model",
+    "ct_pred_value_scale",
+    "ct_pred_y_pred",
 )
 
 
@@ -711,6 +719,156 @@ def test_eval_model_loader_rejects_non_regression(ct_app, tmp_path):
             app._load_ct_eval_model()
     assert err.called
     assert app.ct_eval_model_dict is None
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: conversion/reload invalidation + input generation (B, C)
+# ---------------------------------------------------------------------------
+
+
+def _dummy_transfer_model(wl):
+    from spectral_predict.calibration_transfer import TransferModel
+
+    return TransferModel(
+        "p", "s", "tsr", np.asarray(wl, dtype=float),
+        {"slope": np.ones(len(wl)), "bias": np.zeros(len(wl))}, {})
+
+
+def test_convert_updates_pairing_data_and_invalidates(ct_app):
+    """B: Convert must not leave the pairing DataFrames with the old values."""
+    app, wl, primary, satellite = ct_app
+    app._pair_ct_standards()
+    assert app.ct_paired is not None
+    stale = _dummy_transfer_model(wl)
+    app.ct_transfer_model = stale
+    app.current_transfer_model = stale
+    app.ct_save_tm_button.config(state='normal')
+    gen = getattr(app, "_ct_input_generation", 0)
+
+    with patch.object(app, "_update_data_info"):
+        app._ct_primary_convert()
+        app._ct_satellite_convert()
+
+    # both DataFrames carry the converted values; IDs and grid untouched
+    np.testing.assert_allclose(
+        app.current_primary_df.to_numpy(), np.log10(1.0 / primary.to_numpy()),
+        rtol=1e-12)
+    np.testing.assert_allclose(
+        app.current_satellite_df.to_numpy(), np.log10(1.0 / satellite.to_numpy()),
+        rtol=1e-12)
+    assert list(app.current_primary_df.index) == list(primary.index)
+    assert list(app.current_primary_df.columns) == list(primary.columns)
+    # nothing derived from the unconverted values survives
+    assert app.ct_paired is None
+    assert app.ct_last_evaluation is None and app._ct_eval_context is None
+    assert app.ct_transfer_model is None and app.current_transfer_model is None
+    assert str(app.ct_save_tm_button.cget("state")) == "disabled"
+    assert getattr(app, "_ct_input_generation", 0) >= gen + 2
+
+
+def test_reload_clears_derived_state(inline_workers):
+    """C: reloading standards must clear pairing, board, diagnostics and model."""
+    app, wl, primary, satellite = inline_workers
+    app._pair_ct_standards()
+    with patch("tkinter.messagebox.showerror") as err:
+        app._run_ct_validate()
+    assert not err.called
+    assert app.ct_leaderboard_tree.get_children()
+    assert app.ct_diagnostics_text.get("1.0", "end-1c")
+
+    stale = _dummy_transfer_model(wl)
+    app.ct_transfer_model = stale
+    app.current_transfer_model = stale
+    app.ct_save_tm_button.config(state='normal')
+    app.ct_pair_groups = {"bone_01": "unitA"}
+
+    app._ct_store_loaded_standards(
+        'primary', 'folder', wl, primary.to_numpy(), None)
+
+    assert app.ct_paired is None
+    assert app.ct_last_evaluation is None and app._ct_eval_context is None
+    assert app.ct_pair_groups is None and app.ct_pairs_rename is None
+    assert app.ct_transfer_model is None and app.current_transfer_model is None
+    assert app.ct_X_primary_common is None and app.ct_wavelengths_common is None
+    assert str(app.ct_save_tm_button.cget("state")) == "disabled"
+    assert not app.ct_pairs_tree.get_children()
+    assert not app.ct_leaderboard_tree.get_children()
+    assert app.ct_diagnostics_text.get("1.0", "end-1c") == ""
+    assert str(app.ct_fit_selected_button.cget("state")) == "disabled"
+
+    # a transfer model loaded from a FILE is not panel state and survives
+    loaded = _dummy_transfer_model(wl)
+    app.current_transfer_model = loaded
+    app._ct_store_loaded_standards(
+        'satellite', 'folder', wl, satellite.to_numpy(), None)
+    assert app.current_transfer_model is loaded
+
+
+def test_reload_reapplies_pairs_table(ct_app, tmp_path):
+    """C (choice): a loaded pairs table is re-applied to the reloaded files."""
+    app, wl, primary, satellite = ct_app
+    sat_names = [f"LAB-B{int(i.split('_')[1]):02d}" for i in satellite.index]
+    sat = satellite.copy()
+    sat.index = sat_names
+    app.current_satellite_df = sat
+    table = pd.DataFrame(
+        {"primary": list(primary.index), "satellite": sat_names})
+    table_path = tmp_path / "pairs.csv"
+    table.to_csv(table_path, index=False)
+    app.ct_pairs_table_path_var.set(str(table_path))
+    app._load_ct_pairs_table()
+    assert len(app.ct_pairs_rename) == len(sat_names)
+
+    # reload only half the satellite files: the table is re-checked against
+    # what is loaded now (the vanished rows are re-reported, not kept silently)
+    keep = list(sat.index[:6])
+    app._last_dir_ids = keep
+    try:
+        with patch("tkinter.messagebox.showwarning") as warn:
+            app._ct_store_loaded_standards(
+                'satellite', str(tmp_path), wl, sat.loc[keep].to_numpy(), None)
+        assert warn.called
+    finally:
+        app._last_dir_ids = None
+    assert sorted(app.ct_pairs_rename) == sorted(keep)
+    assert "6 pairs" in str(app.ct_pairs_status_label.cget("text"))
+
+
+def test_stale_validate_result_discarded(inline_workers):
+    """C: the input generation discards results computed on replaced inputs."""
+    app, wl, primary, satellite = inline_workers
+    contexts = []
+    with (
+        patch.object(app, "_on_ct_validate_done",
+                     lambda payload, context: contexts.append((payload, context))),
+        patch("tkinter.messagebox.showerror"),
+    ):
+        app._run_ct_validate()
+    payload, context = contexts[0]
+    assert context["generation"] == getattr(app, "_ct_input_generation", 0)
+
+    app._ct_store_loaded_standards('primary', 'folder', wl, primary.to_numpy(), None)
+    assert context["generation"] != app._ct_input_generation
+    app._on_ct_validate_done(payload, context)
+
+    assert app.ct_last_evaluation is None  # the stale board was not installed
+    assert app._ct_validate_running is False
+    status = str(app.ct_validate_status_label.cget("text"))
+    assert "discarded" in status
+
+
+def test_stale_fit_result_discarded(ct_app):
+    """C: a fit finishing after the inputs changed installs nothing."""
+    app, *_ = ct_app
+    app._ct_input_generation = 5
+    app.ct_transfer_model = None
+    app.current_transfer_model = None
+
+    app._on_ct_fit_done((True, None, ""), "No correction", {"generation": 4})
+
+    assert app.ct_transfer_model is None and app.current_transfer_model is None
+    assert app._ct_validate_running is False
+    assert "discarded" in str(app.ct_validate_status_label.cget("text"))
 
 
 # ---------------------------------------------------------------------------
