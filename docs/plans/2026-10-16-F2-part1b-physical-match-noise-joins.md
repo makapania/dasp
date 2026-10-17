@@ -4,6 +4,26 @@ Branch `feat/ct-physical-match`. Follows F2 part 1 (PR #97, `transfer_evaluation
 which will then show these candidates, the noise map and the joins from the start. Evidence: SESSION_LOG
 2026-10-16 (SPYDER Bone's 40 real instrument pairs) and SPYDER `planning/08_transfer.md`.
 
+> **As built (2026-10-16).** Differences from the review block and text below:
+> - The estimator lives in `physical_match.py` (re-exported from `calibration_transfer`); the header reader is
+>   `spectral_diagnostics.read_asd_header_joins` (not in `readers/`), called by `io.read_asd_dir` for every file.
+> - **Equal weights inside the fit mask, not inverse-noise weights.** Noise weights leaned on the quietest channels
+>   and moved SPYDER's pooled gain 0.65 -> 0.73 (cross-unit M2045 3.20 -> 3.48). The noise map decides which channels
+>   take part; the noise variances still drive the sigma floor and the EIV correction (which changes the gain only in
+>   the third decimal once the fit is on a mean of 20-40 standards).
+> - D2 noise uses a correlation kernel fitted to the high-pass residual's autocorrelation (white, box 2-5,
+>   interpolation 1.5-4 channels), not "D2 minus its own smooth": that cannot separate noise from band structure at
+>   the D2 scale. Within 30% of known noise in tests; a white-noise formula reads ~0.45x on 2 nm-native data.
+> - Noisy-region quiet level is floored at 1e-6 absorbance (`NOISE_FLOOR`); without it noise-free synthetic bands
+>   were flagged as noise.
+> - Join detection: the "persistent flank step" test failed on real 1800 nm joins (curvature into the 1900 nm water
+>   band); replaced by sharpness (>= 3x the boundaries 2-4 channels away) and isolation (adjacent boundaries < half).
+> - `evaluate_transfer(joins='auto')` detects joins per fit from the fit rows of both instruments (union);
+>   diagnostics over all standards are report-only. Grouped-vs-LOSO warnings are condensed into one line.
+> - SPYDER acceptance (grouped by unit pair, reflectance): the physical-match rows rank 1-3 on all three models;
+>   M2045 3.12 / slope 0.96, water-removed 3.46 / 0.88, M1500 3.17 / 0.95 (best DS/PDS 3.97 / 0.27, 4.30 / 0.21,
+>   5.37 / 0.92). Tool: `tools/transfer_pairs_benchmark.py`.
+>
 > **Plan review (GLM 5.3 via zcode, DeepSeek Flash via opencode; both GO WITH CHANGES, 2026-10-16).** These
 > supersede the text below where they differ:
 > 1. **Serialisation.** `save_transfer_model` keeps only arrays and scalars. Store `blocks` as a (B, 2) float array,

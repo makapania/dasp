@@ -19,12 +19,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Sequence, Union
 
 import numpy as np
 import pandas as pd
 
 from . import calibration_transfer as ct
+from . import spectral_diagnostics as sd
+from .physical_match import PHYSICAL_MATCH_FORMAT_VERSION
 from .scoring import regression_figures_of_merit
 
 logger = logging.getLogger(__name__)
@@ -42,6 +44,7 @@ _METHOD_KINDS: dict[str, str] = {
     "ds_legacy": "spectral",
     "pred_slope_bias": "prediction",
     "pred_bias": "prediction",
+    "physical": "spectral",
 }
 
 _REQUIRED_SETTINGS: dict[str, tuple[str, ...]] = {
@@ -69,8 +72,11 @@ class TransferCandidate:
     Attributes:
         method: ``'none'``, ``'tsr'``, ``'tsr_bias'``, ``'pds'`` (centred, low rank),
             ``'ds'`` (centred dual-form ridge), ``'pred_slope_bias'``, ``'pred_bias'``,
-            or ``'pds_legacy'`` / ``'ds_legacy'`` (the pre-2026-10 estimators, for
-            comparing with existing settings).
+            ``'physical'`` (blur + band-depth gain per detector block; settings
+            ``sigma`` = ``'learn'`` or nm, ``gain`` = ``'per_block'`` or ``'single'``,
+            ``shift`` = bool; needs ``wavelengths`` and ``space``), or ``'pds_legacy'``
+            / ``'ds_legacy'`` (the pre-2026-10 estimators, for comparing with existing
+            settings).
         params: Sorted ``(name, value)`` pairs; build with ``TransferCandidate.make``.
     """
 
@@ -86,6 +92,15 @@ class TransferCandidate:
         missing = [k for k in _REQUIRED_SETTINGS.get(self.method, ()) if k not in dict(self.params)]
         if missing:
             raise ValueError(f"Transfer candidate {self.method!r} needs settings {missing}")
+        if self.method == "physical":
+            s = dict(self.params)
+            sig = s.get("sigma", "learn")
+            if not (sig == "learn" or (isinstance(sig, (int, float)) and sig >= 0)):
+                raise ValueError(f"physical sigma must be 'learn' or a number >= 0, got {sig!r}")
+            if s.get("gain", "per_block") not in ("per_block", "single"):
+                raise ValueError(
+                    f"physical gain must be 'per_block' or 'single', got {s['gain']!r}"
+                )
 
     @classmethod
     def make(cls, method: str, **params: Any) -> TransferCandidate:
@@ -122,6 +137,17 @@ class TransferCandidate:
             return f"DS (legacy, ridge {s['lam']:g})"
         if self.method == "pred_slope_bias":
             return "Prediction slope/bias"
+        if self.method == "physical":
+            sig = s.get("sigma", "learn")
+            if sig == "learn":
+                blur = "learned blur"
+            elif float(sig) == 0.0:
+                blur = "no blur"
+            else:
+                blur = f"blur {float(sig):g} nm"
+            gain = "one gain" if s.get("gain", "per_block") == "single" else "gain per block"
+            extra = ", shift" if s.get("shift", False) else ""
+            return f"Physical match ({blur}, {gain}{extra})"
         return "Prediction bias"
 
     @property
@@ -129,7 +155,7 @@ class TransferCandidate:
         """Fewest standards one fit of this candidate needs."""
         if self.method == "pds":
             return int(self.settings["rank"]) + 1
-        if self.method in ("tsr", "ds"):
+        if self.method in ("tsr", "ds", "physical"):
             return 2
         if self.method == "pred_slope_bias":
             return 3
@@ -144,17 +170,24 @@ class TransferEvaluation:
         leaderboard: One row per candidate, best first, plus the unranked reference
             row last when there is one.
         score_column: The column the leaderboard is sorted by (``'RMSEP'``,
-            ``'RMSD_vs_primary'`` or ``'spectral_RMSE'``).
+            ``'RMSD_vs_primary'``, ``'spectral_RMSE'`` or one of their ``_grouped``
+            forms).
         n_standards: Number of paired standards.
         n_candidates: Number of candidates that were scored (including "No
             correction"; failed candidates excluded). The best of many leave-one-out
             scores is mildly optimistic.
         ids: The standard IDs, in the row order of the out-of-fold arrays.
-        oof_predictions: Label -> out-of-fold prediction per standard.
+        oof_predictions: Label -> leave-one-standard-out prediction per standard.
         oof_residual_spectra: Label -> (n_standards, p) primary minus transferred
             spectra (spectral candidates and "No correction" only).
         candidates: Label -> the candidate, to pass to ``fit_transfer``.
         warnings: Plain-language cautions about the evaluation.
+        oof_predictions_grouped: Label -> leave-one-group-out prediction per standard
+            (only with ``groups``).
+        groups: The group of each standard, or None.
+        diagnostics: Joins (and their source), noisy regions of each instrument, and
+            where the satellite is much noisier; filled when ``wavelengths`` and
+            ``space`` are given.
     """
 
     leaderboard: pd.DataFrame
@@ -166,6 +199,9 @@ class TransferEvaluation:
     oof_residual_spectra: dict[str, np.ndarray] = field(default_factory=dict)
     candidates: dict[str, TransferCandidate] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    oof_predictions_grouped: dict[str, np.ndarray] = field(default_factory=dict)
+    groups: list | None = None
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
     @property
     def best(self) -> TransferCandidate:
@@ -174,7 +210,12 @@ class TransferEvaluation:
 
 
 def default_transfer_candidates(
-    n_standards: int, *, has_y: bool, has_predict: bool, n_wavelengths: int | None = None
+    n_standards: int,
+    *,
+    has_y: bool,
+    has_predict: bool,
+    n_wavelengths: int | None = None,
+    physical: bool = False,
 ) -> list[TransferCandidate]:
     """The default bake-off for ``n_standards`` paired standards.
 
@@ -186,6 +227,8 @@ def default_transfer_candidates(
         has_y: Reference values for the standards are available.
         has_predict: A prediction function (model) is available.
         n_wavelengths: Drop PDS windows wider than the spectrum.
+        physical: Add the physical-match candidates (they need wavelengths and a
+            spectral space; ``evaluate_transfer`` sets this when it has both).
 
     Returns:
         Candidates, "No correction" first.
@@ -203,6 +246,10 @@ def default_transfer_candidates(
     if n_fit >= 2:
         for lam_rel in DEFAULT_DS_LAM_REL:
             out.append(TransferCandidate.make("ds", lam_rel=lam_rel))
+        if physical:
+            out.append(TransferCandidate.make("physical", sigma="learn", gain="per_block"))
+            out.append(TransferCandidate.make("physical", sigma="learn", gain="single"))
+            out.append(TransferCandidate.make("physical", sigma=0.0, gain="per_block"))
     if has_y and has_predict:
         out.append(TransferCandidate.make("pred_bias"))
         if n_fit >= 3:
@@ -225,6 +272,29 @@ def _check_predictions(values: Any, m: int) -> np.ndarray:
         raise ValueError("predict must return numeric values (regression models)") from exc
 
 
+JoinsArg = Union[str, Sequence[float], None]
+
+
+def _fold_joins(
+    Xp: np.ndarray, Xs: np.ndarray, wl: np.ndarray, space: str, joins: JoinsArg
+) -> tuple[tuple[float, ...], str]:
+    """Joins for one fit: given ones as they are; ``'auto'`` = detected from these rows
+    of both instruments (union, merged within 5 nm)."""
+    if joins is None:
+        return (), "none"
+    if isinstance(joins, str):
+        if joins != "auto":
+            raise ValueError(f"joins must be 'auto', None or wavelengths, got {joins!r}")
+        found: list[float] = []
+        for X in (Xs, Xp):
+            det = sd.detect_detector_joins(X, wl, space=space)
+            for j in det.joins:
+                if all(abs(j - f) > 5.0 for f in found):
+                    found.append(j)
+        return tuple(sorted(found)), ("detected" if found else "none")
+    return tuple(sorted(float(j) for j in joins)), "given"
+
+
 def fit_transfer(
     candidate: TransferCandidate,
     X_primary: np.ndarray,
@@ -233,6 +303,8 @@ def fit_transfer(
     y: np.ndarray | None = None,
     predict: PredictFn | None = None,
     wavelengths: np.ndarray | None = None,
+    space: str | None = None,
+    joins: JoinsArg = "auto",
     primary_id: str = "primary",
     satellite_id: str = "satellite",
 ) -> ct.TransferModel | dict | None:
@@ -244,7 +316,12 @@ def fit_transfer(
         X_satellite: Satellite spectra of the same standards in the same row order.
         y: Reference values (prediction corrections only).
         predict: Model prediction function (prediction corrections only).
-        wavelengths: Common grid stored in the transfer model (default 0..p-1).
+        wavelengths: Common grid stored in the transfer model (default 0..p-1);
+            required for the physical match.
+        space: ``'reflectance'`` or ``'absorbance'``; required for the physical match.
+        joins: Detector joins for the physical match: ``'auto'`` detects them from
+            these standards, ``None`` means one block, or give the wavelengths (from a
+            file header or the user; see ``spectral_diagnostics.resolve_joins``).
         primary_id: Stored in the transfer model.
         satellite_id: Stored in the transfer model.
 
@@ -255,8 +332,9 @@ def fit_transfer(
         prediction correction.
 
     Raises:
-        ValueError: Shapes differ, too few standards, or a prediction correction
-            without ``y`` and ``predict``.
+        ValueError: Shapes differ, too few standards, a prediction correction
+            without ``y`` and ``predict``, or a physical match without wavelengths
+            and space.
     """
     Xp = np.asarray(X_primary, dtype=np.float64)
     Xs = np.asarray(X_satellite, dtype=np.float64)
@@ -284,6 +362,10 @@ def fit_transfer(
             y_arr, y_sat, fit_slope=candidate.method == "pred_slope_bias"
         )
 
+    wl = np.arange(p, dtype=np.float64) if wavelengths is None else np.asarray(wavelengths)
+    if wl.shape != (p,):
+        raise ValueError(f"wavelengths has shape {wl.shape} for spectra with {p} columns")
+    meta: dict[str, Any] = {"candidate": candidate.label, "n_standards": int(n)}
     if candidate.method in ("tsr", "tsr_bias"):
         method = "tsr"
         params = ct.estimate_tsr(
@@ -299,30 +381,74 @@ def fit_transfer(
     elif candidate.method == "ds":
         method = "ds"
         params = ct.estimate_ds_dual(Xp, Xs, lam_rel=float(s["lam_rel"]))
+    elif candidate.method == "physical":
+        if wavelengths is None or space is None:
+            raise ValueError(f"{candidate.label} needs wavelengths and space")
+        method = "physical_match"
+        fold_joins, joins_source = _fold_joins(Xp, Xs, wl, space, joins)
+        sig = s.get("sigma", "learn")
+        params = ct.estimate_physical_match(
+            Xp,
+            Xs,
+            wl,
+            space=space,
+            joins=fold_joins,
+            sigma=sig if sig == "learn" else float(sig),
+            gain=s.get("gain", "per_block"),
+            shift=bool(s.get("shift", False)),
+        )
+        meta.update(
+            joins=list(fold_joins), joins_source=joins_source, notes=params.get("notes", "")
+        )
     else:  # ds_legacy
         method = "ds"
         params = {"A": ct.estimate_ds(Xp, Xs, lam=float(s["lam"]))}
-    wl = np.arange(p, dtype=np.float64) if wavelengths is None else np.asarray(wavelengths)
-    if wl.shape != (p,):
-        raise ValueError(f"wavelengths has shape {wl.shape} for spectra with {p} columns")
+    if candidate.method in ("pds", "ds"):
+        meta["format_version"] = ct.TRANSFER_FORMAT_VERSION
+    elif candidate.method == "physical":
+        meta["format_version"] = PHYSICAL_MATCH_FORMAT_VERSION
+    else:
+        meta["format_version"] = 1
     return ct.TransferModel(
         primary_id=primary_id,
         satellite_id=satellite_id,
         method=method,
         wavelengths_common=wl,
         params=params,
-        meta={
-            "candidate": candidate.label,
-            "n_standards": int(n),
-            "format_version": (
-                ct.TRANSFER_FORMAT_VERSION if candidate.method in ("pds", "ds") else 1
-            ),
-        },
+        meta=meta,
     )
 
 
 def _rmsd(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.sqrt(np.mean((a - b) ** 2)))
+
+
+def _slope(x: np.ndarray, y: np.ndarray) -> float:
+    if x.size < 2 or float(np.std(x)) == 0.0:
+        return float("nan")
+    return float(np.polyfit(x, y, 1)[0])
+
+
+def _check_groups(
+    groups: Sequence[Any] | None, n: int, warnings_out: list[str]
+) -> np.ndarray | None:
+    if groups is None:
+        return None
+    g = np.asarray([str(v) for v in groups], dtype=object)
+    if g.shape[0] != n:
+        raise ValueError(f"groups has {g.shape[0]} entries for {n} standards")
+    labels, counts = np.unique(g.astype(str), return_counts=True)
+    if labels.size < 2:
+        warnings_out.append("All standards are in one group; only leave-one-out is scored.")
+        return None
+    if labels.size == 2:
+        warnings_out.append(
+            "Grouped scores fit on one group and test on the other (2 groups); each fit "
+            "uses only part of the standards."
+        )
+    elif counts.min() < 3:
+        warnings_out.append("Some groups have fewer than 3 standards; grouped scores are noisy.")
+    return g
 
 
 def evaluate_transfer(
@@ -335,13 +461,25 @@ def evaluate_transfer(
     ids: Sequence[Any] | None = None,
     y_range_reference: tuple[float, float] | None = None,
     rank_by: str = "auto",
+    groups: Sequence[Any] | None = None,
+    wavelengths: Sequence[float] | None = None,
+    space: str | None = None,
+    joins: JoinsArg = "auto",
+    model_wavelengths: Sequence[float] | None = None,
 ) -> TransferEvaluation:
-    """Compare transfer methods by leave-one-standard-out.
+    """Compare transfer methods by leave-one-standard-out, and by group when given.
 
     For each candidate and each standard i, the candidate is fitted on the other
     standards, satellite spectrum i is transformed (or its prediction corrected), and
     the result is scored against standard i. Standard i's spectrum and y are never
     used to fit the transfer that scores it.
+
+    Leave-one-out shares a session's effects (presentation, drift, that day's noise)
+    between the fit and the scored standard, so it favours methods that learn the
+    session. On SPYDER Bone's paired bones it ranked PDS first (RMSD 2.82, slope 0.70)
+    though PDS failed across instrument units (3.92, slope 0.38). Give ``groups`` (unit,
+    session or batch) to also score leave-one-group-out; the board is then ranked by
+    the grouped score.
 
     Args:
         X_primary: Primary spectra of the standards, (n, p), on a grid common with
@@ -358,19 +496,30 @@ def evaluate_transfer(
             the out-of-fold arrays (default 0..n-1).
         y_range_reference: (min, max) of the model's calibration y. A warning is
             raised when the standards span much less of it.
-        rank_by: Leaderboard sort column. ``'auto'`` ranks by ``RMSD_vs_primary``
-            when there is a model, else by ``spectral_RMSE``. ``RMSD_vs_primary`` is
-            the transfer's own error in y units: RMSEP also carries the model's error
-            on each standard, and on a few standards a transfer error can cancel it by
-            chance. ``'RMSEP'`` (needs y), ``'RMSD_vs_primary'`` (needs a model) and
-            ``'spectral_RMSE'`` are accepted.
+        rank_by: Leaderboard sort column. ``'auto'`` ranks by the grouped
+            ``RMSD_vs_primary`` with groups, else ``RMSD_vs_primary`` with a model,
+            else (grouped) ``spectral_RMSE``. ``RMSD_vs_primary`` is the transfer's own
+            error in y units: RMSEP also carries the model's error on each standard,
+            and on a few standards a transfer error can cancel it by chance.
+            ``'RMSEP'``, ``'RMSD_vs_primary'``, ``'spectral_RMSE'`` and their
+            ``_grouped`` forms are accepted.
+        groups: Group of each standard (instrument unit, session, batch).
+        wavelengths: The common grid. With ``space`` it enables the physical-match
+            candidates and the noise and join diagnostics.
+        space: ``'reflectance'`` (0-1) or ``'absorbance'``.
+        joins: Detector joins: ``'auto'`` (detected inside each fit from its own
+            standards), ``None`` (one block), or wavelengths from a header or the user.
+        model_wavelengths: Wavelengths the model reads; a warning names any that fall
+            where the satellite is much noisier than the primary.
 
     Returns:
         A ``TransferEvaluation``.
 
     Raises:
         ValueError: Fewer than 3 standards, mismatched shapes, non-finite spectra or
-            y, ``y`` without ``predict``, or a ``rank_by`` the inputs cannot score.
+            y, ``y`` without ``predict``, ``groups`` of the wrong length, physical
+            candidates without wavelengths and space, or a ``rank_by`` the inputs
+            cannot score.
     """
     Xp = np.asarray(X_primary, dtype=np.float64)
     Xs = np.asarray(X_satellite, dtype=np.float64)
@@ -397,16 +546,30 @@ def evaluate_transfer(
             raise ValueError("y needs a predict function: RMSEP is a prediction error")
     if ids is not None and len(ids) != n:
         raise ValueError(f"ids has {len(ids)} entries for {n} standards")
+    wl = None
+    if wavelengths is not None:
+        wl = sd.check_wavelengths(wavelengths, p)
+    if space is not None:
+        sd.check_space(space)
+    if candidates is not None and any(c.method == "physical" for c in candidates):
+        if wl is None or space is None:
+            raise ValueError("Physical-match candidates need wavelengths and space")
+
+    warnings_out: list[str] = []
+    g = _check_groups(groups, n, warnings_out)
 
     if candidates is None:
         candidates = default_transfer_candidates(
-            n, has_y=y_arr is not None, has_predict=predict is not None, n_wavelengths=p
+            n,
+            has_y=y_arr is not None,
+            has_predict=predict is not None,
+            n_wavelengths=p,
+            physical=wl is not None and space is not None,
         )
     cand_list = list(dict.fromkeys(candidates))
     if not any(c.method == "none" for c in cand_list):
         cand_list.insert(0, TransferCandidate.make("none"))
 
-    warnings_out: list[str] = []
     if n < 5:
         warnings_out.append(
             f"Only {n} standards: each leave-one-out score rests on {n} predictions, "
@@ -420,13 +583,26 @@ def evaluate_transfer(
                 "fitted on them extrapolates."
             )
 
+    diagnostics: dict[str, Any] = {}
+    if wl is not None and space is not None:
+        diagnostics = _diagnostics(Xp, Xs, wl, space, joins, model_wavelengths, warnings_out)
+
     y_primary = y_sat = None
     if predict is not None:
         y_primary = _check_predictions(predict(Xp), n)
         y_sat = _check_predictions(predict(Xs), n)
 
+    fit_kw = {"wavelengths": wl, "space": space, "joins": joins}
+    loso_folds = [(np.flatnonzero(np.arange(n) != i), np.array([i])) for i in range(n)]
+    group_folds = None
+    if g is not None:
+        group_folds = [
+            (np.flatnonzero(g != lab), np.flatnonzero(g == lab)) for lab in dict.fromkeys(g)
+        ]
+
     rows: list[dict[str, Any]] = []
     oof_pred: dict[str, np.ndarray] = {}
+    oof_pred_g: dict[str, np.ndarray] = {}
     oof_res: dict[str, np.ndarray] = {}
     by_label: dict[str, TransferCandidate] = {}
 
@@ -455,7 +631,7 @@ def evaluate_transfer(
             rows.append(row)
             continue
         try:
-            pred, Z = _loso(cand, Xp, Xs, y_arr, predict, y_sat)
+            pred, Z = _out_of_fold(cand, Xp, Xs, y_arr, predict, y_sat, loso_folds, fit_kw)
         except (np.linalg.LinAlgError, ValueError) as exc:
             logger.warning("Transfer candidate %s failed: %s", label, exc)
             row["error"] = str(exc)
@@ -467,18 +643,41 @@ def evaluate_transfer(
         if pred is not None:
             oof_pred[label] = pred
             row["RMSD_vs_primary"] = _rmsd(pred, y_primary)
+            row["Slope_vs_primary"] = _slope(y_primary, pred)
             if y_arr is not None:
                 row.update(_fom_columns(y_arr, pred))
+        if group_folds is not None:
+            row["error_grouped"] = _grouped_scores(
+                row,
+                cand,
+                Xp,
+                Xs,
+                y_arr,
+                predict,
+                y_sat,
+                y_primary,
+                group_folds,
+                fit_kw,
+                oof_pred_g,
+            )
         rows.append(row)
 
     score_column = _resolve_rank_by(
-        rank_by, has_y=y_arr is not None, has_predict=predict is not None
+        rank_by,
+        has_y=y_arr is not None,
+        has_predict=predict is not None,
+        has_groups=group_folds is not None,
     )
 
     board = pd.DataFrame(rows)
-    for col in ("RMSEP", "Bias", "SEP", "Slope", "Intercept", "RMSD_vs_primary", "spectral_RMSE"):
+    for col in _SCORE_COLUMNS:
         if col not in board:
             board[col] = np.nan
+    if group_folds is not None:
+        if "error_grouped" in board:
+            board["error_grouped"] = board["error_grouped"].fillna("")
+        else:
+            board["error_grouped"] = ""
     none_score = float(board.loc[board["method"] == "none", score_column].iloc[0])
     if np.isfinite(none_score) and none_score > 0:
         board["improvement"] = 1.0 - board[score_column] / none_score
@@ -491,6 +690,8 @@ def evaluate_transfer(
     n_scored = int(len(ranked))
     if not ranked.empty and ranked.iloc[0]["method"] == "none":
         warnings_out.append("No method beat No correction on these standards.")
+    if group_folds is not None and predict is not None:
+        warnings_out.extend(_grouped_warnings(board, y_primary))
 
     if y_arr is not None:
         ref = {
@@ -516,21 +717,159 @@ def evaluate_transfer(
         oof_residual_spectra=oof_res,
         candidates=by_label,
         warnings=warnings_out,
+        oof_predictions_grouped=oof_pred_g,
+        groups=list(g) if g is not None else None,
+        diagnostics=diagnostics,
     )
 
 
-def _resolve_rank_by(rank_by: str, *, has_y: bool, has_predict: bool) -> str:
+_SCORE_COLUMNS = (
+    "RMSEP",
+    "Bias",
+    "SEP",
+    "Slope",
+    "Intercept",
+    "RMSD_vs_primary",
+    "Slope_vs_primary",
+    "spectral_RMSE",
+    "RMSD_vs_primary_grouped",
+    "Slope_vs_primary_grouped",
+    "RMSEP_grouped",
+    "spectral_RMSE_grouped",
+)
+
+
+def _grouped_scores(
+    row: dict[str, Any],
+    cand: TransferCandidate,
+    Xp: np.ndarray,
+    Xs: np.ndarray,
+    y_arr: np.ndarray | None,
+    predict: PredictFn | None,
+    y_sat: np.ndarray | None,
+    y_primary: np.ndarray | None,
+    group_folds: list[tuple[np.ndarray, np.ndarray]],
+    fit_kw: dict[str, Any],
+    oof_pred_g: dict[str, np.ndarray],
+) -> str:
+    """Fill the grouped columns of ``row``; return an error text ('' when scored)."""
+    smallest_fit = min(tr.size for tr, _ in group_folds)
+    if cand.min_fit_standards > smallest_fit:
+        return f"needs {cand.min_fit_standards} standards per fit"
+    try:
+        pred_g, Z_g = _out_of_fold(cand, Xp, Xs, y_arr, predict, y_sat, group_folds, fit_kw)
+    except (np.linalg.LinAlgError, ValueError) as exc:
+        logger.warning("Transfer candidate %s failed (grouped): %s", row["label"], exc)
+        return str(exc)
+    if Z_g is not None:
+        row["spectral_RMSE_grouped"] = float(np.mean(np.sqrt(np.mean((Z_g - Xp) ** 2, axis=1))))
+    if pred_g is not None:
+        oof_pred_g[row["label"]] = pred_g
+        row["RMSD_vs_primary_grouped"] = _rmsd(pred_g, y_primary)
+        row["Slope_vs_primary_grouped"] = _slope(y_primary, pred_g)
+        if y_arr is not None:
+            row["RMSEP_grouped"] = _rmsd(pred_g, y_arr)
+    return ""
+
+
+def _grouped_warnings(board: pd.DataFrame, y_primary: np.ndarray) -> list[str]:
+    out: list[str] = []
+    ok = board[board["RMSD_vs_primary"].notna() & board["RMSD_vs_primary_grouped"].notna()]
+    if ok.empty:
+        return out
+    best_loso = ok.loc[ok["RMSD_vs_primary"].idxmin(), "label"]
+    best_grp = ok.loc[ok["RMSD_vs_primary_grouped"].idxmin(), "label"]
+    if best_loso != best_grp:
+        out.append(
+            f"Leave-one-out favours {best_loso}, but across groups {best_grp} transfers "
+            "better: the leave-one-out score shares each session's effects between fit and "
+            "test."
+        )
+    spread = float(np.ptp(y_primary)) if y_primary.size else 0.0
+    worse = []
+    for _, r in ok.iterrows():
+        if r["method"] == "none":
+            continue
+        a, b = float(r["RMSD_vs_primary"]), float(r["RMSD_vs_primary_grouped"])
+        if b > 1.25 * a and (b - a) > 0.1 * spread:
+            worse.append(f"{r['label']} ({b:.3g} vs {a:.3g})")
+    if worse:
+        shown = "; ".join(worse[:4]) + (f"; and {len(worse) - 4} more" if len(worse) > 4 else "")
+        out.append(
+            "Much worse across groups than leave-one-out (they learn the session, or have "
+            f"too few standards per fit): {shown}."
+        )
+    return out
+
+
+def _diagnostics(
+    Xp: np.ndarray,
+    Xs: np.ndarray,
+    wl: np.ndarray,
+    space: str,
+    joins: JoinsArg,
+    model_wavelengths: Sequence[float] | None,
+    warnings_out: list[str],
+) -> dict[str, Any]:
+    """Report-only diagnostics over all standards (no fit uses them)."""
+    fold_joins, source = _fold_joins(Xp, Xs, wl, space, joins)
+    comp = sd.noise_comparison(Xp, Xs, wl, space=space, joins=fold_joins)
+    out: dict[str, Any] = {
+        "joins": list(fold_joins),
+        "joins_source": source,
+        "primary_noisy_regions": comp.primary_noisy,
+        "satellite_noisy_regions": comp.satellite_noisy,
+        "satellite_much_noisier": comp.regions,
+        "noise_ratio": comp.ratio,
+    }
+    if model_wavelengths is not None:
+        mw = np.asarray(model_wavelengths, dtype=np.float64)
+        on_model = np.isin(wl, mw) if np.isin(mw, wl).all() else (wl >= mw.min()) & (wl <= mw.max())
+        noisy = sd.regions_mask(comp.satellite_noisy, wl) & on_model
+        if noisy.any():
+            span = ", ".join(
+                f"{lo:g}-{hi:g}"
+                for lo, hi in comp.satellite_noisy
+                if np.any((mw >= lo) & (mw <= hi))
+            )
+            warnings_out.append(
+                f"The model reads {span} nm, where the satellite is far noisier than the "
+                "rest of its detector. No transfer removes noise."
+            )
+        much = sd.regions_mask(comp.regions, wl) & on_model
+        if much.any():
+            factor = float(np.median(comp.ratio[much]))
+            warnings_out.append(
+                f"At the wavelengths the model reads, the satellite is ~{factor:.0f}x noisier "
+                "than the primary. No transfer removes noise; its predictions will scatter "
+                "more than the primary's."
+            )
+    return out
+
+
+def _resolve_rank_by(
+    rank_by: str, *, has_y: bool, has_predict: bool, has_groups: bool = False
+) -> str:
     if rank_by == "auto":
-        return "RMSD_vs_primary" if has_predict else "spectral_RMSE"
+        base = "RMSD_vs_primary" if has_predict else "spectral_RMSE"
+        return f"{base}_grouped" if has_groups else base
     available = {
         "RMSEP": has_y and has_predict,
         "RMSD_vs_primary": has_predict,
         "spectral_RMSE": True,
+        "RMSEP_grouped": has_y and has_predict and has_groups,
+        "RMSD_vs_primary_grouped": has_predict and has_groups,
+        "spectral_RMSE_grouped": has_groups,
     }
     if rank_by not in available:
         raise ValueError(f"rank_by must be 'auto' or one of {sorted(available)}, got {rank_by!r}")
     if not available[rank_by]:
-        need = "y and a model" if rank_by == "RMSEP" else "a model"
+        base = rank_by.removesuffix("_grouped")
+        need = (
+            "y and a model" if base == "RMSEP" else ("a model" if base != "spectral_RMSE" else "")
+        )
+        if rank_by.endswith("_grouped"):
+            need = f"{need} and groups" if need else "groups"
         raise ValueError(f"rank_by={rank_by!r} needs {need}")
     return rank_by
 
@@ -546,32 +885,36 @@ def _fom_columns(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
     }
 
 
-def _loso(
+def _out_of_fold(
     cand: TransferCandidate,
     Xp: np.ndarray,
     Xs: np.ndarray,
     y: np.ndarray | None,
     predict: PredictFn | None,
     y_sat: np.ndarray | None,
+    folds: Sequence[tuple[np.ndarray, np.ndarray]],
+    fit_kw: dict[str, Any],
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
-    """Out-of-fold predictions and transferred spectra for one candidate."""
+    """Out-of-fold predictions and transferred spectra for one candidate.
+
+    Every fold is fitted on its training rows only; joins detected with ``'auto'``
+    and the physical match's noise maps are computed from those rows too.
+    """
     n = Xs.shape[0]
     if cand.kind == "none":
         return (y_sat.copy() if y_sat is not None else None), Xs.copy()
 
     if cand.kind == "prediction":
         pred = np.empty(n)
-        for i in range(n):
-            keep = np.arange(n) != i
-            corr = fit_transfer(cand, Xp[keep], Xs[keep], y=y[keep], predict=predict)
-            pred[i] = float(ct.apply_prediction_correction(y_sat[i : i + 1], corr)[0])
+        for tr, te in folds:
+            corr = fit_transfer(cand, Xp[tr], Xs[tr], y=y[tr], predict=predict)
+            pred[te] = ct.apply_prediction_correction(y_sat[te], corr)
         return pred, None
 
     Z = np.empty_like(Xs)
-    for i in range(n):
-        keep = np.arange(n) != i
-        tm = fit_transfer(cand, Xp[keep], Xs[keep])
-        Z[i] = ct.apply_transfer_dispatch(Xs[i : i + 1], tm)[0]
+    for tr, te in folds:
+        tm = fit_transfer(cand, Xp[tr], Xs[tr], **fit_kw)
+        Z[te] = ct.apply_transfer_dispatch(Xs[te], tm)
     if not np.isfinite(Z).all():
         raise ValueError("transfer produced non-finite spectra")
     pred = _check_predictions(predict(Z), n) if predict is not None else None

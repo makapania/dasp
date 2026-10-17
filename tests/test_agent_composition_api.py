@@ -84,6 +84,20 @@ PRIMITIVES: dict[str, list[str]] = {
         "TransferModel",
         "save_transfer_model",
         "load_transfer_model",
+        # F2 part 1b
+        "estimate_physical_match",
+        "apply_physical_match",
+    ],
+    "spectral_diagnostics": [
+        "estimate_noise",
+        "noise_profile",
+        "noisy_regions",
+        "noise_comparison",
+        "detect_detector_joins",
+        "resolve_joins",
+        "read_asd_header_joins",
+        "NoiseEstimate",
+        "JoinDetection",
     ],
     "transfer_evaluation": [
         "evaluate_transfer",

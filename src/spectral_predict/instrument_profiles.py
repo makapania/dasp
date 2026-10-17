@@ -416,41 +416,36 @@ def estimate_smoothing_between_instruments(
     X_low: np.ndarray,
     sigma_candidates: List[float],
 ) -> float:
+    """Gaussian blur (in channels of the high-detail grid) that best turns the
+    high-detail spectra into the low-detail ones.
+
+    Rows of ``X_high`` and ``X_low`` are the same samples. The blur is fitted with a
+    free band-depth gain (``physical_match.estimate_physical_match``): the earlier
+    plain-MSE search had no gain term, so it read a band-depth difference between
+    instruments as blur and ran to the top of its grid (SPYDER Bone's LabSpec pairs:
+    bands 1.6x deeper explained most of the difference, blur ~18%). The learned sigma
+    (nm) is converted to channels and snapped to the nearest of ``sigma_candidates``.
+    For the gain itself, the joins and the noise handling, use
+    ``estimate_physical_match`` directly.
+
+    Returns:
+        The chosen entry of ``sigma_candidates`` (channels of the high-detail grid).
     """
-    Given paired spectra for the same samples on a high-detail instrument
-    (wavelengths_high, X_high) and a low-detail instrument
-    (wavelengths_low, X_low), search over sigma_candidates (e.g. Gaussian
-    smoothing widths) and return the sigma that best maps high to low,
-    according to a suitable error metric (e.g. mean squared error).
-    """
-    from scipy.ndimage import gaussian_filter1d
-    from scipy.interpolate import interp1d
+    from .physical_match import estimate_physical_match
 
-    best_sigma = sigma_candidates[0]
-    best_mse = float('inf')
-
-    for sigma in sigma_candidates:
-        # Smooth high-res spectra if sigma > 0
-        if sigma > 0:
-            X_high_smoothed = gaussian_filter1d(X_high, sigma=sigma, axis=1)
-        else:
-            X_high_smoothed = X_high.copy()
-
-        # Resample smoothed high-res spectra to low-res wavelength grid
-        X_high_resampled = np.zeros((X_high_smoothed.shape[0], wavelengths_low.shape[0]))
-        for i in range(X_high_smoothed.shape[0]):
-            interpolator = interp1d(wavelengths_high, X_high_smoothed[i, :],
-                                   kind='linear', bounds_error=False, fill_value='extrapolate')
-            X_high_resampled[i, :] = interpolator(wavelengths_low)
-
-        # Compute MSE between resampled high-res and original low-res
-        mse = np.mean((X_high_resampled - X_low) ** 2)
-
-        if mse < best_mse:
-            best_mse = mse
-            best_sigma = sigma
-
-    return best_sigma
+    wl_h = np.asarray(wavelengths_high, dtype=np.float64)
+    wl_l = np.asarray(wavelengths_low, dtype=np.float64)
+    Xh = np.atleast_2d(np.asarray(X_high, dtype=np.float64))
+    Xl = np.atleast_2d(np.asarray(X_low, dtype=np.float64))
+    keep = (wl_h >= wl_l.min()) & (wl_h <= wl_l.max())
+    if keep.sum() < 20:
+        raise ValueError("The two wavelength grids overlap on fewer than 20 channels")
+    wl = wl_h[keep]
+    Xl_on_h = np.vstack([np.interp(wl, wl_l, row) for row in Xl])
+    params = estimate_physical_match(Xl_on_h, Xh[:, keep], wl, space="absorbance")
+    sigma_channels = float(params["sigma_nm"][0]) / float(np.median(np.diff(wl)))
+    cands = np.asarray(sigma_candidates, dtype=np.float64)
+    return float(cands[int(np.argmin(np.abs(cands - sigma_channels)))])
 
 
 if __name__ == "__main__":

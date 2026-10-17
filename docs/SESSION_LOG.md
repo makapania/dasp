@@ -1103,3 +1103,14 @@ is `planning/08_transfer.md` there.
   fitted against the primary's predictions 3.76 / 0.44.
 - dasp's `instrument_profiles.estimate_smoothing_between_instruments` fits sigma with no gain term (channel units,
   crosses joins): it mistakes band depth for blur. Roadmap CT5 must not build on it.
+- **Implementation notes (same day).** (1) Inverse-noise weights in the mean-D2 gain fit HURT: they lean on the
+  quietest channels (VNIR, early SWIR1) and moved the pooled gain 0.65 -> 0.73 (cross-unit M2045 3.20 -> 3.48 with
+  datasheet sigma). Use equal weights inside the fit mask; the noise map decides which channels take part. (2) The
+  errors-in-variables denominator correction changes the gain in the third decimal once the fit is on the mean of
+  20-40 standards; kept as harmless. (3) Choosing sigma on the noise-floor-subtracted residual + parsimony vs the raw
+  residual: 3.12 vs 3.08 cross-unit (SWIR2 sigma 3.5-5 vs 4-5 nm). (4) Noise of the second derivative is
+  underestimated ~2x by a white-noise formula on 1 nm ASD data (neighbouring channels share interpolated noise);
+  fitting a correlation kernel to the high-pass residual's autocorrelation recovers it within ~10% (simulation).
+  (5) Join detection: a "persistent level step" test on 10-30 nm flanks failed at 1800 nm (curvature into the 1900
+  water band); a sharpness test (>= 3x the boundaries 2-4 channels away; real joins score 10-35x) plus an isolation
+  test (adjacent boundaries < half) finds 1000/1800 on every LabSpec, FieldSpec 3 and example set, none on Trek.

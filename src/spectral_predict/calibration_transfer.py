@@ -19,6 +19,8 @@ misleading; user-facing text should come from ``method_display_name``.
   the same standards measured on both instruments.
 - ``'nspfce'``: iterative ridge DS, a dasp heuristic. Not PFCE/NS-PFCE.
 - ``'jypls-inv'``: experimental PLS score mapping; disabled in the GUI.
+- ``'physical_match'``: per detector block, a Gaussian blur, a band-depth gain in
+  absorbance and an optional shift (``physical_match.estimate_physical_match``).
 
 Every method here is fitted on paired rows: row i of the primary matrix and row i
 of the satellite matrix must be the same physical standard. To check whether a
@@ -34,10 +36,12 @@ from typing import Dict, Literal, Tuple
 
 import numpy as np
 
+from .physical_match import apply_physical_match, estimate_physical_match  # noqa: F401
+
 logger = logging.getLogger(__name__)
 
 
-MethodType = Literal["ds", "pds", "tsr", "ctai", "nspfce", "jypls-inv"]
+MethodType = Literal["ds", "pds", "tsr", "ctai", "nspfce", "jypls-inv", "physical_match"]
 
 DEFAULT_METHOD: str = "tsr"
 """Method key the GUI selects by default (per-wavelength slope/bias)."""
@@ -50,6 +54,7 @@ METHOD_SHORT_LABELS: dict[str, str] = {
     "nspfce": "Iterative ridge DS",
     "ns-pfce": "Iterative ridge DS",
     "jypls-inv": "JYPLS-inv (experimental)",
+    "physical_match": "Physical match",
 }
 """Short user-facing labels (radio buttons, status lines), keyed by method key."""
 
@@ -61,6 +66,7 @@ METHOD_DISPLAY_NAMES: dict[str, str] = {
     "nspfce": "Iterative ridge DS (dasp heuristic)",
     "ns-pfce": "Iterative ridge DS (dasp heuristic)",
     "jypls-inv": "JYPLS-inv score mapping (experimental)",
+    "physical_match": "Physical match (blur + band-depth gain per detector block)",
 }
 """Full user-facing names, keyed by method key."""
 
@@ -2081,10 +2087,12 @@ def apply_transfer_dispatch(X_satellite: np.ndarray, transfer_model: TransferMod
         return apply_nspfce(X_satellite, params)
     elif method == 'jypls-inv':
         return apply_jypls_inv(X_satellite, params)
+    elif method == 'physical_match':
+        return apply_physical_match(X_satellite, params, transfer_model.wavelengths_common)
     else:
         raise ValueError(
             f"Unknown transfer method: {method}. "
-            f"Supported methods are: ds, pds, tsr, ctai, ns-pfce, jypls-inv"
+            f"Supported methods are: ds, pds, tsr, ctai, ns-pfce, jypls-inv, physical_match"
         )
 
 

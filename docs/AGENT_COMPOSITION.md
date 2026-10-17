@@ -633,6 +633,51 @@ transfer = fit_transfer(ev.best, paired.X_primary, paired.X_satellite,
   are written with `meta['format_version'] = 2`. DASP builds from before 2026-10 cannot
   apply them and raise a KeyError instead of applying them wrongly.
 
+### 9b. Different instruments: physical match, grouped scoring, noise and joins
+
+When the standards were measured on more than one unit or session, leave-one-out is not
+enough: it shares a session's effects between the fit and the scored standard. On SPYDER
+Bone's 40 bones scanned on LabSpec 4 Hi-Res and Standard-Res units (two unit pairs), it
+ranked DS and PDS first, though both failed when fitted on one unit pair and applied to
+the other (PDS: M2045 RMSD 3.92, slope 0.38). Pass `groups` and the board is ranked by the
+leave-one-group-out score:
+
+```python
+ev = evaluate_transfer(
+    paired.X_primary, paired.X_satellite, predict=predict,
+    groups=unit_of_each_standard,          # instrument unit, session or batch
+    wavelengths=paired.wavelengths,        # with space: adds the physical-match rows
+    space="reflectance",                   # 0-1 reflectance, or "absorbance"
+    joins="auto",                          # or header joins, e.g. read_asd_dir(...)[1]["detector_joins"]
+    model_wavelengths=wavelengths_the_model_reads,
+)
+ev.leaderboard[["label", "RMSD_vs_primary_grouped", "Slope_vs_primary_grouped",
+                "RMSD_vs_primary", "Slope_vs_primary"]]
+ev.diagnostics["joins"], ev.diagnostics["satellite_noisy_regions"]
+```
+
+- **Physical match** (`calibration_transfer.estimate_physical_match`): per detector block,
+  a Gaussian blur, a band-depth gain in absorbance and optionally a shift, learned from
+  the paired spectra (no datasheet needed; `fwhm=` takes datasheet resolutions). Two or
+  three numbers per block instead of DS/PDS's thousands. On the SPYDER pairs it gave
+  M2045 3.12 / slope 0.96 across unit pairs, best of every method, on all three models.
+  It is fitted on the mean second-derivative spectrum over the standards: a pooled
+  per-spectrum fit lets satellite noise bias the gain low. Blocks with no band structure
+  are left unscaled; if the satellite is the coarser instrument it is not sharpened
+  (only the gain is corrected, and `notes` says so).
+- **Slope columns.** `Slope_vs_primary` (and `_grouped`) is the slope of satellite
+  predictions on primary predictions: below ~0.8 the method squashes the range even when
+  RMSD looks fine.
+- **Noise** (`spectral_diagnostics`): noise maps are measured from the spectra in hand
+  (noise changes between sessions). Noisy regions (far above the quiet part of the same
+  detector) are left out of physical-match fits; warnings name model wavelengths where
+  the satellite is far noisier. No transfer removes noise.
+- **Joins**: `'auto'` detects detector joins from each fit's own standards (a level step
+  at one channel boundary); `read_asd_dir` reports ASD header joins as
+  `metadata['detector_joins']`; `resolve_joins` orders user > header > detected.
+- **Saved files**: `method='physical_match'`, `meta['format_version'] = 1`; builds from
+  before 2026-10-16 raise "Unknown transfer method".
+
 ---
 
 ## Declared stable surface
@@ -653,7 +698,8 @@ listed is an internal implementation detail that may change without notice.
 | `models` | `PLSTransformer`; results-row rebuild helpers `parse_row_params`, `estimator_params_from_row`, `plsda_head_kwargs` (and its `PLSDA_HEAD_DEFAULT_RANDOM_STATE` default) |
 | `model_io` | `save_model`, `load_model`, `predict_with_model` |
 | `sample_selection` | `split_calibration_holdout` |
-| `calibration_transfer` | `estimate_pds_lowrank`, `apply_pds_centred`, `estimate_ds_dual`, `apply_ds_dual`, `estimate_tsr`, `apply_tsr`, `estimate_prediction_correction`, `apply_prediction_correction`, `apply_transfer_dispatch`, `TransferModel`, `save_transfer_model`, `load_transfer_model` |
+| `calibration_transfer` | `estimate_pds_lowrank`, `apply_pds_centred`, `estimate_ds_dual`, `apply_ds_dual`, `estimate_tsr`, `apply_tsr`, `estimate_prediction_correction`, `apply_prediction_correction`, `estimate_physical_match`, `apply_physical_match`, `apply_transfer_dispatch`, `TransferModel`, `save_transfer_model`, `load_transfer_model` |
+| `spectral_diagnostics` | `estimate_noise`, `noise_profile`, `noisy_regions`, `noise_comparison`, `detect_detector_joins`, `resolve_joins`, `read_asd_header_joins`, `NoiseEstimate`, `JoinDetection` |
 | `transfer_evaluation` | `evaluate_transfer`, `default_transfer_candidates`, `fit_transfer`, `TransferCandidate`, `TransferEvaluation`, `pair_standards_by_id`, `PairedStandards`, `predict_fn_from_model` |
 | `wavelength_matching` | `match_wavelengths`, `resolve_wavelength_list`, `format_wavelength_list`, `WavelengthMatchError` |
 | `search` | `run_search`, `run_one_class_search`, `run_multiclass_simca_search`, `multiclass_varsel_mask`, `build_multiclass_decision_view`, `compute_validation_metrics_for_top_models`, `MulticlassVarselUnsupported` |
