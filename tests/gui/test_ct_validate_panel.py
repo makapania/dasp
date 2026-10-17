@@ -1203,6 +1203,54 @@ def test_mode_b_refuses_uncovered_satellite_grid(physical_app):
 
 
 # ---------------------------------------------------------------------------
+# Review fixes F (pairs-table file extensions) and G (descending grids)
+# ---------------------------------------------------------------------------
+
+
+def test_pairs_table_names_with_extensions_match_stems(ct_app, tmp_path):
+    """F: 'sample1.asd' in the table must match the loaded stem 'sample1'."""
+    app, wl, primary, satellite = ct_app
+    # satellite files carry their own stems; each row keeps its own specimen
+    sat = satellite.copy()
+    sat.index = [f"s{int(i.split('_')[1]):02d}" for i in satellite.index]
+    app.current_satellite_df = sat
+    table = pd.DataFrame({
+        "primary": list(primary.index),
+        "satellite": [f"S{int(i.split('_')[1]):02d}.ASD" for i in primary.index],
+    })
+    table_path = tmp_path / "pairs.csv"
+    table.to_csv(table_path, index=False)
+    app.ct_pairs_table_path_var.set(str(table_path))
+
+    with patch("tkinter.messagebox.showerror") as err:
+        app._load_ct_pairs_table()
+    assert not err.called, err.call_args_list
+    assert len(app.ct_pairs_rename) == len(sat)
+    paired = app._pair_ct_standards()
+    assert paired is not None
+    assert paired.ids == list(primary.index)
+    np.testing.assert_allclose(paired.X_satellite, 0.9 * paired.X_primary + 0.03)
+
+
+def test_descending_grids_pair_on_sorted_columns(ct_app):
+    """G: descending wavelength grids pair as if sorted ascending."""
+    app, wl, primary, satellite = ct_app
+    app.current_primary_df = primary[primary.columns[::-1]]
+    app.current_satellite_df = satellite[satellite.columns[::-1]]
+    paired = app._pair_ct_standards()
+    assert paired is not None
+    assert np.all(np.diff(np.asarray(paired.wavelengths)) > 0)  # ascending
+    np.testing.assert_allclose(paired.X_satellite, 0.9 * paired.X_primary + 0.03)
+
+    # mixed directions previously produced an empty overlap and a refusal
+    app.current_primary_df = primary  # ascending again
+    paired = app._pair_ct_standards()
+    assert paired is not None
+    assert np.all(np.diff(np.asarray(paired.wavelengths)) > 0)
+    np.testing.assert_allclose(paired.X_satellite, 0.9 * paired.X_primary + 0.03)
+
+
+# ---------------------------------------------------------------------------
 # Commit 3: Plan Transfer Standards (Kennard-Stone)
 # ---------------------------------------------------------------------------
 

@@ -449,6 +449,15 @@ def _data_type_suffix(data_type, source_data_type=None) -> str:
     return _SOURCE_DATA_TYPE_SUFFIXES.get(canonical_source_data_type(source_data_type), "_other")
 
 
+# Spectral-file extensions a pairs table may carry on its file names even
+# though the loaded index holds the reader's file stems (io.py's format map).
+_CT_SPECTRAL_NAME_EXTENSIONS = frozenset((
+    '.csv', '.xlsx', '.xls', '.asd', '.sig', '.sco', '.spc', '.jdx', '.dx',
+    '.jcm', '.txt', '.dat', '.dpt', '.asc', '.sp', '.spa', '.spg', '.seq',
+    '.dmt', '.asp', '.bsw', '.npy',
+))
+
+
 def _loaded_value_scale(metadata, X, data_type) -> float:
     """Reflectance scale (1 or 100) to use when converting this data.
 
@@ -50580,11 +50589,16 @@ External Validation Performance (n={n_val}):
     def _ct_normalize_pair_id(name) -> str:
         """Fold a sample ID / file name for pairs-table matching.
 
-        Deliberately at least as lenient as the backend's ID normalisation
-        (extension, spaces, case ignored): everything but letters and digits is
-        dropped, lowercase.
+        A known spectral-file extension is stripped first (the tool convention,
+        ``Path(name).stem``, case-insensitive: 'sample1.asd' is the stem
+        'sample1'), then everything but letters and digits is dropped,
+        lowercase — at least as lenient as the backend's ID normalisation.
         """
-        return re.sub(r"[^a-z0-9]+", "", str(name).lower())
+        text = str(name)
+        suffix = os.path.splitext(text)[1].lower()
+        if suffix in _CT_SPECTRAL_NAME_EXTENSIONS:
+            text = text[: -len(suffix)] if suffix else text
+        return re.sub(r"[^a-z0-9]+", "", text.lower())
 
     def _browse_ct_pairs_table(self):
         """Browse for a pairs-table CSV (columns primary, satellite [, group])."""
@@ -50747,6 +50761,19 @@ External Validation Performance (n={n_val}):
         satellite_df = self.current_satellite_df
         if self.ct_pairs_rename:
             satellite_df = satellite_df.rename(index=self.ct_pairs_rename)
+
+        def _columns_ascending(df):
+            # Some instruments write descending wavelength grids; the overlap
+            # logic below and the interpolator both need ascending columns, so
+            # sort the columns (with the data) first.
+            cols = np.asarray(df.columns, dtype=float)
+            order = np.argsort(cols, kind='stable')
+            if not np.array_equal(order, np.arange(cols.size)):
+                df = df.iloc[:, order]
+            return df
+
+        primary_df = _columns_ascending(primary_df)
+        satellite_df = _columns_ascending(satellite_df)
 
         resample_note = None
         wl_p = np.asarray(primary_df.columns, dtype=float)
