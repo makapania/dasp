@@ -46,6 +46,7 @@ _CT_STATE_ATTRS = (
     "ct_satellite_header_joins",
     "ct_paired",
     "ct_pair_groups",
+    "ct_pair_groups_table_keys",
     "ct_pairs_rename",
     "ct_pairs_table_active",
     "ct_pairs_collisions",
@@ -2009,6 +2010,40 @@ def test_zero_resolution_table_after_reload_refuses_not_id_fallback(
     paired = app._pair_ct_standards()
     assert paired is not None
     assert len(paired.ids) == len(primary.index)
+
+
+def test_clear_table_keeps_manual_groups_drops_table_groups(ct_app, tmp_path):
+    """R4-4: Clear Table removes table-derived group labels, keeps manual
+    edits — including a manual override of a table-grouped row."""
+    app, wl, primary, satellite = ct_app
+    sat = satellite.copy()
+    sat.index = [f"LAB-{pid}" for pid in satellite.index]
+    app.current_satellite_df = sat
+    table_path = tmp_path / "pairs.csv"
+    pd.DataFrame({
+        "primary": list(primary.index),
+        "satellite": [f"LAB-{pid}" for pid in primary.index],
+        "group": ["unitA", "unitB"] + [None] * 10,
+    }).to_csv(table_path, index=False)
+    app.ct_pairs_table_path_var.set(str(table_path))
+    app._load_ct_pairs_table()
+    assert app.ct_pair_groups == {"bone_01": "unitA", "bone_02": "unitB"}
+    assert set(app.ct_pair_groups_table_keys) == {"bone_01", "bone_02"}
+
+    app._pair_ct_standards()
+    # a manual label on a fresh row, and a manual override of a table row
+    # (each edit refreshes the tree, so the item ids are re-read every time)
+    app.ct_pair_group_entry_var.set("manualM")
+    app.ct_pairs_tree.selection_set((app.ct_pairs_tree.get_children()[2],))  # bone_03
+    app._ct_set_group_on_selected()
+    app.ct_pair_group_entry_var.set("manualA")
+    app.ct_pairs_tree.selection_set((app.ct_pairs_tree.get_children()[0],))  # bone_01
+    app._ct_set_group_on_selected()
+    assert app.ct_pair_groups["bone_01"] == "manualA"
+
+    app._clear_ct_pairs_table()
+    assert app.ct_pair_groups == {"bone_01": "manualA", "bone_03": "manualM"}
+    assert app.ct_pair_groups_table_keys is None
 
 
 class _chain_state:

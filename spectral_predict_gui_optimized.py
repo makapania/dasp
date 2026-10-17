@@ -3085,6 +3085,7 @@ class SpectralPredictApp:
         self.ct_satellite_header_joins = None
         self.ct_paired = None  # PairedStandards from pair_standards_by_id
         self.ct_pair_groups = None  # primary sample ID -> group label
+        self.ct_pair_groups_table_keys = None  # IDs whose label came from the pairs table
         self.ct_pairs_rename = None  # satellite ID -> primary ID from a pairs table
         self.ct_pairs_table_active = False  # True while a table defines the pairs, even with 0 resolved rows
         self.ct_pairs_table_unresolved = None  # table rows without a mapping
@@ -50637,6 +50638,7 @@ External Validation Performance (n={n_val}):
         self.ct_paired = None
         self.ct_pair_resample_note = None
         self.ct_pair_groups = None
+        self.ct_pair_groups_table_keys = None
         self.ct_pairs_rename = None
         # The table itself is re-applied below (or the load is skipped while
         # an instrument is missing); the re-application decides whether it is
@@ -50763,7 +50765,12 @@ External Validation Performance (n={n_val}):
             collisions.extend(s_collisions)
 
             rename = {}
-            groups = dict(self.ct_pair_groups or {})
+            # The previous table's group labels go with that table; manual
+            # Treeview edits survive a table (re)load.
+            groups = {k: v for k, v in (self.ct_pair_groups or {}).items()
+                      if k not in (getattr(self, 'ct_pair_groups_table_keys',
+                                           None) or set())}
+            table_group_keys = set()
             problems = []
             used_primary = {}
             used_satellite = {}
@@ -50797,6 +50804,7 @@ External Validation Performance (n={n_val}):
                 rename[s_actual] = p_actual
                 if has_group and pd.notna(row.group) and str(row.group).strip():
                     groups[p_actual] = str(row.group).strip()
+                    table_group_keys.add(p_actual)
             if problems:
                 messagebox.showwarning(
                     "Pairs Table Rows Not Found",
@@ -50806,6 +50814,7 @@ External Validation Performance (n={n_val}):
                 )
             self.ct_pairs_rename = rename or None
             self.ct_pair_groups = groups
+            self.ct_pair_groups_table_keys = table_group_keys or None
             self.ct_pairs_collisions = collisions or None
             self.ct_pairs_table_unresolved = len(table) - len(rename)
             self.ct_paired = None  # forces a re-pair with the new table
@@ -50885,16 +50894,24 @@ External Validation Performance (n={n_val}):
             return
         groups = dict(self.ct_pair_groups or {})
         n = 0
+        edited = set()
         for item in selection:
             primary, satellite, _ = self.ct_pairs_tree.item(item, 'values')
             if primary == "(no match)":
                 continue
+            edited.add(primary)
             if not label:
                 groups.pop(primary, None)
             else:
                 groups[primary] = label
             n += 1
         self.ct_pair_groups = groups
+        if edited:
+            # A manual edit overrides the table's label; the pair is no
+            # longer table-derived and survives Clear Table.
+            table_keys = set(getattr(self, 'ct_pair_groups_table_keys', None) or ())
+            if table_keys & edited:
+                self.ct_pair_groups_table_keys = (table_keys - edited) or None
         # Grouped board columns were computed with the old labels.
         self._ct_invalidate_eval_state("Groups")
         self._refresh_ct_pairs_tree()
@@ -51079,6 +51096,14 @@ External Validation Performance (n={n_val}):
         self.ct_pairs_table_unresolved = None
         self.ct_pairs_collisions = None
         self.ct_paired = None
+        # Group labels that came from the table go with it; manual Treeview
+        # edits are the user's and stay.
+        table_keys = getattr(self, 'ct_pair_groups_table_keys', None)
+        if table_keys:
+            groups = {k: v for k, v in (self.ct_pair_groups or {}).items()
+                      if k not in table_keys}
+            self.ct_pair_groups = groups or None
+        self.ct_pair_groups_table_keys = None
         self._ct_invalidate_eval_state("The pairs table")
         self._refresh_ct_pairs_tree()
         self.ct_pairs_status_label.config(
