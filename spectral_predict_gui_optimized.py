@@ -51000,7 +51000,16 @@ External Validation Performance (n={n_val}):
             status += f" | {resample_note}"
         if positional:
             status += f" | {positional}"
-        self.ct_pairs_status_label.config(text=status, foreground=self.colors['text'])
+        # Keep the pairs table's naming-conflict count visible after pairing
+        # (it was shown at load time and must not be overwritten away).
+        n_collisions = len(getattr(self, 'ct_pairs_collisions', None) or [])
+        if n_collisions:
+            status += (f" | {n_collisions} naming conflict"
+                       f"{'s' if n_collisions != 1 else ''} (listed below)")
+        self.ct_pairs_status_label.config(
+            text=status,
+            foreground=(self.colors['warning'] if n_collisions
+                        else self.colors['text']))
         return paired
 
     def _clear_ct_pairs_table(self):
