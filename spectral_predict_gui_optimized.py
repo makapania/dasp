@@ -50747,24 +50747,26 @@ External Validation Performance (n={n_val}):
             has_group = "group" in table.columns
 
             def index_by_norm(df, instrument):
-                """(lookup, ambiguous keys, conflict notes) for one instrument.
+                """(lookup, ambiguous key -> colliding ids, notes) per instrument.
 
                 Loaded files whose names fold to the same pairs-table key
                 cannot be told apart by the table; they are kept OUT of the
                 lookup (rows naming them are reported ambiguous) and the
-                collision itself is reported — never silently last-wins.
+                collision itself is reported — never silently last-wins. The
+                ambiguous mapping keeps the colliding ids so a row naming
+                them still counts them as named by the table.
                 """
                 grouped = {}
                 for ix in df.index:
                     grouped.setdefault(self._ct_normalize_pair_id(ix), []).append(ix)
                 lookup = {}
-                ambiguous = set()
+                ambiguous = {}
                 notes = []
                 for key, ids in grouped.items():
                     if len(ids) == 1:
                         lookup[key] = ids[0]
                     else:
-                        ambiguous.add(key)
+                        ambiguous[key] = list(ids)
                         notes.append(
                             f"{instrument} files collide under one pairs-table "
                             f"name: {' vs '.join(str(i) for i in ids)}")
@@ -50795,13 +50797,19 @@ External Validation Performance (n={n_val}):
                 s_key = self._ct_normalize_pair_id(row.satellite)
                 p_actual = p_norm.get(p_key)
                 s_actual = s_norm.get(s_key)
-                # Which loaded files the table names at all — resolved or not.
-                # A row can name a primary that IS loaded while its satellite
-                # is not: that file is 'in the table', not 'not in the table'.
+                # Which loaded files the table names at all — resolved or
+                # not. A row can name a primary that IS loaded while its
+                # satellite is not: that file is 'in the table', not 'not in
+                # the table'. An ambiguous name still names every loaded file
+                # folding to it — they cannot pair, but they are named.
                 if p_actual is not None:
                     named_primary.add(p_actual)
+                elif p_key in p_ambiguous:
+                    named_primary.update(p_ambiguous[p_key])
                 if s_actual is not None:
                     named_satellite.add(s_actual)
+                elif s_key in s_ambiguous:
+                    named_satellite.update(s_ambiguous[s_key])
                 if p_actual is None or s_actual is None:
                     which = (
                         "primary name ambiguous" if p_key in p_ambiguous

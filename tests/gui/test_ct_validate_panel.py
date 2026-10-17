@@ -2190,6 +2190,42 @@ def test_table_reload_keeps_manual_group_overrides(ct_app, tmp_path):
     assert app.ct_pair_groups_table_keys is None
 
 
+def test_ambiguous_table_names_count_as_in_the_table(ct_app, tmp_path):
+    """R5-3: files named only through an ambiguous name are 'in the table'.
+
+    They still refuse to pair (the collision is never resolved silently),
+    but the status must not count them as 'not in the table'.
+    """
+    app, wl, primary, satellite = ct_app
+    prim = primary.iloc[:4].copy()  # bone_01..bone_04
+    sat = satellite.iloc[:4].copy()
+    sat.index = ["LAB-b1", "LAB-b2", "LAB.b2", "LAB-b4"]  # b2 collides folded
+    app.current_primary_df = prim
+    app.current_satellite_df = sat
+    table_path = tmp_path / "pairs.csv"
+    pd.DataFrame({
+        "primary": ["bone_01", "bone_02", "bone_03"],
+        "satellite": ["LAB-b1", "LAB-b2", "LAB-b4"],
+    }).to_csv(table_path, index=False)
+    app.ct_pairs_table_path_var.set(str(table_path))
+    with patch("tkinter.messagebox.showwarning") as warn:
+        app._load_ct_pairs_table()
+    warned = " ".join(str(c) for c in warn.call_args_list)
+    assert "ambiguous" in warned  # the bone_02 row is reported, not guessed
+
+    paired = app._pair_ct_standards()
+    assert paired is not None
+    assert len(paired.ids) == 2
+    assert sorted(paired.unmatched_primary) == ["bone_02", "bone_04"]
+    # the colliding files stay unpaired — ambiguity is never resolved by luck
+    assert sorted(paired.unmatched_satellite) == ["LAB-b2", "LAB.b2"]
+    status = str(app.ct_pairs_status_label.cget("text"))
+    assert "1 rows unresolved" in status
+    # only bone_04 is unnamed: bone_02 is named by the ambiguous row, and so
+    # are the two satellite files that fold to its table name
+    assert "1 files not in the table" in status
+
+
 class _chain_state:
     """Point the comparison tab at a transfer chain over percent data."""
 
