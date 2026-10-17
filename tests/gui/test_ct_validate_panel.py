@@ -711,3 +711,53 @@ def test_eval_model_loader_rejects_non_regression(ct_app, tmp_path):
             app._load_ct_eval_model()
     assert err.called
     assert app.ct_eval_model_dict is None
+
+
+# ---------------------------------------------------------------------------
+# Commit 3: Plan Transfer Standards (Kennard-Stone)
+# ---------------------------------------------------------------------------
+
+
+def test_plan_standards_dialog_kennard_stone(ct_app, tmp_path):
+    from spectral_predict.sample_selection import kennard_stone
+
+    app, wl, primary, satellite = ct_app
+    try:
+        app._open_ct_plan_standards()
+        assert app._ct_plan_dialog is not None
+        app.ct_plan_source_var.set("primary")
+        app.ct_plan_n_var.set("5")
+        _run_inline(app, app._run_ct_plan_standards)
+
+        expected = [primary.index[i] for i in kennard_stone(primary.to_numpy(), n_samples=5)]
+        rows = [app.ct_plan_tree.item(item, "values") for item in app.ct_plan_tree.get_children()]
+        assert [r[1] for r in rows] == expected
+        assert [r[0] for r in rows] == ["1", "2", "3", "4", "5"]
+        assert not app._ct_plan_running
+
+        out_path = tmp_path / "standards.csv"
+        with patch("tkinter.filedialog.asksaveasfilename", return_value=str(out_path)):
+            app._export_ct_plan_standards()
+        text = out_path.read_text(encoding="utf-8").strip().splitlines()
+        assert text[0] == "order,sample_id"
+        assert text[1] == f"1,{expected[0]}"
+    finally:
+        app._close_ct_plan_standards()
+    assert app._ct_plan_dialog is None
+
+
+def test_plan_standards_refuses_bad_count(ct_app):
+    app, *_ = ct_app
+    app._open_ct_plan_standards()
+    try:
+        app.ct_plan_source_var.set("primary")
+        app.ct_plan_n_var.set("0")
+        with patch("tkinter.messagebox.showwarning") as warn:
+            app._run_ct_plan_standards()
+        assert warn.called
+        app.ct_plan_n_var.set("99")
+        with patch("tkinter.messagebox.showwarning") as warn:
+            app._run_ct_plan_standards()
+        assert warn.called
+    finally:
+        app._close_ct_plan_standards()

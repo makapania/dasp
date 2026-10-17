@@ -3084,6 +3084,11 @@ class SpectralPredictApp:
         self.ct_eval_joins_custom_var = tk.StringVar(value="1000, 1800")
         self._ct_validate_running = False  # guards Validate/Fit double launches
         self._ct_eval_context = None  # frozen inputs of the last Validate run (for Fit)
+        self._ct_plan_dialog = None  # Plan Transfer Standards Toplevel, if open
+        self._ct_plan_running = False
+        self.ct_plan_source_var = tk.StringVar(value="primary")
+        self.ct_plan_folder_var = tk.StringVar()
+        self.ct_plan_n_var = tk.StringVar(value="15")
 
         # Enhanced loading with Y values (for JYPLS-inv)
         # Primary data with Y values
@@ -51152,6 +51157,221 @@ External Validation Performance (n={n_val}):
             foreground=self.colors['text'])
         self._plot_transfer_quality(result.method)
 
+    # ========================================================================
+    # PLAN TRANSFER STANDARDS (Kennard-Stone on a candidate pool)
+    # ========================================================================
+
+    def _open_ct_plan_standards(self):
+        """Plan which specimens to scan as transfer standards (Kennard-Stone)."""
+        if self._ct_plan_dialog is not None and self._ct_plan_dialog.winfo_exists():
+            self._ct_plan_dialog.lift()
+            return
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Plan Transfer Standards")
+        self._ct_plan_dialog = dlg
+        dlg.protocol("WM_DELETE_WINDOW", self._close_ct_plan_standards)
+
+        main = ttk.Frame(dlg, padding=10)
+        main.pack(fill='both', expand=True)
+
+        ttk.Label(main, text="Choose transfer standards that span the spectra "
+                             "(Kennard-Stone on the pool; order = scan order).",
+                  style='Caption.TLabel').pack(anchor='w', pady=(0, 8))
+
+        source_frame = ttk.LabelFrame(main, text="Candidate pool", padding=8)
+        source_frame.pack(fill='x', pady=(0, 8))
+        ttk.Radiobutton(source_frame, text="Loaded primary spectra (A1)",
+                        variable=self.ct_plan_source_var, value='primary'
+                        ).pack(anchor='w')
+        ttk.Radiobutton(source_frame, text="Loaded satellite spectra (A1)",
+                        variable=self.ct_plan_source_var, value='satellite'
+                        ).pack(anchor='w')
+        folder_row = ttk.Frame(source_frame)
+        folder_row.pack(fill='x', pady=(2, 0))
+        ttk.Radiobutton(folder_row, text="A folder of spectra:",
+                        variable=self.ct_plan_source_var, value='folder'
+                        ).pack(side='left')
+        ttk.Entry(folder_row, textvariable=self.ct_plan_folder_var,
+                  width=40).pack(side='left', padx=(6, 6))
+        ttk.Button(folder_row, text="Browse...",
+                   command=lambda: self._browse_ct_plan_folder(dlg),
+                   style='Modern.TButton').pack(side='left')
+
+        count_row = ttk.Frame(main)
+        count_row.pack(fill='x', pady=(0, 8))
+        ttk.Label(count_row, text="How many standards:",
+                  style='Caption.TLabel').pack(side='left', padx=(0, 6))
+        ttk.Entry(count_row, textvariable=self.ct_plan_n_var,
+                  width=6).pack(side='left', padx=(0, 10))
+        self._create_accent_button(count_row, "Run Kennard-Stone",
+                                   self._run_ct_plan_standards).pack(side='left')
+        self.ct_plan_status_label = ttk.Label(main, text="", style='Caption.TLabel',
+                                              foreground=self.colors['text_light'])
+        self.ct_plan_status_label.pack(anchor='w', pady=(4, 4))
+
+        tree_frame = ttk.Frame(main)
+        tree_frame.pack(fill='both', expand=True)
+        self.ct_plan_tree = ttk.Treeview(tree_frame, columns=('order', 'sample_id'),
+                                         show='headings', height=10)
+        self.ct_plan_tree.heading('order', text='#')
+        self.ct_plan_tree.heading('sample_id', text='Sample ID')
+        self.ct_plan_tree.column('order', width=40, anchor='e')
+        self.ct_plan_tree.column('sample_id', width=220)
+        plan_scroll = ttk.Scrollbar(tree_frame, orient='vertical',
+                                    command=self.ct_plan_tree.yview)
+        self.ct_plan_tree.configure(yscrollcommand=plan_scroll.set)
+        self.ct_plan_tree.pack(side='left', fill='both', expand=True)
+        plan_scroll.pack(side='left', fill='y')
+
+        button_row = ttk.Frame(main)
+        button_row.pack(fill='x', pady=(8, 0))
+        ttk.Button(button_row, text="Export CSV...",
+                   command=self._export_ct_plan_standards,
+                   style='Modern.TButton').pack(side='left', padx=(0, 10))
+        ttk.Button(button_row, text="Close",
+                   command=self._close_ct_plan_standards,
+                   style='Modern.TButton').pack(side='left')
+
+    def _browse_ct_plan_folder(self, dialog):
+        """Browse for the plan-standards candidate folder."""
+        directory = filedialog.askdirectory(title="Select Candidate Spectra Folder",
+                                            parent=dialog)
+        if directory:
+            self.ct_plan_folder_var.set(directory)
+            self.ct_plan_source_var.set('folder')
+
+    def _close_ct_plan_standards(self):
+        """Close (and only close) the Plan Transfer Standards dialog."""
+        if self._ct_plan_dialog is not None:
+            self._ct_plan_dialog.destroy()
+            self._ct_plan_dialog = None
+
+    def _ct_plan_pool(self):
+        """The candidate-pool DataFrame for planning, or None with a dialog."""
+        from tkinter import messagebox
+
+        source = self.ct_plan_source_var.get()
+        if source == 'primary':
+            df = self.current_primary_df
+            if df is None:
+                messagebox.showwarning("No Data", "Load primary spectra in A1 first.")
+                return None
+            return df
+        if source == 'satellite':
+            df = self.current_satellite_df
+            if df is None:
+                messagebox.showwarning("No Data", "Load satellite spectra in A1 first.")
+                return None
+            return df
+        folder = self.ct_plan_folder_var.get()
+        if not folder:
+            messagebox.showwarning("No Folder", "Browse and select a spectra folder first.")
+            return None
+        try:
+            wavelengths, X = self._load_spectra_from_directory(folder)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load folder:\n{str(e)}")
+            return None
+        ids = getattr(self, "_last_dir_ids", None)
+        if ids is None or len(ids) != X.shape[0]:
+            messagebox.showwarning(
+                "No Sample IDs",
+                "This folder's spectra carry no sample IDs (only ASD/SPC folders "
+                "and one-spectrum-per-file CSV folders do).")
+            return None
+        return pd.DataFrame(np.asarray(X, dtype=float), index=pd.Index(ids),
+                            columns=np.asarray(wavelengths, dtype=float))
+
+    def _run_ct_plan_standards(self):
+        """Pick Kennard-Stone standards from the pool (worker thread)."""
+        from tkinter import messagebox
+        from spectral_predict.sample_selection import kennard_stone
+
+        if self._ct_plan_running:
+            return
+        try:
+            n_requested = int(self.ct_plan_n_var.get())
+        except ValueError:
+            messagebox.showwarning("How Many", "The number of standards must be a whole number.")
+            return
+        pool = self._ct_plan_pool()
+        if pool is None:
+            return
+        if n_requested < 2:
+            messagebox.showwarning("How Many", "Pick at least 2 standards.")
+            return
+        if n_requested > pool.shape[0]:
+            messagebox.showwarning(
+                "How Many",
+                f"Asked for {n_requested} standards but the pool has {pool.shape[0]} spectra.")
+            return
+
+        X = pool.to_numpy(dtype=float)
+        ids = list(pool.index)
+
+        self._ct_plan_running = True
+        self.ct_plan_status_label.config(
+            text=f"Running Kennard-Stone on {len(ids)} spectra ...",
+            foreground=self.colors['text'])
+
+        def _worker():
+            try:
+                positions = kennard_stone(X, n_samples=n_requested)
+                payload = (True, [ids[i] for i in positions], "")
+            except Exception as e:  # noqa: BLE001 — reported on the main thread
+                import traceback
+                payload = (False, None, f"{e}\n{traceback.format_exc(limit=6)}")
+            self.root.after(0, lambda: self._on_ct_plan_done(payload))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_ct_plan_done(self, payload):
+        """Main-thread completion of a plan-standards run (also driven by tests)."""
+        from tkinter import messagebox
+
+        ok, chosen, err = payload
+        self._ct_plan_running = False
+        if not ok:
+            self.ct_plan_status_label.config(text="Kennard-Stone failed.",
+                                             foreground=self.colors['warning'])
+            messagebox.showerror("Plan Transfer Standards", err)
+            return
+        for item in self.ct_plan_tree.get_children():
+            self.ct_plan_tree.delete(item)
+        for k, sample_id in enumerate(chosen, start=1):
+            self.ct_plan_tree.insert('', 'end', values=(k, sample_id))
+        self.ct_plan_status_label.config(
+            text=(f"{len(chosen)} standards chosen. The first scans cover the "
+                  "spectral extremes; scan them in this order if a session may "
+                  "be cut short."),
+            foreground=self.colors['text'])
+
+    def _export_ct_plan_standards(self):
+        """Export the chosen standards list as CSV (order, sample_id)."""
+        from tkinter import messagebox
+
+        rows = [self.ct_plan_tree.item(item, 'values')
+                for item in self.ct_plan_tree.get_children()]
+        if not rows:
+            messagebox.showwarning("Nothing to Export", "Run Kennard-Stone first.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save Standards List", defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")],
+            parent=self._ct_plan_dialog)
+        if not path:
+            return
+        try:
+            with open(path, 'w', encoding='utf-8', newline='') as f:
+                f.write("order,sample_id\n")
+                for order, sample_id in rows:
+                    f.write(f"{order},{sample_id}\n")
+            self.ct_plan_status_label.config(
+                text=f"Saved {len(rows)} standards to {path}",
+                foreground=self.colors['text'])
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to write CSV:\n{str(e)}")
+
     def _update_data_info(self):
         """Update data information display."""
         info_text = ""
@@ -57157,7 +57377,10 @@ External Validation Performance (n={n_val}):
         self.ct_fit_selected_button = ttk.Button(
             eval_run_row, text="Fit Selected Method", command=self._fit_ct_selected,
             style='Modern.TButton', state='disabled')
-        self.ct_fit_selected_button.pack(side='left')
+        self.ct_fit_selected_button.pack(side='left', padx=(0, 10))
+        ttk.Button(eval_run_row, text="Plan Transfer Standards…",
+                   command=self._open_ct_plan_standards,
+                   style='Modern.TButton').pack(side='left')
         self.ct_validate_status_label = ttk.Label(
             eval_run_row, text="", style='Caption.TLabel',
             foreground=self.colors['text_light'])
