@@ -1209,3 +1209,31 @@ is `planning/08_transfer.md` there.
   channels per spectrum (interpolation in absorbance) before anything else, and dilate the exclusion by the D2
   half-window. Also: Savitzky-Golay delta and the nm blur need even spacing inside a block (now refused otherwise);
   an ASCII ".asd" can start with "ASD" (binary headers have a NUL after the magic).
+
+## 2026-10-17 (b) — F2 part 2 review round 3 (Codex confirm on rounds 1-2)
+- **Stale-run mechanism (HIGH):** bumping the generation only in standards invalidation left every
+  other pairing-input change (pairs-table load, re-pair, group edit, eval model/settings) able to
+  land a stale board. Fix shape worth reusing: ONE invalidation entry point that bumps the input
+  generation and drops derived state, PLUS a per-launch run id — a completion handler accepts a
+  result only if run id AND generation both match; a run-id mismatch returns without touching the
+  busy state (that was the separate MEDIUM: a stale callback unlocked controls mid-newer-run).
+  Invalidation also abandons the in-flight run (its callback then no-ops), which makes the
+  enabled-button state and the running flag consistent after any input change.
+- **Pairs-table decision (HIGH, lead's call):** an active pairs table DEFINES the pairs — only its
+  accepted mappings pair, everything else (files not in the table, rows that no longer resolve) is
+  listed unmatched with an explicit status; no ID-matching fallback. "Clear Table" returns to ID
+  matching. The old rename+ID-match scheme let a partly matched table auto-pair by name luck
+  (table C->z, z missing, satellite file C exists -> C paired).
+- **Mixed transfer chains (HIGH):** a legacy file (no meta['value_scale']) after a new 0-1 step
+  received 0-1 unchanged. Chain now tracks the last recorded primary_value_scale and converts to it
+  before a legacy step. A trailing legacy step then already leaves the output in the primary's
+  loaded scale — the final Mode-B conversion stays correct.
+- **interp1d sorts its samples** (assume_sorted=False default), so resampling itself tolerates a
+  descending source grid; what broke was GUI-side overlap logic reading [0]/[-1]. Still sort
+  explicitly — the overlap check and range labels need it.
+- **Two more unwired Section C/F paths found while testing:** `_load_and_predict_ct` reads
+  `ct_new_satellite_dir_var` and writes `ct_prediction_text`, and neither is created by any widget
+  (same as File Equalize's `ct_eq_*` vars, round 2). Tests provision them; wiring the frames will
+  create exactly that state.
+- pytest heredoc gotcha (again): a bash heredoc carrying test code with em-dashes/quotes truncated
+  mid-write on Windows Git Bash; prefer the Edit tool or `python - << PYEOF` file rewrites.
