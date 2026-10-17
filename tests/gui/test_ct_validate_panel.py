@@ -49,6 +49,8 @@ _CT_STATE_ATTRS = (
     "ct_pair_groups_table_keys",
     "ct_pairs_rename",
     "ct_pairs_table_active",
+    "ct_pairs_table_named_primary",
+    "ct_pairs_table_named_satellite",
     "ct_pairs_collisions",
     "ct_pair_resample_note",
     "ct_pairs_table_unresolved",
@@ -1928,7 +1930,42 @@ def test_partly_matched_table_does_not_pair_unintended_ids(ct_app, tmp_path):
     status = str(app.ct_pairs_status_label.cget("text"))
     assert "11 rows paired" in status
     assert "1 rows unresolved" in status
-    # bone_03 primary, its real satellite file LAB-bone_03, and the trap file
+    # the table NAMES bone_03 (via its unresolved row), so only its unloaded
+    # satellite's real counterpart LAB-bone_03 and the trap file are unnamed
+    assert "2 files not in the table" in status
+
+
+def test_not_in_table_count_excludes_files_named_by_unresolved_rows(
+        ct_app, tmp_path):
+    """R4-5: 'files not in the table' counts only files no table row names.
+
+    bone_03's row is unresolved (its satellite never loaded) but the table
+    does name bone_03 — it must not be counted as 'not in the table'.
+    """
+    app, wl, primary, satellite = ct_app
+    prim = primary.iloc[:4].copy()  # bone_01..bone_04
+    sat = satellite.iloc[:4].copy()
+    sat.index = [f"LAB-{pid}" for pid in prim.index]
+    app.current_primary_df = prim
+    app.current_satellite_df = sat
+    table_path = tmp_path / "pairs.csv"
+    pd.DataFrame({
+        "primary": ["bone_01", "bone_02", "bone_03"],
+        "satellite": ["LAB-bone_01", "LAB-bone_02", "LAB-missing"],
+    }).to_csv(table_path, index=False)
+    app.ct_pairs_table_path_var.set(str(table_path))
+    with patch("tkinter.messagebox.showwarning") as warn:
+        app._load_ct_pairs_table()
+    assert warn.called  # the bone_03 -> LAB-missing row is unresolved
+
+    paired = app._pair_ct_standards()
+    assert paired is not None
+    assert len(paired.ids) == 2
+    assert sorted(paired.unmatched_primary) == ["bone_03", "bone_04"]
+    assert sorted(paired.unmatched_satellite) == ["LAB-bone_03", "LAB-bone_04"]
+    status = str(app.ct_pairs_status_label.cget("text"))
+    assert "1 rows unresolved" in status
+    # bone_04, LAB-bone_03 and LAB-bone_04 are unnamed; bone_03 IS named
     assert "3 files not in the table" in status
 
 

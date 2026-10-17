@@ -3089,6 +3089,8 @@ class SpectralPredictApp:
         self.ct_pairs_rename = None  # satellite ID -> primary ID from a pairs table
         self.ct_pairs_table_active = False  # True while a table defines the pairs, even with 0 resolved rows
         self.ct_pairs_table_unresolved = None  # table rows without a mapping
+        self.ct_pairs_table_named_primary = None  # loaded files any table row names
+        self.ct_pairs_table_named_satellite = None
         self.ct_pairs_collisions = None  # naming conflicts found by the pairs table
         self.ct_pair_resample_note = None  # set when pairing resampled the satellite
         self.ct_last_evaluation = None  # TransferEvaluation of the last Validate run
@@ -50645,6 +50647,8 @@ External Validation Performance (n={n_val}):
         # active against the files loaded now.
         self.ct_pairs_table_active = False
         self.ct_pairs_table_unresolved = None
+        self.ct_pairs_table_named_primary = None
+        self.ct_pairs_table_named_satellite = None
         self.ct_pairs_collisions = None
         self.ct_X_primary_common = None
         self.ct_X_satellite_common = None
@@ -50722,6 +50726,8 @@ External Validation Performance (n={n_val}):
         self.ct_pairs_table_active = True
         self.ct_pairs_rename = None
         self.ct_pairs_table_unresolved = None
+        self.ct_pairs_table_named_primary = None
+        self.ct_pairs_table_named_satellite = None
         self.ct_pairs_collisions = None
         try:
             table = pd.read_csv(path)
@@ -50774,11 +50780,20 @@ External Validation Performance (n={n_val}):
             problems = []
             used_primary = {}
             used_satellite = {}
+            named_primary = set()
+            named_satellite = set()
             for row in table.itertuples(index=False):
                 p_key = self._ct_normalize_pair_id(row.primary)
                 s_key = self._ct_normalize_pair_id(row.satellite)
                 p_actual = p_norm.get(p_key)
                 s_actual = s_norm.get(s_key)
+                # Which loaded files the table names at all — resolved or not.
+                # A row can name a primary that IS loaded while its satellite
+                # is not: that file is 'in the table', not 'not in the table'.
+                if p_actual is not None:
+                    named_primary.add(p_actual)
+                if s_actual is not None:
+                    named_satellite.add(s_actual)
                 if p_actual is None or s_actual is None:
                     which = (
                         "primary name ambiguous" if p_key in p_ambiguous
@@ -50815,6 +50830,10 @@ External Validation Performance (n={n_val}):
             self.ct_pairs_rename = rename or None
             self.ct_pair_groups = groups
             self.ct_pair_groups_table_keys = table_group_keys or None
+            # Files the table names at all (resolved or not) — the pairing
+            # status counts as 'not in the table' only files no row names.
+            self.ct_pairs_table_named_primary = named_primary
+            self.ct_pairs_table_named_satellite = named_satellite
             self.ct_pairs_collisions = collisions or None
             self.ct_pairs_table_unresolved = len(table) - len(rename)
             self.ct_paired = None  # forces a re-pair with the new table
@@ -51061,8 +51080,11 @@ External Validation Performance (n={n_val}):
             # The table is the ground truth: say exactly how much of the
             # loaded data it accounts for (decision, review round 3).
             n_unresolved = int(getattr(self, 'ct_pairs_table_unresolved', 0) or 0)
-            n_not_in_table = (len(paired.unmatched_primary)
-                              + len(paired.unmatched_satellite))
+            named_p = getattr(self, 'ct_pairs_table_named_primary', None) or set()
+            named_s = getattr(self, 'ct_pairs_table_named_satellite', None) or set()
+            n_not_in_table = (
+                sum(1 for p in paired.unmatched_primary if p not in named_p)
+                + sum(1 for s in paired.unmatched_satellite if s not in named_s))
             status = (f"Pairs table active: {len(paired.ids)} rows paired, "
                       f"{n_unresolved} rows unresolved, "
                       f"{n_not_in_table} files not in the table")
@@ -51094,6 +51116,8 @@ External Validation Performance (n={n_val}):
         self.ct_pairs_table_active = False
         self.ct_pairs_rename = None
         self.ct_pairs_table_unresolved = None
+        self.ct_pairs_table_named_primary = None
+        self.ct_pairs_table_named_satellite = None
         self.ct_pairs_collisions = None
         self.ct_paired = None
         # Group labels that came from the table go with it; manual Treeview
