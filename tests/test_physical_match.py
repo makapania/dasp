@@ -81,6 +81,48 @@ def test_recovers_blur_and_gain_under_satellite_noise(noisy_pair):
     for b in (1, 2):  # SWIR blocks carry the band structure
         assert abs(prm["sigma_nm"][b] - TRUE_SIGMA[b]) <= 1.0
         assert prm["gain"][b] == pytest.approx(TRUE_GAIN[b], rel=0.03)
+    assert not prm["satellite_coarser"].any()  # the satellite is the sharper one here
+
+
+def _broadband_pair(n=20, seed=0):
+    wl = np.arange(1000.0, 1800.0)
+    rng = np.random.default_rng(seed)
+    centres = (1150, 1300, 1450, 1600)
+    A = 0.3 + sum(
+        np.exp(-0.5 * ((wl[None, :] - c) / 20) ** 2) * rng.uniform(0.05, 0.25, (n, 1))
+        for c in centres
+    )
+    As = A + rng.normal(0, 1e-4, A.shape)
+    Ap = 0.7 * A + 0.05 + rng.normal(0, 1e-5, A.shape)
+    return wl, 10**-Ap, 10**-As
+
+
+@pytest.mark.parametrize("bad", [-0.02, 0.0, np.nan])
+def test_a_dead_satellite_channel_does_not_steer_the_fit(bad):
+    """One unusable channel mid-block used to push the learned blur to the top of its
+    grid (the blur smeared the absorbance spike the clip created)."""
+    wl, Rp, Rs = _broadband_pair()
+    Rs = Rs.copy()
+    Rs[:, wl == 1400] = bad
+    prm = pm.estimate_physical_match(Rp, Rs, wl, space="reflectance")
+    assert prm["sigma_nm"][0] <= 1.0
+    assert prm["gain"][0] == pytest.approx(0.7, rel=0.02)
+    assert not prm["fit_mask"][np.abs(wl - 1400) <= 15].any()
+    assert np.isfinite(pm.apply_physical_match(Rs, prm, wl)).all()
+
+
+def test_nan_in_absorbance_input_is_filled_not_propagated():
+    wl, Rp, Rs = _broadband_pair()
+    Ap, As = np.log10(1 / Rp), np.log10(1 / Rs)
+    Ap[3, wl == 1500] = np.nan
+    prm = pm.estimate_physical_match(Ap, As, wl, space="absorbance", sigma=0.0)
+    assert np.isfinite(prm["gain"]).all() and prm["gain"][0] == pytest.approx(0.7, rel=0.02)
+
+
+def test_two_standards_are_flagged_as_rough():
+    wl, Rp, Rs = _broadband_pair(n=2)
+    prm = pm.estimate_physical_match(Rp, Rs, wl, space="reflectance", sigma=0.0)
+    assert "Only 2 standards" in prm["notes"]
 
 
 def test_mean_fit_beats_pooled_least_squares(example_reflectance):
@@ -187,13 +229,28 @@ def test_grid_must_match_blocks(example_reflectance):
         pm.apply_physical_match(R[:, :-50], prm, wl[:-50] + 0.5)
 
 
-def test_non_uniform_grid():
+def test_spacing_may_change_only_at_a_join():
     wl = np.r_[np.arange(400.0, 1000.0, 2.0), np.arange(1000.0, 1400.0, 5.0)]
     rng = np.random.default_rng(0)
     A = 0.4 + np.exp(-0.5 * ((wl[None, :] - 1200) / 20) ** 2) * rng.uniform(0.1, 0.3, (15, 1))
     A = A + 0.05 * np.exp(-0.5 * ((wl[None, :] - 700) / 20) ** 2) * rng.uniform(0.5, 1, (15, 1))
-    prm = pm.estimate_physical_match(0.8 * A, A, wl, space="absorbance", sigma=0.0)
-    np.testing.assert_allclose(pm.apply_physical_match(A, prm, wl), 0.8 * A + prm["offset"][0])
+    with pytest.raises(ValueError, match="spacing varies"):
+        pm.estimate_physical_match(0.8 * A, A, wl, space="absorbance", sigma=0.0)
+    prm = pm.estimate_physical_match(0.8 * A, A, wl, space="absorbance", sigma=0.0, joins=(998.0,))
+    np.testing.assert_allclose(prm["gain"], 0.8, rtol=1e-4)
+    # blur in the 5 nm block is in nm, not channels: a 10 nm sigma spans 2 channels
+    blurred = pm.blur_shift(A[:, wl >= 1000], wl[wl >= 1000], 10.0)
+    ref = pm.blur_shift(
+        np.vstack(
+            [np.interp(np.arange(1000.0, 1396.0), wl[wl >= 1000], a) for a in A[:, wl >= 1000]]
+        ),
+        np.arange(1000.0, 1396.0),
+        10.0,
+    )
+    mid = (wl[wl >= 1000] > 1100) & (wl[wl >= 1000] < 1300)
+    np.testing.assert_allclose(
+        blurred[:, mid], ref[:, (wl[wl >= 1000][mid] - 1000).astype(int)], atol=2e-3
+    )
 
 
 def test_save_load_round_trip_keeps_every_param(tmp_path, noisy_pair):

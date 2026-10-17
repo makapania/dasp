@@ -115,10 +115,39 @@ def block_slices(wavelengths: np.ndarray, joins: Sequence[float] | None) -> list
     1800: VNIR ends at 1000 nm, SWIR1 at 1800 nm). Joins outside the grid are ignored.
     """
     wl = np.asarray(wavelengths, dtype=np.float64)
-    cuts = sorted({int(np.searchsorted(wl, j, side="right")) for j in (joins or ())})
+    js = () if joins is None else [float(j) for j in np.atleast_1d(joins)]
+    cuts = sorted({int(np.searchsorted(wl, j, side="right")) for j in js})
     cuts = [c for c in cuts if 0 < c < wl.size]
     edges = [0, *cuts, wl.size]
     return [slice(a, b) for a, b in zip(edges[:-1], edges[1:]) if b > a]
+
+
+def block_step(wavelengths: np.ndarray, sl: slice) -> float:
+    """Median spacing inside one block (the grid's spacing when the block has one channel)."""
+    wl = np.asarray(wavelengths, dtype=np.float64)[sl]
+    return float(np.median(np.diff(wl))) if wl.size > 1 else grid_step(np.asarray(wavelengths))
+
+
+def check_uniform_blocks(
+    wavelengths: np.ndarray, joins: Sequence[float] | None, tol: float = 0.02
+) -> None:
+    """Refuse grids whose spacing varies inside a detector block.
+
+    Savitzky-Golay filters and the nm-wide blur assume even spacing within a block.
+    Spacing may change at a join (e.g. 1.4 nm VNIR, 2 nm SWIR before ASD's resampling).
+
+    Raises:
+        ValueError: Spacing inside a block varies by more than ``tol`` (relative).
+    """
+    wl = np.asarray(wavelengths, dtype=np.float64)
+    for sl in block_slices(wl, joins):
+        d = np.diff(wl[sl])
+        if d.size and (d.max() - d.min()) > tol * float(np.median(d)):
+            raise ValueError(
+                f"Wavelength spacing varies inside {wl[sl][0]:g}-{wl[sl][-1]:g} nm "
+                f"({d.min():g}-{d.max():g} nm); resample to an even grid (or give the "
+                "detector joins where the spacing changes)"
+            )
 
 
 def odd_channels(nm: float, step: float, minimum: int) -> int:
@@ -150,10 +179,10 @@ def savgol_blocks(
     one shorter than ``polyorder + 2`` channels is returned unchanged (deriv 0) or zero.
     """
     X = np.atleast_2d(np.asarray(X, dtype=np.float64))
-    step = grid_step(wavelengths)
     out = np.zeros_like(X) if deriv else X.copy()
     for sl in block_slices(wavelengths, joins):
         nb = sl.stop - sl.start
+        step = block_step(wavelengths, sl)
         w = odd_channels(window_nm, step, polyorder + 2)
         if w > nb:
             w = nb if nb % 2 == 1 else nb - 1
@@ -172,10 +201,9 @@ def second_derivative(
 
 
 def _smooth_profile(v: np.ndarray, wavelengths: np.ndarray, joins, nm: float) -> np.ndarray:
-    step = grid_step(wavelengths)
     out = v.copy()
     for sl in block_slices(wavelengths, joins):
-        k = min(odd_channels(nm, step, 1), (sl.stop - sl.start) // 2 * 2 + 1)
+        k = min(odd_channels(nm, block_step(wavelengths, sl), 1), (sl.stop - sl.start) // 2 * 2 + 1)
         if k > 1:
             out[sl] = _apply_fir(v[None, sl], np.ones(k) / k)[0]
     return out
@@ -247,13 +275,13 @@ def estimate_noise(
     """
     A = np.atleast_2d(np.asarray(A, dtype=np.float64))
     wl = check_wavelengths(wavelengths, A.shape[1])
-    step = grid_step(wl)
     channel_sd = np.zeros(wl.size)
     d2_sd = np.zeros(wl.size)
     kernels: list[str] = []
     kern = _noise_kernels()
     for sl in block_slices(wl, joins):
         nb = sl.stop - sl.start
+        step = block_step(wl, sl)
         w_hp = min(odd_channels(HIGHPASS_WINDOW_NM, step, 5), nb if nb % 2 else nb - 1)
         w_d2 = min(odd_channels(D2_WINDOW_NM, step, 5), nb if nb % 2 else nb - 1)
         if w_hp < 5 or w_d2 < 5:
@@ -532,8 +560,9 @@ def detect_detector_joins(
     steps, scale = _boundary_steps(R, w)
     floor = 1e-9 + 1e-6 * float(np.nanmedian(np.abs(R)))
     z = np.abs(steps) / np.maximum(scale, floor)
-    score = np.nanmedian(z, axis=0)
-    score = np.where(np.isfinite(score), score, 0.0)
+    score = np.zeros(z.shape[1])
+    have = np.isfinite(z).any(axis=0)  # edge boundaries lack a full window on one side
+    score[have] = np.nanmedian(z[:, have], axis=0)
     background = float(np.percentile(score[score > 0], 95)) if np.any(score > 0) else 0.0
     threshold = max(min_score, 3.0 * background)
 
@@ -565,7 +594,7 @@ def _plausible_joins(
     joins: Sequence[float] | None, wl: np.ndarray, margin_nm: float = 100.0
 ) -> tuple[float, ...]:
     out = []
-    for j in joins or ():
+    for j in () if joins is None else np.atleast_1d(joins):
         j = float(j)
         if np.isfinite(j) and wl[0] + margin_nm <= j <= wl[-1] - margin_nm:
             out.append(j)
@@ -629,7 +658,7 @@ _ASD_MAGIC = (b"ASD", b"as2", b"as3", b"as4", b"as5", b"as6", b"as7", b"as8")
 def read_asd_header_joins(path: str | Path) -> tuple[float, float] | None:
     """Splice (detector join) wavelengths from an ASD binary header.
 
-    Legacy v1 (``ASD``) and as2-as8 headers store them as float32 at bytes 444 and 448
+    Legacy v1 (``ASD\0``) and as2-as8 headers store them as float32 at bytes 444 and 448
     (checked on LabSpec 4 as8, FieldSpec 3 v1 and dasp's example files: 1000/1800; a
     Trek-type as7 stores 0/0, meaning none). The header is read directly because the
     SpecDAL path used for modern files drops it.
@@ -638,13 +667,17 @@ def read_asd_header_joins(path: str | Path) -> tuple[float, float] | None:
         ``(join1, join2)`` when both are finite, ordered and inside the file's grid with
         100 nm to spare; otherwise ``None``.
     """
+    path = Path(path)
     with open(path, "rb") as fh:
         raw = fh.read(484)
-    if len(raw) < 484 or raw[:3] not in _ASD_MAGIC:
+    # Binary headers have a NUL right after the magic; an ASCII export can start "ASD ...".
+    if len(raw) < 484 or raw[:3] not in _ASD_MAGIC or raw[3] != 0:
         return None
     ch1 = struct.unpack_from("<f", raw, 191)[0]
     step = struct.unpack_from("<f", raw, 195)[0]
     channels = struct.unpack_from("<H", raw, 204)[0]
+    if path.stat().st_size < 484 + 4 * channels:  # float32 data at least
+        return None
     s1 = struct.unpack_from("<f", raw, 444)[0]
     s2 = struct.unpack_from("<f", raw, 448)[0]
     if not all(np.isfinite(v) for v in (ch1, step, s1, s2)) or step <= 0 or channels < 2:

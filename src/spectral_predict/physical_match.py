@@ -155,6 +155,8 @@ def apply_physical_match(
     """
     X = np.atleast_2d(np.asarray(X_satellite_new, dtype=np.float64))
     wl = sd.check_wavelengths(wavelengths, X.shape[1])
+    blocks = np.atleast_2d(np.asarray(params["blocks"], dtype=np.float64))
+    sd.check_uniform_blocks(wl, blocks[:-1, 1])
     space = str(params["space"])
     sd.check_space(space)
     if space == "reflectance" and np.mean(X > 1.5) > 0.5:
@@ -174,6 +176,31 @@ def apply_physical_match(
 
 
 # ----------------------------------------------------------------------------- fitting
+
+
+def _fill_invalid(
+    X: np.ndarray, A: np.ndarray, valid: np.ndarray, wl: np.ndarray, space: str
+) -> tuple[np.ndarray, np.ndarray]:
+    """Replace unusable channels of each spectrum by linear interpolation in absorbance."""
+    if valid.all():
+        return X, A
+    A = A.copy()
+    for i in np.flatnonzero(~valid.all(axis=1)):
+        ok = valid[i]
+        if ok.sum() < 2:
+            raise ValueError("A spectrum has fewer than 2 usable channels")
+        A[i, ~ok] = np.interp(wl[~ok], wl[ok], A[i, ok])
+    return sd.from_absorbance(A, space), A
+
+
+def _dilate(mask: np.ndarray, wl: np.ndarray, nm: float) -> np.ndarray:
+    """Grow a channel mask by ``nm`` on each side."""
+    if not mask.any():
+        return mask
+    out = mask.copy()
+    for w in wl[mask]:
+        out |= np.abs(wl - w) <= nm
+    return out
 
 
 def _d2_block(A: np.ndarray, wl_b: np.ndarray) -> np.ndarray:
@@ -344,9 +371,16 @@ def estimate_physical_match(
     if featureless not in ("unity", "pooled"):
         raise ValueError(f"featureless must be 'unity' or 'pooled', got {featureless!r}")
 
+    sd.check_uniform_blocks(wl, joins)
     A_p, valid_p = sd.to_absorbance(Xp, space)
     A_s, valid_s = sd.to_absorbance(Xs, space)
-    valid = valid_p.all(axis=0) & valid_s.all(axis=0)
+    # Unusable channels (reflectance <= 0, non-finite) are filled from their neighbours
+    # so the 31 nm derivative and the blur cannot spread them; the fit mask then stays
+    # a derivative half-window away from them.
+    Xp, A_p = _fill_invalid(Xp, A_p, valid_p, wl, space)
+    Xs, A_s = _fill_invalid(Xs, A_s, valid_s, wl, space)
+    bad = ~(valid_p.all(axis=0) & valid_s.all(axis=0))
+    valid = ~_dilate(bad, wl, 0.5 * sd.D2_WINDOW_NM)
     blocks = sd.block_slices(wl, joins)
     B = len(blocks)
     ne_p = sd.estimate_noise(A_p, wl, joins)
@@ -355,7 +389,6 @@ def estimate_physical_match(
         sd.noisy_regions(ne_p.channel_sd, wl, joins, factor=noisy_factor), wl
     ) | sd.regions_mask(sd.noisy_regions(ne_s.channel_sd, wl, joins, factor=noisy_factor), wl)
     excl = sd.regions_mask(exclude or (), wl)
-    step = sd.grid_step(wl)
 
     if fwhm is not None:
         fixed = _sigma_from_fwhm(fwhm, B)
@@ -378,6 +411,7 @@ def estimate_physical_match(
         if m.sum() < 10:
             fits.append(None)
             continue
+        step = sd.block_step(wl, slc)
         w_d2 = sd.odd_channels(sd.D2_WINDOW_NM, step, 5)
         w_d2 = min(w_d2, wl_b.size if wl_b.size % 2 else wl_b.size - 1)
         d2c = savgol_coeffs(w_d2, 3, deriv=2, delta=step, use="dot")
@@ -480,5 +514,15 @@ def estimate_physical_match(
         "satellite_coarser": coarser,
         "snr": snr,
         "fit_mask": fit_mask,
-        "notes": " ".join(notes),
+        "notes": " ".join(
+            notes
+            + (
+                [
+                    "Only 2 standards: the noise estimate is rough, so blur and band-structure "
+                    "checks are approximate."
+                ]
+                if n < 3
+                else []
+            )
+        ),
     }

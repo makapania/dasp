@@ -142,7 +142,7 @@ def _fake_header(path: Path, magic: bytes, s1: float, s2: float) -> Path:
     struct.pack_into("<H", raw, 204, 2151)
     struct.pack_into("<f", raw, 444, s1)
     struct.pack_into("<f", raw, 448, s2)
-    path.write_bytes(bytes(raw))
+    path.write_bytes(bytes(raw) + bytes(4 * 2151))
     return path
 
 
@@ -156,6 +156,13 @@ def test_header_joins_plausibility(tmp_path):
     )
     (tmp_path / "e.txt").write_text("wavelength,reflectance\n" * 40)
     assert sd.read_asd_header_joins(tmp_path / "e.txt") is None
+    # An ASCII export may start with "ASD": no NUL after the magic, so not a header.
+    text = _fake_header(tmp_path / "f.asd", b"ASD", 1000, 1800).read_bytes()
+    (tmp_path / "f.asd").write_bytes(b"ASD " + text[4:])
+    assert sd.read_asd_header_joins(tmp_path / "f.asd") is None
+    short = _fake_header(tmp_path / "g.asd", b"as8", 1000, 1800).read_bytes()[:600]
+    (tmp_path / "g.asd").write_bytes(short)
+    assert sd.read_asd_header_joins(tmp_path / "g.asd") is None
 
 
 def test_resolve_joins_priority_and_disagreement():
@@ -174,6 +181,12 @@ def test_resolve_joins_priority_and_disagreement():
 
 
 def test_block_slices_and_space_checks():
+    assert len(sd.block_slices(WL, np.array([1000.0, 1800.0]))) == 3  # arrays, not just tuples
+    assert sd._plausible_joins(np.array([1000.0, 1800.0]), WL) == (1000.0, 1800.0)
+    uneven = np.r_[np.arange(400.0, 1000.0, 2.0), np.arange(1000.0, 1400.0, 5.0)]
+    with pytest.raises(ValueError, match="spacing varies"):
+        sd.check_uniform_blocks(uneven, None)
+    sd.check_uniform_blocks(uneven, (998.0,))  # even inside each block
     sl = sd.block_slices(WL, (1000, 1800, 9999))
     assert [(WL[s][0], WL[s][-1]) for s in sl] == [(350, 1000), (1001, 1800), (1801, 2500)]
     with pytest.raises(ValueError, match="percent"):

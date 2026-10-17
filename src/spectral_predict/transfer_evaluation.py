@@ -446,7 +446,7 @@ def _check_groups(
             "Grouped scores fit on one group and test on the other (2 groups); each fit "
             "uses only part of the standards."
         )
-    elif counts.min() < 3:
+    if counts.min() < 3:
         warnings_out.append("Some groups have fewer than 3 standards; grouped scores are noisy.")
     return g
 
@@ -593,6 +593,7 @@ def evaluate_transfer(
         y_sat = _check_predictions(predict(Xs), n)
 
     fit_kw = {"wavelengths": wl, "space": space, "joins": joins}
+    joins_cache: dict[bytes, tuple[float, ...]] = {}
     loso_folds = [(np.flatnonzero(np.arange(n) != i), np.array([i])) for i in range(n)]
     group_folds = None
     if g is not None:
@@ -631,7 +632,9 @@ def evaluate_transfer(
             rows.append(row)
             continue
         try:
-            pred, Z = _out_of_fold(cand, Xp, Xs, y_arr, predict, y_sat, loso_folds, fit_kw)
+            pred, Z = _out_of_fold(
+                cand, Xp, Xs, y_arr, predict, y_sat, loso_folds, fit_kw, joins_cache
+            )
         except (np.linalg.LinAlgError, ValueError) as exc:
             logger.warning("Transfer candidate %s failed: %s", label, exc)
             row["error"] = str(exc)
@@ -659,6 +662,7 @@ def evaluate_transfer(
                 group_folds,
                 fit_kw,
                 oof_pred_g,
+                joins_cache,
             )
         rows.append(row)
 
@@ -751,13 +755,16 @@ def _grouped_scores(
     group_folds: list[tuple[np.ndarray, np.ndarray]],
     fit_kw: dict[str, Any],
     oof_pred_g: dict[str, np.ndarray],
+    joins_cache: dict[bytes, tuple[float, ...]] | None = None,
 ) -> str:
     """Fill the grouped columns of ``row``; return an error text ('' when scored)."""
     smallest_fit = min(tr.size for tr, _ in group_folds)
     if cand.min_fit_standards > smallest_fit:
         return f"needs {cand.min_fit_standards} standards per fit"
     try:
-        pred_g, Z_g = _out_of_fold(cand, Xp, Xs, y_arr, predict, y_sat, group_folds, fit_kw)
+        pred_g, Z_g = _out_of_fold(
+            cand, Xp, Xs, y_arr, predict, y_sat, group_folds, fit_kw, joins_cache
+        )
     except (np.linalg.LinAlgError, ValueError) as exc:
         logger.warning("Transfer candidate %s failed (grouped): %s", row["label"], exc)
         return str(exc)
@@ -894,11 +901,14 @@ def _out_of_fold(
     y_sat: np.ndarray | None,
     folds: Sequence[tuple[np.ndarray, np.ndarray]],
     fit_kw: dict[str, Any],
+    joins_cache: dict[bytes, tuple[float, ...]] | None = None,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     """Out-of-fold predictions and transferred spectra for one candidate.
 
     Every fold is fitted on its training rows only; joins detected with ``'auto'``
-    and the physical match's noise maps are computed from those rows too.
+    and the physical match's noise maps are computed from those rows too. Detected
+    joins depend only on the fold's rows, so ``joins_cache`` shares them between
+    candidates.
     """
     n = Xs.shape[0]
     if cand.kind == "none":
@@ -913,7 +923,16 @@ def _out_of_fold(
 
     Z = np.empty_like(Xs)
     for tr, te in folds:
-        tm = fit_transfer(cand, Xp[tr], Xs[tr], **fit_kw)
+        kw = fit_kw
+        auto = isinstance(fit_kw.get("joins"), str) and fit_kw["joins"] == "auto"
+        if cand.method == "physical" and auto and joins_cache is not None:
+            key = np.asarray(tr, dtype=np.int64).tobytes()
+            if key not in joins_cache:
+                joins_cache[key] = _fold_joins(
+                    Xp[tr], Xs[tr], fit_kw["wavelengths"], fit_kw["space"], "auto"
+                )[0]
+            kw = {**fit_kw, "joins": joins_cache[key]}
+        tm = fit_transfer(cand, Xp[tr], Xs[tr], **kw)
         Z[te] = ct.apply_transfer_dispatch(Xs[te], tm)
     if not np.isfinite(Z).all():
         raise ValueError("transfer produced non-finite spectra")

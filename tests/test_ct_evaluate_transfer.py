@@ -600,13 +600,19 @@ def test_grouped_prediction_bias_hand_check():
     prim, sat, groups, predict = _two_group_offsets()
     y = predict(prim) + np.linspace(-0.1, 0.1, prim.shape[0])
     ev = evaluate_transfer(
-        prim, sat, y=y, predict=predict, groups=groups,
+        prim,
+        sat,
+        y=y,
+        predict=predict,
+        groups=groups,
         candidates=[TransferCandidate.make("pred_bias")],
     )
     y_sat = predict(sat)
     expected = np.empty_like(y)
     for g, other in (("A", "B"), ("B", "A")):
-        expected[groups == g] = y_sat[groups == g] + np.mean(y[groups == other] - y_sat[groups == other])
+        expected[groups == g] = y_sat[groups == g] + np.mean(
+            y[groups == other] - y_sat[groups == other]
+        )
     np.testing.assert_allclose(ev.oof_predictions_grouped["Prediction bias"], expected)
     row = ev.leaderboard.set_index("method").loc["pred_bias"]
     assert row["RMSEP_grouped"] == pytest.approx(np.sqrt(np.mean((expected - y) ** 2)))
@@ -640,8 +646,11 @@ def example_pair():
     R = X.to_numpy(float)[:24]
     blocks = np.array([[wl[s][0], wl[s][-1]] for s in sd.block_slices(wl, (1000, 1800))])
     to_primary = {
-        "space": "reflectance", "blocks": blocks, "sigma_nm": np.array([0.0, 3.0, 4.0]),
-        "shift_nm": np.zeros(3), "gain": np.array([0.8, 0.65, 0.6]),
+        "space": "reflectance",
+        "blocks": blocks,
+        "sigma_nm": np.array([0.0, 3.0, 4.0]),
+        "shift_nm": np.zeros(3),
+        "gain": np.array([0.8, 0.65, 0.6]),
         "offset": np.array([0.05, 0.1, 0.15]),
     }
     rng = np.random.default_rng(3)
@@ -660,12 +669,19 @@ def test_physical_candidates_join_the_default_board(example_pair):
     wl, Rp, Rs, predict, model_wl = example_pair
     groups = ["u1"] * 12 + ["u2"] * 12
     ev = evaluate_transfer(
-        Rp, Rs, predict=predict, wavelengths=wl, space="reflectance", groups=groups,
+        Rp,
+        Rs,
+        predict=predict,
+        wavelengths=wl,
+        space="reflectance",
+        groups=groups,
         model_wavelengths=model_wl,
     )
     assert ev.leaderboard.iloc[0]["method"] == "physical"
-    assert {"Physical match (learned blur, gain per block)",
-            "Physical match (no blur, gain per block)"} <= set(ev.candidates)
+    assert {
+        "Physical match (learned blur, gain per block)",
+        "Physical match (no blur, gain per block)",
+    } <= set(ev.candidates)
     assert ev.diagnostics["joins"] == [1000.0, 1800.0]
     assert ev.diagnostics["joins_source"] == "detected"
     assert any("noisier than the primary" in w for w in ev.warnings)
@@ -692,3 +708,15 @@ def test_fit_transfer_detects_joins_from_its_own_standards(example_pair):
     assert tm.meta["joins"] == [1000.0, 1800.0] and tm.meta["joins_source"] == "detected"
     one = fit_transfer(cand, Rp, Rs, wavelengths=wl, space="reflectance", joins=None)
     assert one.params["blocks"].shape == (1, 2)
+
+
+def test_grouped_fold_that_cannot_be_fitted_is_an_error_and_sorts_last():
+    prim, sat, groups, predict = _two_group_offsets()
+    groups = np.array(["A"] * 10 + ["B"] * 2)  # fitting on B leaves 2 standards
+    cands = [TransferCandidate.make("none"), TransferCandidate.make("pds", window=5, rank=4)]
+    ev = evaluate_transfer(prim, sat, predict=predict, candidates=cands, groups=groups)
+    row = ev.leaderboard.set_index("method").loc["pds"]
+    assert row["error_grouped"] == "needs 5 standards per fit"
+    assert np.isnan(row["RMSD_vs_primary_grouped"]) and np.isnan(row["improvement"])
+    assert ev.leaderboard.iloc[-1]["method"] == "pds"
+    assert any("fewer than 3 standards" in w for w in ev.warnings)
