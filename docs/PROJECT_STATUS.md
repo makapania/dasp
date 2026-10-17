@@ -2,11 +2,11 @@
 
 > Historical material (completed-work narratives, old hand-offs, per-PR details, superseded sections) was moved verbatim to [PROJECT_STATUS_ARCHIVE.md](PROJECT_STATUS_ARCHIVE.md) on 2026-09-15. Grep it for history.
 
-## ▶ NEXT SESSION — START HERE (hand-off updated 2026-10-16)
+## ▶ NEXT SESSION — START HERE (hand-off updated 2026-10-17)
 
-### 0. NOW (2026-10-16): Wave 3 — F2 part 1 (PR #97) and part 1b (PR #98, `47f82fb`) MERGED; next is F2 part 2 (GUI)
+### 0. NOW (2026-10-17): Wave 3 — F2 part 1 (PR #97), 1b (PR #98) and part 2 (PR #99, `b7f6534`) MERGED; next is F2 part 2b
 Wave 1 + 2 (PRs #83-#96) are merged; their summary is in the archive (Batch 2). Wave 3 order (§0a): F2 part 1 ✔ →
-F2 part 1b ✔ → F2 part 2 (GUI, in progress on `zcode/f2-part2-gui`) → F2 part 2b → F1 part 1 (CVPlan) → F4/CS1/F3/F5/MW1/SP1-2. Open branch: `zcode/f2-part2-gui` (GLM, worktree `.claude/worktrees/f2-part2-gui`).
+F2 part 1b ✔ → F2 part 2 ✔ → F2 part 2b → F1 part 1 (CVPlan) → F4/CS1/F3/F5/MW1/SP1-2. No open branches.
 **F2 part 1** (plan `docs/plans/2026-10-05-F2-part1-transfer-validation-backend.md`): `transfer_evaluation`
 (`evaluate_transfer` leave-one-standard-out bake-off with "No correction" + primary reference rows, `fit_transfer`,
 `pair_standards_by_id`, `predict_fn_from_model`), centred low-rank PDS (`B_centred`), dual DS, prediction slope/bias;
@@ -31,7 +31,7 @@ evidence SESSION_LOG 2026-10-16). Driven by SPYDER Bone's 40 bones scanned on La
 joins (header / detected / user override) and the physical-match notes; ID pairing in the loaders (the GUI still
 pairs by row order: SPYDER found 0/40 rows correct in the user's earlier DS files — do not reuse those), a group
 column for standards, "Plan transfer standards", delete the dead `_build_ct_transfer_model`/`_load_ct_paired_spectra`.
-**Part 2 built** (branch `zcode/f2-part2-gui`, plan `docs/plans/2026-10-16-F2-part2-ct-gui.md`, as-built blocks per
+**Part 2 MERGED** (PR #99, plan `docs/plans/2026-10-16-F2-part2-ct-gui.md`, as-built blocks per
 review round): ID pairing in the loaders plus a pairs table (an active table alone defines the pairs; "Clear Table"
 returns to ID matching), group column, Validate & Compare panel (worker thread, leaderboard, joins control, Fit
 Selected), Plan Transfer Standards (Kennard-Stone), dead row-order code deleted. Prediction models get spectra in
