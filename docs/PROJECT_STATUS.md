@@ -39,7 +39,8 @@ the **primary's loaded scale** (fits record `meta['primary_value_scale']`; legac
 with a one-line warning). Every input change goes through one invalidation entry point with per-launch run ids.
 Five review rounds (GLM, then Codex confirms) to a Codex MERGE verdict; full suite 5173 passed / 26 skipped.
 **Follow-ups:** the File Equalize UI (Section F) and `_load_and_predict_ct` have helpers and tests but no widgets in
-the tab (nothing creates `ct_eq_*`, `ct_new_satellite_dir_var`, `ct_prediction_text`): wire them or delete them.
+the tab (nothing creates `ct_eq_*`, `ct_new_satellite_dir_var`, `ct_prediction_text`). They duplicate Mode A (predict) and Mode B (transform & export):
+recommended to delete them and their tests rather than wire them (offered to the user 2026-10-17, not yet decided).
 **Part 2b (after part 2):** `docs/plans/2026-10-17-F2-part2b-transfer-fit-regions-dn-joins.md`: a fit-regions option
 for the physical-match gain ("exclude water bands"), and detector joins from raw DN (Trek). Both found on SPYDER's
 Beasley FieldSpec 3/Trek pairs; no bone-specific mode.
