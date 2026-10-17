@@ -6,6 +6,25 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 Older entries are in [SESSION_LOG_ARCHIVE.md](SESSION_LOG_ARCHIVE.md) — grep it for historical context; batch 8 on 2026-10-03 moved every entry dated 2026-09-14 to 2026-09-28; batch 7 on 2026-09-15 moved every entry dated before 2026-09-14 plus the full round-by-round PR #79 crash-resume history (condensed here into the 2026-09-15 "PR #79 crash-resume (merged a5f9a70)" entry); batch 6 moved entries dated before 2026-09-01.
 
+## 2026-10-17 - F2 part 2 review round 4: table-active flag; run abandonment
+
+Branch `zcode/f2-part2-gui`, six Codex findings on round 3. Durable lessons:
+
+- **"Pairs table active" must be independent of how many rows resolve.** A reload can empty
+  the recorded mappings before the table is re-applied; if a zero-rows re-apply then raises
+  (round 3's behaviour), the path stays set while the mappings are gone and pairing silently
+  falls back to ID matching. The flag is set as soon as a load is *attempted* against the
+  loaded files — a failed parse also leaves it active with zero rows (refuse, don't guess);
+  only Clear Table clears it.
+- **Invalidation owns the busy state, once.** Bumping the input-generation counter is not
+  enough while the active run id survives: the stale callback passes the run-id check, takes
+  the stale-generation branch and rewrites running flag/buttons/status a second time.
+  Invalidation now clears the active run id itself; callbacks compare run ids and touch
+  nothing when they do not own the panel. Round 3's comment ("a newer run was launched")
+  described too narrow a case — invalidation alone must abandon the run.
+- Treeview item ids do not survive a delete+re-insert refresh: re-read `get_children()` for
+  every `selection_set` in a multi-edit test sequence (I001 & co. are never reused).
+
 ## 2026-10-17 - F2 part 2 review round 2: unwired Section F; chain scale bookkeeping
 
 Branch `zcode/f2-part2-gui`, four findings on top of the round-1 fixes:
