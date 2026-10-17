@@ -348,3 +348,9 @@ def test_smoothing_helper_searches_the_callers_candidates(example_reflectance):
         wl[keep], A_high, wl[keep], A_low, [0, 5, 10, 15, 20, 25]
     )
     assert got == 20
+
+
+def test_sigma_grid_must_be_finite():
+    wl, Rp, Rs = _broadband_pair()
+    with pytest.raises(ValueError, match="sigma_grid"):
+        pm.estimate_physical_match(Rp, Rs, wl, space="reflectance", sigma_grid=[0.0, np.nan])

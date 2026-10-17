@@ -150,8 +150,9 @@ def apply_physical_match(
         (m, p) spectra in primary-instrument space, same space as the input.
 
     Raises:
-        ValueError: Grid does not match the stored blocks, or reflectance expected but
-            the data look like absorbance or percent reflectance.
+        ValueError: Grid does not match the stored blocks, reflectance expected but the
+            data look like absorbance or percent reflectance, or a spectrum has no usable
+            channel in a block.
     """
     X = np.atleast_2d(np.asarray(X_satellite_new, dtype=np.float64))
     wl = sd.check_wavelengths(wavelengths, X.shape[1])
@@ -412,8 +413,8 @@ def estimate_physical_match(
     excl = sd.regions_mask(() if exclude is None else exclude, wl)
 
     grid = tuple(sorted(float(v) for v in (SIGMA_GRID_NM if sigma_grid is None else sigma_grid)))
-    if not grid or grid[0] < 0:
-        raise ValueError("sigma_grid needs at least one value >= 0")
+    if not grid or not np.all(np.isfinite(grid)) or grid[0] < 0:
+        raise ValueError("sigma_grid needs finite values >= 0")
     if fwhm is not None:
         fixed = _sigma_from_fwhm(fwhm, B)
     elif isinstance(sigma, str):
