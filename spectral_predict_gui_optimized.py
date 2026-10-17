@@ -449,6 +449,21 @@ def _data_type_suffix(data_type, source_data_type=None) -> str:
     return _SOURCE_DATA_TYPE_SUFFIXES.get(canonical_source_data_type(source_data_type), "_other")
 
 
+# Spectral-file extensions a pairs table may carry on its file names even
+# though the loaded index holds the reader's file stems (io.py's format map).
+_CT_SPECTRAL_NAME_EXTENSIONS = frozenset((
+    '.csv', '.xlsx', '.xls', '.asd', '.sig', '.sco', '.spc', '.jdx', '.dx',
+    '.jcm', '.txt', '.dat', '.dpt', '.asc', '.sp', '.spa', '.spg', '.seq',
+    '.dmt', '.asp', '.bsw', '.npy',
+))
+
+# Said by the pairs status whenever a pairs table is active but none of its
+# rows resolve against the loaded files: pairing refuses until the table is
+# fixed or cleared (never a silent fall-back to ID matching).
+_CT_PAIRS_TABLE_NO_ROWS_MSG = (
+    "Pairs table active but no rows resolve; fix the table or Clear Table.")
+
+
 def _loaded_value_scale(metadata, X, data_type) -> float:
     """Reflectance scale (1 or 100) to use when converting this data.
 
@@ -3060,6 +3075,44 @@ class SpectralPredictApp:
         self.current_satellite_data = None  # (wavelengths, X) tuple for building model
         self.primary_data_format = None  # 'csv', 'npy', 'folder', etc.
         self.satellite_data_format = None  # 'csv', 'npy', 'folder', etc.
+
+        # A1 loading keeps sample IDs so standards pair by ID, never row order
+        self.current_primary_df = None  # pd.DataFrame, index=sample IDs, columns=wavelengths
+        self.current_satellite_df = None  # same layout, any row order
+        self.current_primary_ids_positional = False  # True when the source had no IDs
+        self.current_satellite_ids_positional = False
+        self.ct_primary_header_joins = None  # ASD header joins captured at load time
+        self.ct_satellite_header_joins = None
+        self.ct_paired = None  # PairedStandards from pair_standards_by_id
+        self.ct_pair_groups = None  # primary sample ID -> group label
+        self.ct_pair_groups_table_keys = None  # IDs whose label came from the pairs table
+        self.ct_pairs_rename = None  # satellite ID -> primary ID from a pairs table
+        self.ct_pairs_table_active = False  # True while a table defines the pairs, even with 0 resolved rows
+        self.ct_pairs_table_unresolved = None  # table rows without a mapping
+        self.ct_pairs_table_named_primary = None  # loaded files any table row names
+        self.ct_pairs_table_named_satellite = None
+        self.ct_pairs_collisions = None  # naming conflicts found by the pairs table
+        self.ct_pair_resample_note = None  # set when pairing resampled the satellite
+        self.ct_last_evaluation = None  # TransferEvaluation of the last Validate run
+        self.ct_pairs_table_path_var = tk.StringVar()  # pairs-table CSV path (A1b)
+        self.ct_pair_group_entry_var = tk.StringVar()  # group label to apply to selected pairs
+
+        # A1b Validate & Compare state
+        self.ct_eval_model_dict = None  # loaded .dasp for prediction scores (optional)
+        self.ct_eval_model_path_var = tk.StringVar()
+        self.ct_eval_space_var = tk.StringVar(value="auto (detected)")
+        self.ct_eval_joins_var = tk.StringVar(value="auto")
+        self.ct_eval_joins_custom_var = tk.StringVar(value="1000, 1800")
+        self._ct_validate_running = False  # guards Validate/Fit double launches
+        self._ct_eval_context = None  # frozen inputs of the last Validate run (for Fit)
+        self._ct_input_generation = 0  # bumped whenever the pairing inputs change
+        self._ct_run_seq = 0  # each Validate/Fit launch gets a fresh run id
+        self._ct_active_run_id = 0  # the run that currently owns the busy state
+        self._ct_plan_dialog = None  # Plan Transfer Standards Toplevel, if open
+        self._ct_plan_running = False
+        self.ct_plan_source_var = tk.StringVar(value="primary")
+        self.ct_plan_folder_var = tk.StringVar()
+        self.ct_plan_n_var = tk.StringVar(value="15")
 
         # Enhanced loading with Y values (for JYPLS-inv)
         # Primary data with Y values
@@ -48451,139 +48504,6 @@ External Validation Performance (n={n_val}):
         if directory:
             self.ct_satellite_spectra_dir_var.set(directory)
 
-    def _load_ct_paired_spectra(self):
-        """Load paired standardization spectra for primary and satellite instruments from separate directories."""
-        if not HAS_CALIBRATION_TRANSFER:
-            messagebox.showerror("Error", "Calibration transfer modules not available")
-            return
-
-        primary_id = self.ct_primary_instrument_id.get()
-        satellite_id = self.ct_satellite_instrument_id.get()
-        primary_dir = self.ct_primary_spectra_dir_var.get()
-        satellite_dir = self.ct_satellite_spectra_dir_var.get()
-
-        if not primary_id or not satellite_id:
-            messagebox.showwarning("Warning", "Please select both primary and satellite instruments")
-            return
-
-        if not primary_dir or not satellite_dir:
-            messagebox.showwarning("Warning", "Please browse and select both primary and satellite spectra directories")
-            return
-
-        if primary_id not in self.instrument_profiles or satellite_id not in self.instrument_profiles:
-            messagebox.showerror("Error", "Selected instruments not found in registry")
-            return
-
-        # VALIDATION: Check that primary and satellite are different instruments
-        if primary_id == satellite_id:
-            messagebox.showerror(
-                "Same Instrument Selected",
-                "Primary and satellite instruments must be different for calibration transfer.\n\n"
-                f"You selected: {primary_id} for both primary and satellite.\n\n"
-                "Please select different instruments."
-            )
-            return
-
-        try:
-            # Load spectra from SEPARATE directories
-            wavelengths_primary, X_primary = self._load_spectra_from_directory(primary_dir)
-            wavelengths_satellite, X_satellite = self._load_spectra_from_directory(satellite_dir)
-
-            # VALIDATION 1: Same Sample Count Check
-            if X_primary.shape[0] != X_satellite.shape[0]:
-                messagebox.showerror(
-                    "Sample Count Mismatch",
-                    f"Primary has {X_primary.shape[0]} samples, Satellite has {X_satellite.shape[0]} samples.\n\n"
-                    "Paired spectra must have the same number of samples (same sample set measured on both instruments).\n\n"
-                    "Please ensure both instruments measured the exact same samples."
-                )
-                return
-
-            # VALIDATION 2: Minimum Sample Check
-            if X_primary.shape[0] < 20:
-                response = messagebox.askokcancel(
-                    "Few Samples",
-                    f"Only {X_primary.shape[0]} paired samples loaded.\n\n"
-                    "At least 30 samples recommended for robust calibration transfer.\n"
-                    "Results may be unreliable with fewer samples.\n\n"
-                    "Do you want to continue anyway?"
-                )
-                if not response:
-                    return
-
-            # VALIDATION 3: Wavelength Overlap Check
-            primary_range = (wavelengths_primary[0], wavelengths_primary[-1])
-            satellite_range = (wavelengths_satellite[0], wavelengths_satellite[-1])
-
-            overlap_start = max(primary_range[0], satellite_range[0])
-            overlap_end = min(primary_range[1], satellite_range[1])
-
-            if overlap_start >= overlap_end:
-                messagebox.showerror(
-                    "No Wavelength Overlap",
-                    f"Primary range: {primary_range[0]:.1f}-{primary_range[1]:.1f} nm\n"
-                    f"Satellite range: {satellite_range[0]:.1f}-{satellite_range[1]:.1f} nm\n\n"
-                    "Instruments must have overlapping wavelength ranges for calibration transfer.\n\n"
-                    "Please select instruments with compatible wavelength coverage."
-                )
-                return
-
-            # Check overlap percentage
-            primary_span = primary_range[1] - primary_range[0]
-            satellite_span = satellite_range[1] - satellite_range[0]
-            overlap_span = overlap_end - overlap_start
-
-            primary_overlap_pct = (overlap_span / primary_span) * 100
-            satellite_overlap_pct = (overlap_span / satellite_span) * 100
-            min_overlap_pct = min(primary_overlap_pct, satellite_overlap_pct)
-
-            if min_overlap_pct < 80:
-                response = messagebox.askokcancel(
-                    "Limited Wavelength Overlap",
-                    f"Wavelength overlap is {min_overlap_pct:.1f}% of instrument range.\n\n"
-                    f"Primary range: {primary_range[0]:.1f}-{primary_range[1]:.1f} nm\n"
-                    f"Satellite range: {satellite_range[0]:.1f}-{satellite_range[1]:.1f} nm\n"
-                    f"Overlap region: {overlap_start:.1f}-{overlap_end:.1f} nm\n\n"
-                    "Transfer quality may be reduced with limited overlap.\n"
-                    "Consider using instruments with better wavelength coverage overlap.\n\n"
-                    "Do you want to continue anyway?"
-                )
-                if not response:
-                    return
-
-            # Get instrument profiles
-            primary_prof = self.instrument_profiles[primary_id]
-            satellite_prof = self.instrument_profiles[satellite_id]
-
-            # Choose common grid
-            common_wl = choose_common_grid(
-                {primary_id: primary_prof, satellite_id: satellite_prof},
-                [primary_id, satellite_id]
-            )
-
-            # Resample both to common grid
-            self.ct_X_primary_common = resample_to_grid(X_primary, wavelengths_primary, common_wl)
-            self.ct_X_satellite_common = resample_to_grid(X_satellite, wavelengths_satellite, common_wl)
-            self.ct_wavelengths_common = common_wl
-
-            # Display info
-            info_text = (f"Loaded {X_primary.shape[0]} paired spectra\n"
-                        f"Common wavelength grid: {common_wl.shape[0]} points\n"
-                        f"Range: {common_wl.min():.1f} - {common_wl.max():.1f} nm\n"
-                        f"Wavelength overlap: {min_overlap_pct:.1f}%")
-
-            self.ct_spectra_info_text.config(state='normal')
-            self.ct_spectra_info_text.delete('1.0', tk.END)
-            self.ct_spectra_info_text.insert('1.0', info_text)
-            self.ct_spectra_info_text.config(state='disabled')
-
-            # Show preview plots immediately after loading
-            self._plot_paired_spectra_preview(primary_id, satellite_id)
-
-            messagebox.showinfo("Success", "Paired spectra loaded and resampled to common grid.\n\nPreview plots displayed.")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to load spectra:\n{str(e)}")
-
     # REMOVED - Instrument Lab functionality deprecated
     # def _import_from_instrument_lab(self):
     #     """Import paired spectra from Instrument Lab characterization data."""
@@ -49136,8 +49056,22 @@ External Validation Performance (n={n_val}):
             common_wl = self.ct_pred_transfer_model.wavelengths_common
             X_satellite_common = resample_to_grid(X_satellite_new, wavelengths_satellite, common_wl)
 
-            # Apply transfer model (ROI-aware: splices region back into full spectrum)
-            X_transferred = self._apply_transfer_with_roi(X_satellite_common, self.ct_pred_transfer_model)
+            # Apply transfer model (ROI-aware: splices region back into full
+            # spectrum) through the same funnel as Mode A: convert the loaded
+            # scale to the fit scale, warn about legacy files that predate
+            # scale recording, and hand the prediction model spectra in the
+            # primary's loaded scale.
+            dir_metadata = getattr(self, '_last_dir_load_metadata', None)
+            loaded_type, _, _ = _resolve_loaded_data_type(dir_metadata, X_satellite_new)
+            new_scale = (
+                _loaded_value_scale(dir_metadata, X_satellite_new, loaded_type)
+                if loaded_type == 'reflectance' else None)
+            self._ct_legacy_scale_note(self.ct_pred_transfer_model, new_scale)
+            X_transferred = self._apply_transfer_with_roi(
+                X_satellite_common, self.ct_pred_transfer_model, value_scale=new_scale)
+            p_scale, f_scale = self._ct_primary_scale_of(self.ct_pred_transfer_model)
+            if p_scale is not None and p_scale != f_scale:
+                X_transferred = X_transferred * (p_scale / f_scale)
 
             # Resample transferred spectra to primary model's wavelength grid
             metadata = self.ct_primary_model_dict.get('metadata', {})
@@ -49418,16 +49352,46 @@ External Validation Performance (n={n_val}):
             X_satellite_resampled = resample_to_grid(X_satellite, wavelengths_satellite,
                                                   transfer_model.wavelengths_common)
 
-            # Apply transfer transformation
+            # Apply transfer transformation. This is an export path, so it
+            # follows the Mode B convention: the loaded folder's reflectance
+            # scale is detected from the reader metadata / values, the spectra
+            # are converted to the transfer's fit scale before applying, and
+            # the export comes back in the primary's loaded scale when the
+            # fit recorded it (older files: the loaded data's own scale).
+            eq_type, _, _ = _resolve_loaded_data_type(
+                getattr(self, '_last_dir_load_metadata', None), X_satellite)
+            eq_scale = (
+                _loaded_value_scale(
+                    getattr(self, '_last_dir_load_metadata', None), X_satellite, eq_type)
+                if eq_type == 'reflectance' else None)
+            legacy_note = self._ct_legacy_scale_note(transfer_model, eq_scale)
+            scale_note = None
             self.ct_eq_status_text.config(state='normal')
             self.ct_eq_status_text.insert(
                 tk.END,
                 f"Applying {ct_method_display_name(transfer_model.method)} transformation...\n",
             )
+            if legacy_note:
+                self.ct_eq_status_text.insert(tk.END, legacy_note + "\n")
             self.ct_eq_status_text.config(state='disabled')
             self.root.update()
 
-            X_transformed = self._apply_transfer_with_roi(X_satellite_resampled, transfer_model)
+            X_transformed = self._apply_transfer_with_roi(
+                X_satellite_resampled, transfer_model, value_scale=eq_scale,
+                output_scale="incoming")
+            p_scale, _fit_scale = self._ct_primary_scale_of(transfer_model)
+            if p_scale is not None and eq_scale is not None:
+                if p_scale != float(eq_scale):
+                    X_transformed = X_transformed * (p_scale / float(eq_scale))
+                scale_note = ("percent (0-100) reflectance" if p_scale == 100.0
+                              else "fraction (0-1) reflectance")
+            if scale_note:
+                self.ct_eq_status_text.config(state='normal')
+                self.ct_eq_status_text.insert(
+                    tk.END,
+                    f"Output scale: {scale_note} — like the primary "
+                    "instrument's loaded data.\n")
+                self.ct_eq_status_text.config(state='disabled')
 
             # Create model name for filename prefix
             model_name = f"{transfer_model.primary_id}_from_{transfer_model.satellite_id}_{transfer_model.method}"
@@ -49993,9 +49957,10 @@ External Validation Performance (n={n_val}):
             print(f"Error creating prediction plots: {str(e)}")
 
     def _load_spectra_from_directory(self, directory):
-        # Reader metadata of the last directory load, for callers that need the data
-        # type (this method returns arrays only).
+        # Reader metadata and sample IDs of the last directory load, for callers that
+        # need them (this method returns arrays only).
         self._last_dir_load_metadata = None
+        self._last_dir_ids = None
         return self._load_spectra_from_directory_impl(directory)
 
     def _load_spectra_from_directory_impl(self, directory):
@@ -50012,6 +49977,7 @@ External Validation Performance (n={n_val}):
             from spectral_predict.io import read_asd_dir
             df, metadata = read_asd_dir(directory)
             self._last_dir_load_metadata = metadata
+            self._last_dir_ids = list(df.index)
             wavelengths = df.columns.astype(float).values
             X = df.values
             return wavelengths, X
@@ -50019,6 +49985,7 @@ External Validation Performance (n={n_val}):
             # Load CSV files - try smart detection first
             from spectral_predict.io import identify_wavelength_columns
             all_spectra = []
+            all_ids = []
             wavelengths = None
 
             # Check first file to determine format
@@ -50039,6 +50006,8 @@ External Validation Performance (n={n_val}):
                     spectra = df[wl_cols].values.astype(float)
                     for row in spectra:
                         all_spectra.append(row)
+                    # Rows outnumber files: no 1:1 file-to-sample IDs here
+                    all_ids = None
                 else:
                     # Legacy: first row = wavelengths, second row = spectrum
                     df = pd.read_csv(csv_file, header=None, low_memory=False)
@@ -50046,13 +50015,17 @@ External Validation Performance (n={n_val}):
                         wavelengths = df.iloc[0, :].values.astype(float)
                     spectrum = df.iloc[1, :].values.astype(float)
                     all_spectra.append(spectrum)
+                    all_ids.append(os.path.splitext(os.path.basename(csv_file))[0])
             X = np.array(all_spectra)
+            if all_ids is not None and len(all_ids) == X.shape[0]:
+                self._last_dir_ids = all_ids
             return wavelengths, X
         elif spc_files:
             # Load SPC files
             from spectral_predict.io import read_spc_dir
             df, metadata = read_spc_dir(directory)
             self._last_dir_load_metadata = metadata
+            self._last_dir_ids = list(df.index)
             wavelengths = df.columns.astype(float).values
             X = df.values
             return wavelengths, X
@@ -50063,6 +50036,7 @@ External Validation Performance (n={n_val}):
                 from spectral_predict.io import read_omnic_dir
                 df, metadata = read_omnic_dir(directory)
                 self._last_dir_load_metadata = metadata
+                self._last_dir_ids = list(df.index)
                 wavelengths = df.columns.astype(float).values
                 X = df.values
                 return wavelengths, X
@@ -50415,6 +50389,7 @@ External Validation Performance (n={n_val}):
             dir_metadata = (
                 getattr(self, '_last_dir_load_metadata', None) if os.path.isdir(path) else None
             )
+            self._ct_store_loaded_standards('primary', path, wavelengths, X, dir_metadata)
 
             # Data type: reader metadata first, value heuristic only as fallback
             try:
@@ -50507,6 +50482,7 @@ External Validation Performance (n={n_val}):
             dir_metadata = (
                 getattr(self, '_last_dir_load_metadata', None) if os.path.isdir(path) else None
             )
+            self._ct_store_loaded_standards('satellite', path, wavelengths, X, dir_metadata)
 
             # Data type: reader metadata first, value heuristic only as fallback
             try:
@@ -50553,6 +50529,1343 @@ External Validation Performance (n={n_val}):
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load satellite spectra:\n{str(e)}")
+
+    # ========================================================================
+    # PAIRING STANDARDS BY SAMPLE ID (never row order)
+    # ========================================================================
+
+    def _ct_store_loaded_standards(self, which, path, wavelengths, X, dir_metadata):
+        """Store freshly loaded A1 standards as a DataFrame indexed by sample ID.
+
+        Directory readers supply the IDs (file stems); sources with no IDs (a
+        single CSV/NPY file) get positional row_N IDs and are flagged so pairing
+        can say so. Header detector joins are captured here, once per load, and
+        never re-read from the shared metadata attribute later. Any state built
+        from the previously loaded standards no longer matches the data and is
+        cleared (see ``_ct_invalidate_standards_state``).
+        """
+        ids = getattr(self, "_last_dir_ids", None) if os.path.isdir(path) else None
+        if ids is None or len(ids) != X.shape[0]:
+            ids = [f"row_{i + 1}" for i in range(X.shape[0])]
+            positional = True
+        else:
+            positional = False
+        df = pd.DataFrame(
+            np.asarray(X, dtype=float),
+            index=pd.Index(ids, name="sample_id"),
+            columns=np.asarray(wavelengths, dtype=float),
+        )
+        header_joins = (dir_metadata or {}).get("detector_joins")
+        if which == 'primary':
+            self.current_primary_df = df
+            self.current_primary_ids_positional = positional
+            self.ct_primary_header_joins = header_joins
+        else:
+            self.current_satellite_df = df
+            self.current_satellite_ids_positional = positional
+            self.ct_satellite_header_joins = header_joins
+        self._ct_invalidate_standards_state()
+        return df, positional
+
+    def _ct_invalidate_eval_state(self, reason):
+        """Drop every piece of state derived from the Validate panel's inputs.
+
+        Single entry point for every change of what the board was computed
+        from besides the raw standards (those go through
+        ``_ct_invalidate_standards_state``, which calls this first): a
+        pairs-table load or clear, a re-pair, a group edit, the evaluation
+        model, or the space/joins settings. The input generation is bumped so
+        a validate/fit worker still running on the old inputs has its result
+        discarded, and the run in flight is abandoned — the active run id is
+        cleared and the busy state reset here, once, so its callback (whose
+        run id is no longer active) touches nothing (see the run-id checks in
+        ``_on_ct_validate_done`` / ``_on_ct_fit_done``) and the user can
+        start a new run immediately. The pairing itself and a transfer model
+        loaded from a file are NOT panel state and stay.
+        """
+        self._ct_input_generation = getattr(self, '_ct_input_generation', 0) + 1
+        had_board = (self.ct_last_evaluation is not None
+                     or self.ct_transfer_model is not None)
+        self.ct_last_evaluation = None
+        self._ct_eval_context = None
+        panel_model = self.ct_transfer_model
+        if panel_model is not None:
+            self.ct_transfer_model = None
+            if self.current_transfer_model is panel_model:
+                self.current_transfer_model = None
+            self.ct_transfer_info_text.config(state='normal')
+            self.ct_transfer_info_text.delete('1.0', tk.END)
+            self.ct_transfer_info_text.config(state='disabled')
+            self.ct_save_tm_button.config(state='disabled')
+            self._update_active_transfer_model_status()
+        for item in self.ct_leaderboard_tree.get_children():
+            self.ct_leaderboard_tree.delete(item)
+        self.ct_leaderboard_header_label.config(text="")
+        self.ct_diagnostics_text.config(state='normal')
+        self.ct_diagnostics_text.delete('1.0', tk.END)
+        self.ct_diagnostics_text.config(state='disabled')
+        # A worker still running computed on the old inputs; abandon it. Its
+        # run id is no longer the active one, so its callback returns
+        # without touching state, and the busy state is reset here, once —
+        # the user can start a new run right away.
+        self._ct_active_run_id = None
+        self._ct_validate_running = False
+        self._set_ct_validate_busy(False)
+        if had_board:
+            self.ct_validate_status_label.config(
+                text=f"{reason} changed — leaderboard and fitted transfer "
+                     "cleared. Run Validate & Compare again.",
+                foreground=self.colors['text'])
+
+    def _ct_invalidate_standards_state(self):
+        """Drop every piece of state derived from the previously loaded standards.
+
+        A reload or a Convert-button conversion changes the data the pairing,
+        the board and the fitted transfer were built from; keeping any of it
+        would silently mix sources. The input generation is bumped so a worker
+        still running on the old inputs has its result discarded. A loaded
+        pairs-table CSV is re-applied to the files loaded now (its rows are
+        re-checked and problems re-reported); manual Treeview groups belonged
+        to the old pairing and go with it. A transfer model loaded from a file
+        is kept — it is not panel state; the panel-fitted one is cleared.
+        """
+        had_derived = any((
+            self.ct_paired is not None,
+            self.ct_last_evaluation is not None,
+            self.ct_pair_groups is not None,
+            self.ct_pairs_rename is not None,
+            self.ct_transfer_model is not None,
+        ))
+        self._ct_invalidate_eval_state("The loaded standards")
+        self.ct_paired = None
+        self.ct_pair_resample_note = None
+        self.ct_pair_groups = None
+        self.ct_pair_groups_table_keys = None
+        self.ct_pairs_rename = None
+        # The table itself is re-applied below (or the load is skipped while
+        # an instrument is missing); the re-application decides whether it is
+        # active against the files loaded now.
+        self.ct_pairs_table_active = False
+        self.ct_pairs_table_unresolved = None
+        self.ct_pairs_table_named_primary = None
+        self.ct_pairs_table_named_satellite = None
+        self.ct_pairs_collisions = None
+        self.ct_X_primary_common = None
+        self.ct_X_satellite_common = None
+        self.ct_wavelengths_common = None
+        self._refresh_ct_pairs_tree()
+        self.ct_pairs_status_label.config(
+            text=("Standards changed — pairing, leaderboard and fitted transfer "
+                  "cleared." if had_derived else ""),
+            foreground=self.colors['text'])
+        if (self.ct_pairs_table_path_var.get()
+                and self.current_primary_df is not None
+                and self.current_satellite_df is not None):
+            self._load_ct_pairs_table()
+
+    def _ct_sync_converted_standards(self, which, X_converted):
+        """Write a Convert-button conversion into the pairing DataFrame.
+
+        Sample IDs and the wavelength grid are unchanged by the conversion, so
+        the existing index/columns are kept and only the values are replaced.
+        """
+        df_attr = 'current_primary_df' if which == 'primary' else 'current_satellite_df'
+        df = getattr(self, df_attr, None)
+        converted = np.asarray(X_converted, dtype=float)
+        if df is not None and df.shape == converted.shape:
+            setattr(self, df_attr, pd.DataFrame(
+                converted, index=df.index, columns=df.columns))
+
+    @staticmethod
+    def _ct_normalize_pair_id(name) -> str:
+        """Fold a sample ID / file name for pairs-table matching.
+
+        A known spectral-file extension is stripped first (the tool convention,
+        ``Path(name).stem``, case-insensitive: 'sample1.asd' is the stem
+        'sample1'), then everything but letters and digits is dropped,
+        lowercase — at least as lenient as the backend's ID normalisation.
+        """
+        text = str(name)
+        suffix = os.path.splitext(text)[1].lower()
+        if suffix in _CT_SPECTRAL_NAME_EXTENSIONS:
+            text = text[: -len(suffix)] if suffix else text
+        return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+    def _browse_ct_pairs_table(self):
+        """Browse for a pairs-table CSV (columns primary, satellite [, group])."""
+        filepath = filedialog.askopenfilename(
+            title="Select Pairs Table CSV",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if filepath:
+            self.ct_pairs_table_path_var.set(filepath)
+
+    def _load_ct_pairs_table(self):
+        """Load a pairs table naming which satellite file matches which primary file.
+
+        Columns ``primary`` and ``satellite`` (file stems or names, matched
+        case/space-insensitively) and optionally ``group`` (instrument unit,
+        session or batch). Needed when file names differ between instruments.
+        """
+        from tkinter import messagebox
+
+        path = self.ct_pairs_table_path_var.get()
+        if not path:
+            messagebox.showwarning("No File", "Please browse and select a pairs table CSV first.")
+            return
+        if self.current_primary_df is None or self.current_satellite_df is None:
+            messagebox.showwarning(
+                "No Data", "Load the primary and satellite spectra first, then the pairs table."
+            )
+            return
+        # From here the table defines the pairing whatever its rows resolve.
+        # A load that fails, or resolves no rows, must leave pairing REFUSED
+        # (see _pair_ct_standards) — falling back to ID matching while the
+        # table path is still set would pair files the table never named.
+        # Only Clear Table returns to ID matching. The attempt itself
+        # supersedes the old table: the old pairing and everything derived
+        # from it are dropped NOW, not only after a successful parse, so a
+        # failed load cannot leave a stale pairing usable behind a stale
+        # board; a run still in flight on the old inputs is abandoned.
+        self.ct_pairs_table_active = True
+        self.ct_pairs_rename = None
+        self.ct_pairs_table_unresolved = None
+        self.ct_pairs_table_named_primary = None
+        self.ct_pairs_table_named_satellite = None
+        self.ct_pairs_collisions = None
+        self.ct_paired = None
+        self._ct_invalidate_eval_state("The pairs table")
+        self._refresh_ct_pairs_tree()
+        try:
+            table = pd.read_csv(path)
+            table.columns = [str(c).strip().lower() for c in table.columns]
+            missing = {"primary", "satellite"} - set(table.columns)
+            if missing:
+                raise ValueError(
+                    f"Pairs table needs columns 'primary' and 'satellite' "
+                    f"(and optionally 'group'); found {list(table.columns)}"
+                )
+            has_group = "group" in table.columns
+
+            def index_by_norm(df, instrument):
+                """(lookup, ambiguous key -> colliding ids, notes) per instrument.
+
+                Loaded files whose names fold to the same pairs-table key
+                cannot be told apart by the table; they are kept OUT of the
+                lookup (rows naming them are reported ambiguous) and the
+                collision itself is reported — never silently last-wins. The
+                ambiguous mapping keeps the colliding ids so a row naming
+                them still counts them as named by the table.
+                """
+                grouped = {}
+                for ix in df.index:
+                    grouped.setdefault(self._ct_normalize_pair_id(ix), []).append(ix)
+                lookup = {}
+                ambiguous = {}
+                notes = []
+                for key, ids in grouped.items():
+                    if len(ids) == 1:
+                        lookup[key] = ids[0]
+                    else:
+                        ambiguous[key] = list(ids)
+                        notes.append(
+                            f"{instrument} files collide under one pairs-table "
+                            f"name: {' vs '.join(str(i) for i in ids)}")
+                return lookup, ambiguous, notes
+
+            p_norm, p_ambiguous, collisions = index_by_norm(
+                self.current_primary_df, "Primary")
+            s_norm, s_ambiguous, s_collisions = index_by_norm(
+                self.current_satellite_df, "Satellite")
+            collisions.extend(s_collisions)
+
+            rename = {}
+            # The previous table's group labels go with that table; manual
+            # Treeview edits survive a table (re)load and WIN over the
+            # table's label for the same pair (decision, review round 5).
+            groups = {k: v for k, v in (self.ct_pair_groups or {}).items()
+                      if k not in (getattr(self, 'ct_pair_groups_table_keys',
+                                           None) or set())}
+            manual_keys = set(groups)
+            table_group_keys = set()
+            problems = []
+            used_primary = {}
+            used_satellite = {}
+            named_primary = set()
+            named_satellite = set()
+            for row in table.itertuples(index=False):
+                p_key = self._ct_normalize_pair_id(row.primary)
+                s_key = self._ct_normalize_pair_id(row.satellite)
+                p_actual = p_norm.get(p_key)
+                s_actual = s_norm.get(s_key)
+                # Which loaded files the table names at all — resolved or
+                # not. A row can name a primary that IS loaded while its
+                # satellite is not: that file is 'in the table', not 'not in
+                # the table'. An ambiguous name still names every loaded file
+                # folding to it — they cannot pair, but they are named.
+                if p_actual is not None:
+                    named_primary.add(p_actual)
+                elif p_key in p_ambiguous:
+                    named_primary.update(p_ambiguous[p_key])
+                if s_actual is not None:
+                    named_satellite.add(s_actual)
+                elif s_key in s_ambiguous:
+                    named_satellite.update(s_ambiguous[s_key])
+                if p_actual is None or s_actual is None:
+                    which = (
+                        "primary name ambiguous" if p_key in p_ambiguous
+                        else "satellite name ambiguous" if s_key in s_ambiguous
+                        else "primary not loaded" if p_actual is None
+                        else "satellite not loaded")
+                    problems.append(f"{row.primary} -> {row.satellite} ({which})")
+                    continue
+                if p_actual in used_primary:
+                    collisions.append(
+                        f"table rows '{used_primary[p_actual]}' and "
+                        f"'{row.primary} -> {row.satellite}' both map the primary "
+                        f"file '{p_actual}'; the first row was kept")
+                    continue
+                if s_actual in used_satellite:
+                    collisions.append(
+                        f"table rows '{used_satellite[s_actual]}' and "
+                        f"'{row.primary} -> {row.satellite}' both map the satellite "
+                        f"file '{s_actual}'; the first row was kept")
+                    continue
+                used_primary[p_actual] = f"{row.primary} -> {row.satellite}"
+                used_satellite[s_actual] = f"{row.primary} -> {row.satellite}"
+                rename[s_actual] = p_actual
+                if (has_group and pd.notna(row.group) and str(row.group).strip()
+                        and p_actual not in manual_keys):
+                    groups[p_actual] = str(row.group).strip()
+                    table_group_keys.add(p_actual)
+            if problems:
+                messagebox.showwarning(
+                    "Pairs Table Rows Not Found",
+                    "These table rows name files that were not loaded:\n  "
+                    + "\n  ".join(problems[:10])
+                    + (f"\n  ... and {len(problems) - 10} more" if len(problems) > 10 else ""),
+                )
+            self.ct_pairs_rename = rename or None
+            self.ct_pair_groups = groups
+            self.ct_pair_groups_table_keys = table_group_keys or None
+            # Files the table names at all (resolved or not) — the pairing
+            # status counts as 'not in the table' only files no row names.
+            self.ct_pairs_table_named_primary = named_primary
+            self.ct_pairs_table_named_satellite = named_satellite
+            self.ct_pairs_collisions = collisions or None
+            self.ct_pairs_table_unresolved = len(table) - len(rename)
+            self._refresh_ct_pairs_tree()
+            if not rename:
+                # The table stays active with zero resolved rows; pairing
+                # refuses with the same message until it is fixed or cleared.
+                self.ct_pairs_status_label.config(
+                    text=_CT_PAIRS_TABLE_NO_ROWS_MSG,
+                    foreground=self.colors['warning'])
+                return
+            n_grouped = sum(1 for v in (groups or {}).values() if v) if has_group else 0
+            n_collisions = len(collisions)
+            self.ct_pairs_status_label.config(
+                text=(
+                    f"Pairs table loaded: {len(rename)} pairs"
+                    + (f", {n_grouped} with group" if has_group and n_grouped else "")
+                    + (f", {n_collisions} naming conflict"
+                       f"{'s' if n_collisions != 1 else ''} (listed below)"
+                       if n_collisions else "")
+                    + ". Click 'Pair by Sample ID'."
+                ),
+                foreground=(self.colors['warning'] if n_collisions
+                            else self.colors['text']),
+            )
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load pairs table:\n{str(e)}")
+            if not self.ct_pairs_rename:
+                # The load failed after the previous table state was dropped;
+                # say the table is unusable rather than leaving a stale
+                # 'N pairs loaded' line above an inactive table.
+                self.ct_pairs_status_label.config(
+                    text=_CT_PAIRS_TABLE_NO_ROWS_MSG,
+                    foreground=self.colors['warning'])
+
+    def _refresh_ct_pairs_tree(self):
+        """Fill the pairs Treeview from the current pairing state."""
+        for item in self.ct_pairs_tree.get_children():
+            self.ct_pairs_tree.delete(item)
+        # Naming conflicts the pairs table found (folded IDs colliding, or
+        # duplicate table rows): reported here and in the status label, never
+        # resolved by silently keeping the last match. Shown even before
+        # pairing runs — the table load itself found them.
+        for note in (getattr(self, 'ct_pairs_collisions', None) or []):
+            self.ct_pairs_tree.insert(
+                '', 'end', values=(f"! {note}", "", ""), tags=('unmatched',)
+            )
+        self.ct_pairs_tree.tag_configure('unmatched', foreground=self.colors['warning'])
+        paired = self.ct_paired
+        groups = self.ct_pair_groups or {}
+        if paired is None:
+            return
+        for pid, sid in zip(paired.ids, paired.satellite_ids):
+            self.ct_pairs_tree.insert(
+                '', 'end', values=(pid, sid, groups.get(pid, "")), tags=('matched',)
+            )
+        for pid in paired.unmatched_primary:
+            self.ct_pairs_tree.insert(
+                '', 'end', values=(pid, "(no match)", ""), tags=('unmatched',)
+            )
+        for sid in paired.unmatched_satellite:
+            self.ct_pairs_tree.insert(
+                '', 'end', values=("(no match)", sid, ""), tags=('unmatched',)
+            )
+
+    def _ct_set_group_on_selected(self):
+        """Assign the typed group label to the selected matched pairs."""
+        from tkinter import messagebox
+
+        label = self.ct_pair_group_entry_var.get().strip()
+        selection = self.ct_pairs_tree.selection()
+        if not selection:
+            messagebox.showwarning(
+                "No Selection", "Select rows in the pairs table, then set their group."
+            )
+            return
+        groups = dict(self.ct_pair_groups or {})
+        n = 0
+        edited = set()
+        for item in selection:
+            primary, satellite, _ = self.ct_pairs_tree.item(item, 'values')
+            if primary == "(no match)":
+                continue
+            edited.add(primary)
+            if not label:
+                groups.pop(primary, None)
+            else:
+                groups[primary] = label
+            n += 1
+        self.ct_pair_groups = groups
+        if edited:
+            # A manual edit overrides the table's label; the pair is no
+            # longer table-derived and survives Clear Table.
+            table_keys = set(getattr(self, 'ct_pair_groups_table_keys', None) or ())
+            if table_keys & edited:
+                self.ct_pair_groups_table_keys = (table_keys - edited) or None
+        # Grouped board columns were computed with the old labels.
+        self._ct_invalidate_eval_state("Groups")
+        self._refresh_ct_pairs_tree()
+        self.ct_pairs_status_label.config(
+            text=f"Group '{label or '(cleared)'}' applied to {n} pair(s).",
+            foreground=self.colors['text'],
+        )
+
+    def _pair_ct_standards(self):
+        """Pair the loaded A1 standards by sample ID (never row order).
+
+        When a pairs table is loaded, the TABLE defines the pairs: only its
+        accepted mappings pair, and files it does not name stay unmatched —
+        there is no silent fall-back to ID matching, which on a partly
+        matched table pairs files the table never named. A table whose rows
+        resolve nothing refuses pairing outright (fix the table or Clear
+        Table). Without a table, shared sample IDs pair directly. When the two wavelength grids
+        differ, the satellite is resampled onto the primary grid over their
+        overlap (a visible, reported operation) before pairing; a too-small
+        overlap is refused. Returns the PairedStandards or None (with a
+        dialog) on failure.
+        """
+        from tkinter import messagebox
+        from spectral_predict.calibration_transfer import resample_to_grid
+        from spectral_predict.transfer_evaluation import (
+            PairedStandards, pair_standards_by_id)
+
+        if self.current_primary_df is None or self.current_satellite_df is None:
+            messagebox.showwarning(
+                "No Data", "Load both primary and satellite spectra (A1) first."
+            )
+            return None
+
+        primary_df = self.current_primary_df
+        satellite_df = self.current_satellite_df
+
+        def _columns_ascending(df):
+            # Some instruments write descending wavelength grids; the overlap
+            # logic below and the interpolator both need ascending columns, so
+            # sort the columns (with the data) first.
+            cols = np.asarray(df.columns, dtype=float)
+            order = np.argsort(cols, kind='stable')
+            if not np.array_equal(order, np.arange(cols.size)):
+                df = df.iloc[:, order]
+            return df
+
+        primary_df = _columns_ascending(primary_df)
+        satellite_df = _columns_ascending(satellite_df)
+
+        resample_note = None
+        wl_p = np.asarray(primary_df.columns, dtype=float)
+        wl_s = np.asarray(satellite_df.columns, dtype=float)
+        same_grid = (
+            wl_p.shape == wl_s.shape
+            and np.allclose(wl_p, wl_s, rtol=0.0, atol=0.01)
+        )
+        if not same_grid:
+            overlap_start = max(wl_p[0], wl_s[0])
+            overlap_end = min(wl_p[-1], wl_s[-1])
+            target = wl_p[(wl_p >= overlap_start) & (wl_p <= overlap_end)]
+            span = target[-1] - target[0] if target.size else 0.0
+            if target.size < 32 or span < 50.0:
+                messagebox.showerror(
+                    "Grids Do Not Overlap Enough",
+                    f"Primary grid: {wl_p[0]:.1f}-{wl_p[-1]:.1f} nm ({wl_p.size} points)\n"
+                    f"Satellite grid: {wl_s[0]:.1f}-{wl_s[-1]:.1f} nm ({wl_s.size} points)\n\n"
+                    f"The overlap ({overlap_start:.1f}-{overlap_end:.1f} nm, {target.size} "
+                    "points) is too small for a transfer. Load spectra with matching "
+                    "wavelength coverage.",
+                )
+                return None
+            step_s = float(np.median(np.diff(wl_s))) if wl_s.size > 1 else 0.0
+            X_s_resampled = resample_to_grid(
+                satellite_df.to_numpy(dtype=float), wl_s, target
+            )
+            satellite_df = pd.DataFrame(
+                X_s_resampled, index=satellite_df.index, columns=target
+            )
+            primary_df = primary_df.loc[:, [c for c in primary_df.columns if c in set(target)]]
+            resample_note = (
+                f"Satellite resampled from {wl_s[0]:.1f}-{wl_s[-1]:.1f} nm "
+                f"(step {step_s:.2f} nm) onto the primary grid "
+                f"{target[0]:.1f}-{target[-1]:.1f} nm ({target.size} points)"
+            )
+
+        if getattr(self, 'ct_pairs_table_active', False) or self.ct_pairs_rename:
+            rename = self.ct_pairs_rename or {}
+            sat_ids = list(rename.keys())
+            if not sat_ids:
+                # The table is still the ground truth even when none of its
+                # rows resolve (a reload can do this); ID matching must not
+                # take over. Only Clear Table returns to ID matching.
+                self.ct_paired = None
+                self._ct_invalidate_eval_state("The pairing")
+                self._refresh_ct_pairs_tree()
+                self.ct_pairs_status_label.config(
+                    text=_CT_PAIRS_TABLE_NO_ROWS_MSG,
+                    foreground=self.colors['warning'])
+                messagebox.showerror("Pairing Failed", _CT_PAIRS_TABLE_NO_ROWS_MSG)
+                return None
+            ids = [rename[s] for s in sat_ids]
+            if len(ids) < 2:
+                msg = (f"The pairs table matched only {len(ids)} of the loaded "
+                       "spectra; a transfer needs at least 2 pairs.")
+                self.ct_paired = None
+                self._ct_invalidate_eval_state("The pairing")
+                self._refresh_ct_pairs_tree()
+                self.ct_pairs_status_label.config(
+                    text=msg, foreground=self.colors['warning'])
+                messagebox.showerror("Pairing Failed", msg)
+                return None
+            paired = PairedStandards(
+                X_primary=primary_df.loc[ids].to_numpy(dtype=float),
+                X_satellite=satellite_df.loc[sat_ids].to_numpy(dtype=float),
+                ids=ids,
+                satellite_ids=sat_ids,
+                wavelengths=np.asarray(primary_df.columns, dtype=float),
+                unmatched_primary=[p for p in primary_df.index
+                                   if p not in set(ids)],
+                unmatched_satellite=[s for s in satellite_df.index
+                                     if s not in set(sat_ids)],
+            )
+        else:
+            try:
+                paired = pair_standards_by_id(primary_df, satellite_df)
+            except ValueError as e:
+                self.ct_paired = None
+                self._ct_invalidate_eval_state("The pairing")
+                self._refresh_ct_pairs_tree()
+                self.ct_pairs_status_label.config(text=str(e), foreground=self.colors['warning'])
+                messagebox.showerror("Pairing Failed", str(e))
+                return None
+
+        self.ct_paired = paired
+        self.ct_pair_resample_note = resample_note
+        # The pairing inputs changed (table, groups or a re-pair); anything
+        # computed on the previous pairing is stale.
+        self._ct_invalidate_eval_state("The pairing")
+        self._refresh_ct_pairs_tree()
+
+        positional = (
+            "positional row_N IDs (the source has no sample names) — check the order!"
+            if self.current_primary_ids_positional
+            else ""
+        )
+        if getattr(self, 'ct_pairs_table_active', False) or self.ct_pairs_rename:
+            # The table is the ground truth: say exactly how much of the
+            # loaded data it accounts for (decision, review round 3).
+            n_unresolved = int(getattr(self, 'ct_pairs_table_unresolved', 0) or 0)
+            named_p = getattr(self, 'ct_pairs_table_named_primary', None) or set()
+            named_s = getattr(self, 'ct_pairs_table_named_satellite', None) or set()
+            n_not_in_table = (
+                sum(1 for p in paired.unmatched_primary if p not in named_p)
+                + sum(1 for s in paired.unmatched_satellite if s not in named_s))
+            status = (f"Pairs table active: {len(paired.ids)} rows paired, "
+                      f"{n_unresolved} rows unresolved, "
+                      f"{n_not_in_table} files not in the table")
+        else:
+            status = "; ".join([
+                f"{len(paired.ids)} pairs matched",
+                f"{len(paired.unmatched_primary)} primary-only",
+                f"{len(paired.unmatched_satellite)} satellite-only",
+            ])
+        if resample_note:
+            status += f" | {resample_note}"
+        if positional:
+            status += f" | {positional}"
+        # Keep the pairs table's naming-conflict count visible after pairing
+        # (it was shown at load time and must not be overwritten away).
+        n_collisions = len(getattr(self, 'ct_pairs_collisions', None) or [])
+        if n_collisions:
+            status += (f" | {n_collisions} naming conflict"
+                       f"{'s' if n_collisions != 1 else ''} (listed below)")
+        self.ct_pairs_status_label.config(
+            text=status,
+            foreground=(self.colors['warning'] if n_collisions
+                        else self.colors['text']))
+        return paired
+
+    def _clear_ct_pairs_table(self):
+        """Forget the loaded pairs table; pairing falls back to ID matching."""
+        self.ct_pairs_table_path_var.set("")
+        self.ct_pairs_table_active = False
+        self.ct_pairs_rename = None
+        self.ct_pairs_table_unresolved = None
+        self.ct_pairs_table_named_primary = None
+        self.ct_pairs_table_named_satellite = None
+        self.ct_pairs_collisions = None
+        self.ct_paired = None
+        # Group labels that came from the table go with it; manual Treeview
+        # edits are the user's and stay.
+        table_keys = getattr(self, 'ct_pair_groups_table_keys', None)
+        if table_keys:
+            groups = {k: v for k, v in (self.ct_pair_groups or {}).items()
+                      if k not in table_keys}
+            self.ct_pair_groups = groups or None
+        self.ct_pair_groups_table_keys = None
+        self._ct_invalidate_eval_state("The pairs table")
+        self._refresh_ct_pairs_tree()
+        self.ct_pairs_status_label.config(
+            text="Pairs table cleared — pairing by sample ID. "
+                 "Click 'Pair by Sample ID'.",
+            foreground=self.colors['text'])
+
+    # ========================================================================
+    # A1b VALIDATE & COMPARE (evaluate_transfer board, fit the chosen row)
+    # ========================================================================
+
+    def _browse_ct_eval_model(self):
+        """Browse for the optional prediction model used to score the board."""
+        filepath = filedialog.askopenfilename(
+            title="Select Prediction Model (regression)",
+            filetypes=[("Model files", "*.dasp;*.pkl"), ("DASP Model files", "*.dasp"),
+                       ("Pickle files", "*.pkl"), ("All files", "*.*")],
+        )
+        if filepath:
+            self.ct_eval_model_path_var.set(filepath)
+
+    def _load_ct_eval_model(self):
+        """Load the optional prediction model (.dasp) for RMSD/slope columns."""
+        from tkinter import messagebox
+
+        path = self.ct_eval_model_path_var.get()
+        if not path:
+            messagebox.showwarning("No File", "Browse and select a prediction model first.")
+            return
+        try:
+            model_dict = self._load_model_file_for_ct(path, allow_ensemble=True)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load model:\n{str(e)}")
+            return
+        metadata = model_dict.get('metadata', {}) or {}
+        task = metadata.get('task_type', 'regression')
+        if task != 'regression':
+            messagebox.showerror(
+                "Not a Regression Model",
+                f"Prediction scores need a regression model; this file is task_type "
+                f"'{task}'. Load a regression .dasp, or clear the model to validate "
+                "with spectral scores only.")
+            return
+        self.ct_eval_model_dict = model_dict
+        # The board's RMSD/slope columns were scored by the previous model.
+        self._ct_invalidate_eval_state("The prediction model")
+        wl = np.array(metadata.get('wavelengths', []), dtype=float)
+        name = metadata.get('model_name', metadata.get('model_type', 'model'))
+        if wl.size:
+            shown = f"{name} ({wl.min():.0f}-{wl.max():.0f} nm)"
+        else:
+            shown = str(name)
+        self.ct_eval_model_status_label.config(
+            text=shown, foreground=self.colors['text'])
+
+    def _resolve_ct_eval_joins(self):
+        """Map the joins combobox to evaluate_transfer's ``joins`` argument.
+
+        Returns ``(joins, provenance)`` with provenance one of 'detected',
+        'header', 'user', 'none' — the GUI's own record of where the joins came
+        from (the backend reports 'given' for both header and user joins).
+        Header joins were captured per instrument at load time.
+        """
+        mode = self.ct_eval_joins_var.get()
+        if mode == 'auto':
+            return 'auto', 'detected'
+        if mode == 'none':
+            return None, 'none'
+        if mode.startswith('ASD'):
+            joins = self.ct_primary_header_joins or self.ct_satellite_header_joins
+            if not joins:
+                raise ValueError(
+                    "No ASD header joins were found in the loaded files (readers "
+                    "report them only for ASD files that carry them). Use 'auto' "
+                    "(detect from the spectra) or 'custom' instead.")
+            return tuple(float(j) for j in joins), 'header'
+        text = self.ct_eval_joins_custom_var.get()
+        try:
+            values = [float(v) for v in re.split(r"[,;\s]+", str(text).strip()) if v]
+        except ValueError:
+            raise ValueError(f"'{text}' is not a list of wavelengths (e.g. '1000, 1800').") from None
+        if not values:
+            raise ValueError("Custom joins need at least one wavelength in nm (e.g. '1000, 1800').")
+        return tuple(sorted(values)), 'user'
+
+    def _ct_eval_groups_list(self, paired):
+        """Group label per standard (unit / session / batch), or None."""
+        groups_map = self.ct_pair_groups or {}
+        labels = [str(groups_map.get(pid, "")).strip() for pid in paired.ids]
+        if not any(labels):
+            return None
+        if not all(labels):
+            n_missing = sum(1 for v in labels if not v)
+            labels = [v or "(no group)" for v in labels]
+            self.ct_pairs_status_label.config(
+                text=f"{n_missing} standard(s) have no group; they group together as '(no group)'.",
+                foreground=self.colors['warning'])
+        return labels
+
+    def _on_ct_eval_settings_changed(self):
+        """Space / Detector-joins change: the board's inputs are frozen per run."""
+        self._ct_invalidate_eval_state("Evaluation settings")
+
+    def _set_ct_validate_busy(self, busy, message=""):
+        state = 'disabled' if busy else 'normal'
+        self.ct_validate_button.config(state=state)
+        self.ct_fit_selected_button.config(
+            state='disabled' if busy else (
+                'normal' if self.ct_last_evaluation is not None else 'disabled'))
+        if message:
+            self.ct_validate_status_label.config(
+                text=message, foreground=self.colors['text'])
+        elif not busy:
+            self.ct_validate_status_label.config(text="")
+
+    def _run_ct_validate(self):
+        """Run the transfer bake-off on the paired standards (worker thread)."""
+        from tkinter import messagebox
+        from spectral_predict.transfer_evaluation import (
+            evaluate_transfer, predict_fn_from_model)
+
+        if self._ct_validate_running:
+            return
+        paired = self.ct_paired
+        if paired is None:
+            paired = self._pair_ct_standards()
+            if paired is None:
+                return
+
+        p_type = self.ct_primary_data_type.get()
+        s_type = self.ct_satellite_data_type.get()
+        if p_type != s_type:
+            messagebox.showerror(
+                "Data Type Mismatch",
+                f"Primary data is {p_type}, satellite data is {s_type}. Use the "
+                "Convert buttons in A1 so both are the same type, then validate again.")
+            return
+        space_choice = self.ct_eval_space_var.get()
+        space = p_type if space_choice.startswith('auto') else space_choice
+        if space != p_type:
+            messagebox.showerror(
+                "Space Mismatch",
+                f"The panel is set to {space} but the loaded data is {p_type}.")
+            return
+
+        # Percent reflectance is normalized to 0-1 (physical match refuses it)
+        Xp = np.array(paired.X_primary, dtype=float, copy=True)
+        Xs = np.array(paired.X_satellite, dtype=float, copy=True)
+        scale_note = None
+        primary_value_scale = (
+            float(getattr(self, 'ct_primary_reflectance_scale', 1.0) or 1.0)
+            if space == 'reflectance' else 1.0)
+        if space == 'reflectance':
+            notes = []
+            for name, arr, attr in (
+                ("primary", Xp, 'ct_primary_reflectance_scale'),
+                ("satellite", Xs, 'ct_satellite_reflectance_scale'),
+            ):
+                scale = float(getattr(self, attr, 1.0) or 1.0)
+                if scale == 100.0:
+                    arr /= 100.0
+                    notes.append(f"{name} percent reflectance divided by 100")
+            if notes:
+                scale_note = "; ".join(notes)
+
+        try:
+            joins, joins_source = self._resolve_ct_eval_joins()
+        except ValueError as e:
+            messagebox.showerror("Detector Joins", str(e))
+            return
+
+        groups = self._ct_eval_groups_list(paired)
+
+        predict = None
+        model_wavelengths = None
+        if self.ct_eval_model_dict is not None:
+            try:
+                predict = predict_fn_from_model(self.ct_eval_model_dict,
+                                                paired.wavelengths)
+            except Exception as e:
+                messagebox.showerror(
+                    "Prediction Model",
+                    f"The loaded model cannot score predictions:\n{e}\n\nLoad a "
+                    "regression .dasp, or clear the model to validate with "
+                    "spectral scores only.")
+                return
+            if space == 'reflectance' and primary_value_scale == 100.0:
+                # A .dasp model does not record the reflectance scale it was
+                # trained on; the safe assumption is the primary instrument's
+                # loaded scale (that is what it was built on). The board feeds
+                # the model 0-1 spectra, so scale them back up before
+                # predicting — this covers the transferred rows and the
+                # primary reference rows alike.
+                inner_predict = predict
+
+                def predict(Z, _inner=inner_predict, _scale=primary_value_scale):
+                    return _inner(np.asarray(Z, dtype=float) * _scale)
+
+                if scale_note:
+                    scale_note += (
+                        f"; prediction model receives x{primary_value_scale:g} "
+                        "spectra (the primary's loaded scale)")
+            mw = np.array((self.ct_eval_model_dict.get('metadata', {}) or {})
+                          .get('wavelengths', []), dtype=float)
+            if mw.size:
+                model_wavelengths = mw
+
+        # Every input is frozen here: the worker never reads Tk state
+        self._ct_run_seq = getattr(self, '_ct_run_seq', 0) + 1
+        context = dict(
+            Xp=Xp, Xs=Xs,
+            wavelengths=np.asarray(paired.wavelengths, dtype=float),
+            space=space, joins=joins, joins_source=joins_source, groups=groups,
+            predict=predict, model_wavelengths=model_wavelengths,
+            ids=list(paired.ids), scale_note=scale_note,
+            resample_note=self.ct_pair_resample_note,
+            generation=self._ct_input_generation,
+            run_id=self._ct_run_seq,
+            primary_value_scale=primary_value_scale,
+            primary_id=os.path.basename(self.ct_primary_data_path_var.get()) or 'primary',
+            satellite_id=os.path.basename(self.ct_satellite_data_path_var.get()) or 'satellite',
+        )
+        args = dict(X_primary=Xp, X_satellite=Xs, predict=predict, ids=context['ids'],
+                    groups=groups, wavelengths=context['wavelengths'], space=space,
+                    joins=joins, model_wavelengths=model_wavelengths)
+
+        self._ct_active_run_id = self._ct_run_seq
+        self._ct_validate_running = True
+        self._set_ct_validate_busy(True, "Running evaluate_transfer ...")
+
+        def _worker():
+            try:
+                ev = evaluate_transfer(**args)
+                payload = (True, ev, "")
+            except Exception as e:  # noqa: BLE001 — reported on the main thread
+                import traceback
+                payload = (False, None, f"{e}\n{traceback.format_exc(limit=6)}")
+            self.root.after(0, lambda: self._on_ct_validate_done(payload, context))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_ct_validate_done(self, payload, context):
+        """Main-thread completion of a Validate run (also driven directly by tests)."""
+        from tkinter import messagebox
+
+        ok, ev, err = payload
+        if context.get('run_id') != getattr(self, '_ct_active_run_id', None):
+            # A newer run was launched, or the inputs were invalidated (which
+            # abandons the active run); whichever run owns the panel's busy
+            # state now, it is not this one — touch nothing, just drop this
+            # result.
+            return
+        if context.get('generation') != getattr(self, '_ct_input_generation', 0):
+            # The pairing inputs changed while the worker ran; the board was
+            # computed on inputs that no longer exist.
+            self._ct_validate_running = False
+            self._set_ct_validate_busy(False)
+            self.ct_validate_status_label.config(
+                text="The pairing inputs changed while validating; result "
+                     "discarded. Run Validate & Compare again.",
+                foreground=self.colors['warning'])
+            return
+        self._ct_validate_running = False
+        if not ok:
+            self._set_ct_validate_busy(False)
+            self.ct_validate_status_label.config(
+                text="Validation failed.", foreground=self.colors['warning'])
+            messagebox.showerror("Validate & Compare", f"evaluate_transfer failed:\n{err}")
+            return
+        self.ct_last_evaluation = ev
+        self._ct_eval_context = context
+        self._set_ct_validate_busy(False)
+        self.ct_validate_status_label.config(
+            text=f"{ev.n_candidates} candidates scored on {ev.n_standards} standards.",
+            foreground=self.colors['text'])
+        self._populate_ct_leaderboard(ev)
+        self._show_ct_diagnostics(ev, context)
+
+    _CT_BOARD_COLUMNS = (
+        'RMSD_vs_primary_grouped', 'RMSD_vs_primary',
+        'Slope_vs_primary_grouped', 'Slope_vs_primary',
+        'RMSEP_grouped', 'RMSEP',
+        'spectral_RMSE_grouped', 'spectral_RMSE', 'improvement',
+    )
+
+    def _populate_ct_leaderboard(self, ev):
+        """Fill the leaderboard Treeview, best first; the reference row last."""
+        board = ev.leaderboard
+        cols = ['label'] + [c for c in self._CT_BOARD_COLUMNS if c in board.columns]
+        self.ct_leaderboard_tree.configure(columns=cols)
+        self.ct_leaderboard_tree.heading('label', text='Method')
+        self.ct_leaderboard_tree.column('label', width=300, stretch=True)
+        for c in cols[1:]:
+            self.ct_leaderboard_tree.heading(c, text=c.replace('_', ' '))
+            self.ct_leaderboard_tree.column(c, width=95, anchor='e')
+        for item in self.ct_leaderboard_tree.get_children():
+            self.ct_leaderboard_tree.delete(item)
+        for rec in board.to_dict('records'):
+            values = []
+            for c in cols:
+                v = rec.get(c, "")
+                if isinstance(v, float):
+                    values.append("" if np.isnan(v) else f"{v:.4g}")
+                else:
+                    values.append(str(v))
+            tags = ()
+            if 'reference' in str(rec.get('label', '')).lower():
+                tags = ('reference',)
+            self.ct_leaderboard_tree.insert('', 'end', values=values, tags=tags)
+        self.ct_leaderboard_tree.tag_configure('reference',
+                                               foreground=self.colors['text_light'])
+        self.ct_leaderboard_header_label.config(
+            text=(f"Leaderboard — ranked by {ev.score_column} "
+                  f"({ev.n_candidates} candidates, {ev.n_standards} standards; "
+                  "the reference row is unranked)"),
+            foreground=self.colors['text'])
+
+    @staticmethod
+    def _format_ct_regions(regions):
+        regions = list(regions or [])
+        if not regions:
+            return "none"
+        return ", ".join(f"{lo:g}-{hi:g} nm" for lo, hi in regions)
+
+    def _show_ct_diagnostics(self, ev, context):
+        """Warnings, joins provenance and noise diagnostics under the leaderboard."""
+        lines = [f"Ranked by {ev.score_column}."]
+        diag = ev.diagnostics or {}
+        joins = diag.get('joins') or ()
+        source = context.get('joins_source') or diag.get('joins_source') or 'none'
+        lines.append("Joins used: "
+                     + (", ".join(f"{j:g}" for j in joins) + " nm" if joins else "none")
+                     + f" (source: {source})")
+        for note in (context.get('resample_note'), context.get('scale_note')):
+            if note:
+                lines.append(note)
+        if ev.warnings:
+            lines.append("Warnings:")
+            lines.extend(f"  - {w}" for w in ev.warnings)
+        lines.append("Primary noisy regions: "
+                     + self._format_ct_regions(diag.get('primary_noisy_regions')))
+        lines.append("Satellite noisy regions: "
+                     + self._format_ct_regions(diag.get('satellite_noisy_regions')))
+        lines.append("Satellite much noisier than primary: "
+                     + self._format_ct_regions(diag.get('satellite_much_noisier')))
+        text = "\n".join(lines)
+        self.ct_diagnostics_text.config(state='normal')
+        self.ct_diagnostics_text.delete('1.0', tk.END)
+        self.ct_diagnostics_text.insert('1.0', text)
+        self.ct_diagnostics_text.config(state='disabled')
+
+    def _fit_ct_selected(self):
+        """Fit the leaderboard row the user picked, on the frozen Validate inputs."""
+        from tkinter import messagebox
+        from spectral_predict.transfer_evaluation import fit_transfer
+
+        if self._ct_validate_running:
+            return
+        ev = self.ct_last_evaluation
+        context = self._ct_eval_context
+        if ev is None or context is None:
+            messagebox.showwarning("No Board",
+                                   "Run 'Validate & Compare' first, then pick a row.")
+            return
+        selection = self.ct_leaderboard_tree.selection()
+        if not selection:
+            messagebox.showwarning("No Selection",
+                                   "Select a row in the leaderboard first.")
+            return
+        label = str(self.ct_leaderboard_tree.item(selection[0], 'values')[0])
+        candidate = ev.candidates.get(label)
+        if candidate is None:
+            messagebox.showerror("Unknown Row", f"No candidate for '{label}'.")
+            return
+
+        self._ct_run_seq = getattr(self, '_ct_run_seq', 0) + 1
+        self._ct_active_run_id = self._ct_run_seq
+        fit_context = dict(context, run_id=self._ct_run_seq)
+        self._ct_validate_running = True
+        self._set_ct_validate_busy(True, f"Fitting {label} ...")
+
+        def _worker():
+            try:
+                result = fit_transfer(
+                    candidate, context['Xp'], context['Xs'],
+                    wavelengths=context['wavelengths'], space=context['space'],
+                    joins=context['joins'], primary_id=context['primary_id'],
+                    satellite_id=context['satellite_id'])
+                payload = (True, result, "")
+            except Exception as e:  # noqa: BLE001 — reported on the main thread
+                import traceback
+                payload = (False, None, f"{e}\n{traceback.format_exc(limit=6)}")
+            self.root.after(0, lambda: self._on_ct_fit_done(payload, label, fit_context))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_ct_fit_done(self, payload, label, context):
+        """Main-thread completion of Fit Selected (also driven directly by tests)."""
+        from datetime import datetime
+        from tkinter import messagebox
+        from spectral_predict.calibration_transfer import TransferModel
+
+        ok, result, err = payload
+        if context.get('run_id') != getattr(self, '_ct_active_run_id', None):
+            # A newer run owns the busy state (invalidation abandons the
+            # active run too); drop this result untouched.
+            return
+        if context.get('generation') != getattr(self, '_ct_input_generation', 0):
+            # The pairing inputs changed while the fit ran.
+            self._ct_validate_running = False
+            self._set_ct_validate_busy(False)
+            self.ct_validate_status_label.config(
+                text="The pairing inputs changed while fitting; result "
+                     "discarded. Nothing was installed.",
+                foreground=self.colors['warning'])
+            return
+        self._ct_validate_running = False
+        self._set_ct_validate_busy(False)
+        if not ok:
+            self.ct_validate_status_label.config(
+                text="Fit failed.", foreground=self.colors['warning'])
+            messagebox.showerror("Fit Selected Method", f"fit_transfer failed:\n{err}")
+            return
+
+        if result is None:
+            # "No correction" must not leave a previously fitted transfer
+            # active — Mode A/B would keep silently applying the stale one.
+            self.ct_transfer_model = None
+            self.current_transfer_model = None
+            self.ct_save_tm_button.config(state='disabled')
+            self.ct_transfer_info_text.config(state='normal')
+            self.ct_transfer_info_text.delete('1.0', tk.END)
+            self.ct_transfer_info_text.insert(
+                '1.0',
+                f"No correction needed ('{label}').\nMode A/B use the raw "
+                "satellite spectra; no transfer model is active.\n")
+            self.ct_transfer_info_text.config(state='disabled')
+            self._update_active_transfer_model_status()
+            self.ct_validate_status_label.config(
+                text=f"'{label}': no correction needed — predict the raw satellite spectra.",
+                foreground=self.colors['text'])
+            return
+        if not isinstance(result, TransferModel):
+            # A prediction slope/bias dict (needs y; the panel has none). Shown,
+            # not silently dropped.
+            messagebox.showinfo(
+                "Prediction Correction",
+                f"'{label}' is a prediction slope/bias correction:\n{result}\n\n"
+                "It corrects predictions, not spectra, and cannot be saved as a "
+                "transfer model here.")
+            return
+
+        # The panel normalizes reflectance to 0-1 before fitting, so the model
+        # works in fraction units (absorbance has no scale). Apply sites read
+        # this to convert incoming data the same way. primary_value_scale is
+        # the primary's LOADED scale — the scale a prediction model built on
+        # the primary instrument expects (a .dasp does not record it).
+        result.meta['value_scale'] = 1.0
+        result.meta['primary_value_scale'] = float(
+            context.get('primary_value_scale', 1.0) or 1.0)
+        result.meta['spectral_data_type'] = context['space']
+        result.meta['validated_by'] = (
+            f"leave-one-out board, ranked by {self.ct_last_evaluation.score_column}")
+        result.meta['build_date'] = datetime.now().isoformat()
+
+        self.ct_transfer_model = result
+        self.current_transfer_model = result
+        self.ct_wavelengths_common = context['wavelengths']
+        self.ct_X_primary_common = context['Xp']
+        self.ct_X_satellite_common = context['Xs']
+
+        info_lines = [
+            f"Transfer model fitted from the board: {label}",
+            f"Method: {ct_method_display_name(result.method)}",
+            f"Paired standards: {context['Xp'].shape[0]}",
+            f"Wavelength Range: {context['wavelengths'][0]:.1f} - "
+            f"{context['wavelengths'][-1]:.1f} nm ({len(context['wavelengths'])} points)",
+        ]
+        notes = result.params.get('notes')
+        if isinstance(notes, (list, tuple)):
+            notes = "; ".join(str(n) for n in notes)
+        if notes:
+            info_lines.append(f"Notes: {notes}")
+        if context.get('scale_note'):
+            info_lines.append(context['scale_note'] + " (model works in 0-1 reflectance)")
+        if float(context.get('primary_value_scale', 1.0) or 1.0) == 100.0:
+            info_lines.append(
+                "Primary was loaded in percent reflectance: Mode A feeds "
+                "prediction models percent-scale spectra and Mode B exports "
+                "percent-scale spectra (the primary's loaded scale).")
+        info_text = "\n".join(info_lines) + "\n"
+        self.ct_transfer_info_text.config(state='normal')
+        self.ct_transfer_info_text.delete('1.0', tk.END)
+        self.ct_transfer_info_text.insert('1.0', info_text)
+        self.ct_transfer_info_text.config(state='disabled')
+
+        self.ct_save_tm_button.config(state='normal')
+        self._update_active_transfer_model_status()
+        self.ct_validate_status_label.config(
+            text=f"Fitted '{label}'. Save it or switch to Mode A/B.",
+            foreground=self.colors['text'])
+        self._plot_transfer_quality(result.method)
+
+    # ========================================================================
+    # PLAN TRANSFER STANDARDS (Kennard-Stone on a candidate pool)
+    # ========================================================================
+
+    def _open_ct_plan_standards(self):
+        """Plan which specimens to scan as transfer standards (Kennard-Stone)."""
+        if self._ct_plan_dialog is not None and self._ct_plan_dialog.winfo_exists():
+            self._ct_plan_dialog.lift()
+            return
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Plan Transfer Standards")
+        self._ct_plan_dialog = dlg
+        dlg.protocol("WM_DELETE_WINDOW", self._close_ct_plan_standards)
+
+        main = ttk.Frame(dlg, padding=10)
+        main.pack(fill='both', expand=True)
+
+        ttk.Label(main, text="Choose transfer standards that span the spectra "
+                             "(Kennard-Stone on the pool; order = scan order).",
+                  style='Caption.TLabel').pack(anchor='w', pady=(0, 8))
+
+        source_frame = ttk.LabelFrame(main, text="Candidate pool", padding=8)
+        source_frame.pack(fill='x', pady=(0, 8))
+        ttk.Radiobutton(source_frame, text="Loaded primary spectra (A1)",
+                        variable=self.ct_plan_source_var, value='primary'
+                        ).pack(anchor='w')
+        ttk.Radiobutton(source_frame, text="Loaded satellite spectra (A1)",
+                        variable=self.ct_plan_source_var, value='satellite'
+                        ).pack(anchor='w')
+        folder_row = ttk.Frame(source_frame)
+        folder_row.pack(fill='x', pady=(2, 0))
+        ttk.Radiobutton(folder_row, text="A folder of spectra:",
+                        variable=self.ct_plan_source_var, value='folder'
+                        ).pack(side='left')
+        ttk.Entry(folder_row, textvariable=self.ct_plan_folder_var,
+                  width=40).pack(side='left', padx=(6, 6))
+        ttk.Button(folder_row, text="Browse...",
+                   command=lambda: self._browse_ct_plan_folder(dlg),
+                   style='Modern.TButton').pack(side='left')
+
+        count_row = ttk.Frame(main)
+        count_row.pack(fill='x', pady=(0, 8))
+        ttk.Label(count_row, text="How many standards:",
+                  style='Caption.TLabel').pack(side='left', padx=(0, 6))
+        ttk.Entry(count_row, textvariable=self.ct_plan_n_var,
+                  width=6).pack(side='left', padx=(0, 10))
+        self._create_accent_button(count_row, "Run Kennard-Stone",
+                                   self._run_ct_plan_standards).pack(side='left')
+        self.ct_plan_status_label = ttk.Label(main, text="", style='Caption.TLabel',
+                                              foreground=self.colors['text_light'])
+        self.ct_plan_status_label.pack(anchor='w', pady=(4, 4))
+
+        tree_frame = ttk.Frame(main)
+        tree_frame.pack(fill='both', expand=True)
+        self.ct_plan_tree = ttk.Treeview(tree_frame, columns=('order', 'sample_id'),
+                                         show='headings', height=10)
+        self.ct_plan_tree.heading('order', text='#')
+        self.ct_plan_tree.heading('sample_id', text='Sample ID')
+        self.ct_plan_tree.column('order', width=40, anchor='e')
+        self.ct_plan_tree.column('sample_id', width=220)
+        plan_scroll = ttk.Scrollbar(tree_frame, orient='vertical',
+                                    command=self.ct_plan_tree.yview)
+        self.ct_plan_tree.configure(yscrollcommand=plan_scroll.set)
+        self.ct_plan_tree.pack(side='left', fill='both', expand=True)
+        plan_scroll.pack(side='left', fill='y')
+
+        button_row = ttk.Frame(main)
+        button_row.pack(fill='x', pady=(8, 0))
+        ttk.Button(button_row, text="Export CSV...",
+                   command=self._export_ct_plan_standards,
+                   style='Modern.TButton').pack(side='left', padx=(0, 10))
+        ttk.Button(button_row, text="Close",
+                   command=self._close_ct_plan_standards,
+                   style='Modern.TButton').pack(side='left')
+
+    def _browse_ct_plan_folder(self, dialog):
+        """Browse for the plan-standards candidate folder."""
+        directory = filedialog.askdirectory(title="Select Candidate Spectra Folder",
+                                            parent=dialog)
+        if directory:
+            self.ct_plan_folder_var.set(directory)
+            self.ct_plan_source_var.set('folder')
+
+    def _close_ct_plan_standards(self):
+        """Close (and only close) the Plan Transfer Standards dialog."""
+        if self._ct_plan_dialog is not None:
+            self._ct_plan_dialog.destroy()
+            self._ct_plan_dialog = None
+
+    def _ct_plan_pool(self):
+        """The candidate-pool DataFrame for planning, or None with a dialog."""
+        from tkinter import messagebox
+
+        source = self.ct_plan_source_var.get()
+        if source == 'primary':
+            df = self.current_primary_df
+            if df is None:
+                messagebox.showwarning("No Data", "Load primary spectra in A1 first.")
+                return None
+            return df
+        if source == 'satellite':
+            df = self.current_satellite_df
+            if df is None:
+                messagebox.showwarning("No Data", "Load satellite spectra in A1 first.")
+                return None
+            return df
+        folder = self.ct_plan_folder_var.get()
+        if not folder:
+            messagebox.showwarning("No Folder", "Browse and select a spectra folder first.")
+            return None
+        try:
+            wavelengths, X = self._load_spectra_from_directory(folder)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load folder:\n{str(e)}")
+            return None
+        ids = getattr(self, "_last_dir_ids", None)
+        if ids is None or len(ids) != X.shape[0]:
+            messagebox.showwarning(
+                "No Sample IDs",
+                "This folder's spectra carry no sample IDs (only ASD/SPC folders "
+                "and one-spectrum-per-file CSV folders do).")
+            return None
+        return pd.DataFrame(np.asarray(X, dtype=float), index=pd.Index(ids),
+                            columns=np.asarray(wavelengths, dtype=float))
+
+    def _run_ct_plan_standards(self):
+        """Pick Kennard-Stone standards from the pool (worker thread)."""
+        from tkinter import messagebox
+        from spectral_predict.sample_selection import kennard_stone
+
+        if self._ct_plan_running:
+            return
+        try:
+            n_requested = int(self.ct_plan_n_var.get())
+        except ValueError:
+            messagebox.showwarning("How Many", "The number of standards must be a whole number.")
+            return
+        pool = self._ct_plan_pool()
+        if pool is None:
+            return
+        if n_requested < 2:
+            messagebox.showwarning("How Many", "Pick at least 2 standards.")
+            return
+        if n_requested > pool.shape[0]:
+            messagebox.showwarning(
+                "How Many",
+                f"Asked for {n_requested} standards but the pool has {pool.shape[0]} spectra.")
+            return
+
+        X = pool.to_numpy(dtype=float)
+        ids = list(pool.index)
+
+        self._ct_plan_running = True
+        self.ct_plan_status_label.config(
+            text=f"Running Kennard-Stone on {len(ids)} spectra ...",
+            foreground=self.colors['text'])
+
+        def _worker():
+            try:
+                positions = kennard_stone(X, n_samples=n_requested)
+                payload = (True, [ids[i] for i in positions], "")
+            except Exception as e:  # noqa: BLE001 — reported on the main thread
+                import traceback
+                payload = (False, None, f"{e}\n{traceback.format_exc(limit=6)}")
+            self.root.after(0, lambda: self._on_ct_plan_done(payload))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_ct_plan_done(self, payload):
+        """Main-thread completion of a plan-standards run (also driven by tests)."""
+        from tkinter import messagebox
+
+        ok, chosen, err = payload
+        self._ct_plan_running = False
+        dialog = getattr(self, '_ct_plan_dialog', None)
+        if dialog is None or not dialog.winfo_exists():
+            # The dialog was closed while Kennard-Stone ran; its status label
+            # and tree are gone, so there is nothing (and no one) to update.
+            return
+        if not ok:
+            self.ct_plan_status_label.config(text="Kennard-Stone failed.",
+                                             foreground=self.colors['warning'])
+            messagebox.showerror("Plan Transfer Standards", err)
+            return
+        for item in self.ct_plan_tree.get_children():
+            self.ct_plan_tree.delete(item)
+        for k, sample_id in enumerate(chosen, start=1):
+            self.ct_plan_tree.insert('', 'end', values=(k, sample_id))
+        self.ct_plan_status_label.config(
+            text=(f"{len(chosen)} standards chosen. The first scans cover the "
+                  "spectral extremes; scan them in this order if a session may "
+                  "be cut short."),
+            foreground=self.colors['text'])
+
+    def _export_ct_plan_standards(self):
+        """Export the chosen standards list as CSV (order, sample_id)."""
+        from tkinter import messagebox
+
+        rows = [self.ct_plan_tree.item(item, 'values')
+                for item in self.ct_plan_tree.get_children()]
+        if not rows:
+            messagebox.showwarning("Nothing to Export", "Run Kennard-Stone first.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save Standards List", defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")],
+            parent=self._ct_plan_dialog)
+        if not path:
+            return
+        try:
+            with open(path, 'w', encoding='utf-8', newline='') as f:
+                f.write("order,sample_id\n")
+                for order, sample_id in rows:
+                    f.write(f"{order},{sample_id}\n")
+            self.ct_plan_status_label.config(
+                text=f"Saved {len(rows)} standards to {path}",
+                foreground=self.colors['text'])
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to write CSV:\n{str(e)}")
 
     def _update_data_info(self):
         """Update data information display."""
@@ -50707,32 +52020,21 @@ External Validation Performance (n={n_val}):
             return
 
         # Validate data loaded
-        if self.current_primary_data is None or self.current_satellite_data is None:
+        if self.current_primary_df is None or self.current_satellite_df is None:
             messagebox.showwarning("No Data", "Please load both primary and satellite spectra first.")
             return
 
         try:
-            wl_primary, X_primary = self.current_primary_data
-            wl_satellite, X_satellite = self.current_satellite_data
+            # Pair standards by sample ID, never row order (on a real 40-pair set,
+            # row order paired 0 of 40 correctly). Differing grids are resampled
+            # over their overlap, visibly, inside _pair_ct_standards.
+            paired = self._pair_ct_standards()
+            if paired is None:
+                return
 
-            # Find common wavelength grid (interpolate if needed)
-            if np.allclose(wl_primary, wl_satellite):
-                wl_common = wl_primary
-                X_primary_common = X_primary
-                X_satellite_common = X_satellite
-            else:
-                # Interpolate to common grid (use primary wavelengths as reference)
-                from scipy.interpolate import interp1d
-                wl_common = wl_primary
-
-                # Interpolate satellite to primary grid
-                X_satellite_common = np.zeros_like(X_primary)
-                for i in range(X_satellite.shape[0]):
-                    f = interp1d(wl_satellite, X_satellite[i, :], kind='linear', fill_value='extrapolate')
-                    X_satellite_common[i, :] = f(wl_common)
-
-                X_primary_common = X_primary
-                messagebox.showinfo("Info", "Satellite spectra interpolated to primary wavelength grid.")
+            wl_common = paired.wavelengths
+            X_primary_common = paired.X_primary
+            X_satellite_common = paired.X_satellite
 
             # Store common grid data
             self.ct_wavelengths_common = wl_common
@@ -50883,13 +52185,32 @@ External Validation Performance (n={n_val}):
 
             # Build metadata with data type information
             from datetime import datetime
+            # The scale of the satellite data this transfer was fitted on (1 or
+            # 100); apply sites convert incoming data to it. Absorbance has no
+            # scale, so it records 1. primary_value_scale is the primary's
+            # loaded scale — what a prediction model built on the primary
+            # instrument expects.
+            build_value_scale = (
+                float(getattr(self, 'ct_satellite_reflectance_scale', 1.0) or 1.0)
+                if self.ct_satellite_data_type.get() == 'reflectance' else 1.0)
+            build_primary_value_scale = (
+                float(getattr(self, 'ct_primary_reflectance_scale', 1.0) or 1.0)
+                if self.ct_primary_data_type.get() == 'reflectance' else 1.0)
             transfer_meta = {
                 'spectral_data_type': primary_type,
                 'original_primary_type': self.ct_primary_original_data_type,
                 'original_satellite_type': self.ct_satellite_original_data_type,
                 'primary_was_converted': self.ct_primary_was_converted,
                 'satellite_was_converted': self.ct_satellite_was_converted,
+                'value_scale': build_value_scale,
+                'primary_value_scale': build_primary_value_scale,
                 'build_date': datetime.now().isoformat(),
+                'pairing': {
+                    'by': 'sample_id',
+                    'unmatched_primary': len(paired.unmatched_primary),
+                    'unmatched_satellite': len(paired.unmatched_satellite),
+                    'resampled': self.ct_pair_resample_note or '',
+                },
             }
             if roi_meta:
                 transfer_meta['region_of_interest'] = roi_meta
@@ -51738,7 +53059,45 @@ External Validation Performance (n={n_val}):
             raise ValueError(f"ROI Start ({start}) must be less than End ({end}).")
         return {'enabled': True, 'start': start, 'end': end}
 
-    def _apply_transfer_model(self, X_satellite, transfer_model):
+    @staticmethod
+    def _ct_primary_scale_of(transfer_model):
+        """(primary_value_scale, fit value_scale) recorded at fit time.
+
+        Both are 1.0 or 100.0. Older transfer files record neither key;
+        ``(None, None)`` says so and every scale conversion is skipped — their
+        historical behaviour.
+        """
+        meta = getattr(transfer_model, 'meta', None) or {}
+        p = meta.get('primary_value_scale')
+        f = meta.get('value_scale')
+        if p in (1.0, 100.0) and f in (1.0, 100.0):
+            return float(p), float(f)
+        return None, None
+
+    @staticmethod
+    def _ct_legacy_scale_note(transfer_model, value_scale):
+        """One-line warning for a transfer file that predates scale recording.
+
+        Applies to reflectance data (``value_scale`` is not None) whose
+        transfer file carries no ``meta['value_scale']``: the old behaviour
+        (transfer in the loaded scale, no percent/fraction conversion) is
+        kept, but it is now said out loud — logged here and returned so the
+        caller can show it in its status area. Never a modal per file.
+        """
+        if value_scale is None:
+            return None
+        meta = getattr(transfer_model, 'meta', None) or {}
+        if meta.get('value_scale') in (1.0, 100.0):
+            return None
+        method = getattr(transfer_model, 'method', 'transfer')
+        note = (f"Warning: the '{method}' transfer file predates value-scale "
+                "recording; spectra are transferred in their loaded scale "
+                "(no percent/fraction conversion).")
+        print(note)
+        return note
+
+    def _apply_transfer_model(self, X_satellite, transfer_model, value_scale=None,
+                              output_scale="fit"):
         """Apply a transfer model to transform satellite spectra to primary domain.
 
         Parameters
@@ -51747,33 +53106,72 @@ External Validation Performance (n={n_val}):
             Satellite spectra, shape (n_samples, n_wavelengths)
         transfer_model : TransferModel
             Transfer model object with method and params
+        value_scale : float, optional
+            Reflectance scale (1 or 100) of X_satellite as loaded. When the
+            transfer was fitted on a different scale (``meta['value_scale']``),
+            the data is converted to the fit scale before applying. Pass None
+            for non-reflectance data (absorbance has no scale).
+        output_scale : {'fit', 'incoming'}
+            'fit' (default) returns the transferred spectra in the transfer's
+            fit scale — the scale the Validate board scored the prediction
+            model on, so Mode A predictions match the board. 'incoming'
+            converts them to the loaded data's own scale (Mode B export).
 
         Returns
         -------
         np.ndarray
-            Transformed spectra in primary domain
+            Transformed spectra in the requested scale
         """
         from spectral_predict.calibration_transfer import apply_transfer_dispatch
 
-        return apply_transfer_dispatch(X_satellite, transfer_model)
+        fit_scale = (getattr(transfer_model, 'meta', None) or {}).get('value_scale')
+        factor = None
+        if (fit_scale in (1.0, 100.0) and value_scale in (1.0, 100.0)
+                and float(value_scale) != float(fit_scale)):
+            factor = float(fit_scale) / float(value_scale)
+            X_satellite = np.asarray(X_satellite, dtype=float) * factor
+        result = apply_transfer_dispatch(X_satellite, transfer_model)
+        if factor is not None and output_scale == "incoming":
+            result = result / factor
+        return result
 
-    def _apply_transfer_with_roi(self, X_satellite, transfer_model):
+    def _apply_transfer_with_roi(self, X_satellite, transfer_model, value_scale=None,
+                                 output_scale="fit"):
         """Apply transfer model, handling ROI splice if the model was built with one.
 
-        If the transfer model was built on a region of interest, this extracts
-        the ROI columns, applies the transfer to just those columns, and splices
-        the result back into the full spectrum. If no ROI was used, it falls
-        through to the standard apply.
+        If the transfer model was built on a region of interest, the WHOLE
+        incoming row is converted to the transfer's fit scale first, the ROI
+        columns are extracted, transferred and spliced back in, and the whole
+        result is converted to the requested output scale — one scale per
+        spectrum, never a percent outside and a fraction inside the region.
+        With no ROI this is plain ``_apply_transfer_model``. ``value_scale``
+        and ``output_scale`` mean what they mean there.
         """
-        roi_info = getattr(transfer_model, 'meta', {}).get('region_of_interest', {})
-        if roi_info.get('enabled', False):
-            roi_indices = np.array(roi_info['indices'])
-            X_region = X_satellite[:, roi_indices]
-            X_region_transferred = self._apply_transfer_model(X_region, transfer_model)
-            X_out = X_satellite.copy()
-            X_out[:, roi_indices] = X_region_transferred
-            return X_out
-        return self._apply_transfer_model(X_satellite, transfer_model)
+        from spectral_predict.calibration_transfer import apply_transfer_dispatch
+
+        meta = getattr(transfer_model, 'meta', None) or {}
+        roi_info = meta.get('region_of_interest', {})
+        if not roi_info.get('enabled', False):
+            return self._apply_transfer_model(
+                X_satellite, transfer_model, value_scale=value_scale,
+                output_scale=output_scale)
+
+        fit_scale = meta.get('value_scale')
+        factor = None
+        if (fit_scale in (1.0, 100.0) and value_scale in (1.0, 100.0)
+                and float(value_scale) != float(fit_scale)):
+            factor = float(fit_scale) / float(value_scale)
+        X_work = np.asarray(X_satellite, dtype=float)
+        if factor is not None:
+            X_work = X_work * factor
+        roi_indices = np.array(roi_info['indices'])
+        X_region_transferred = apply_transfer_dispatch(
+            X_work[:, roi_indices], transfer_model)
+        X_out = X_work.copy()
+        X_out[:, roi_indices] = X_region_transferred
+        if factor is not None and output_scale == "incoming":
+            X_out = X_out / factor
+        return X_out
 
     # ========================================================================
     # STEP 3A HELPER METHODS: Prediction Workflow
@@ -52093,12 +53491,27 @@ External Validation Performance (n={n_val}):
             if expected_wl is not None:
                 if len(wavelengths) != len(expected_wl) or not np.allclose(wavelengths, expected_wl, rtol=1e-3):
                     # Wavelengths don't match - offer to resample
-                    wl_range_loaded = f"{wavelengths[0]:.1f}-{wavelengths[-1]:.1f}"
-                    wl_range_expected = f"{expected_wl[0]:.1f}-{expected_wl[-1]:.1f}"
+                    # Some instruments write descending grids; the coverage
+                    # gate above compares min/max, so sort the grid (with the
+                    # data) ascending first and compare min/max here too —
+                    # otherwise a covering descending grid reads as no overlap.
+                    wl_arr = np.asarray(wavelengths, dtype=float)
+                    if wl_arr.size >= 2 and wl_arr[0] > wl_arr[-1]:
+                        order = np.argsort(wl_arr, kind='stable')
+                        wavelengths = wl_arr[order]
+                        X = np.asarray(X, dtype=float)[:, order]
+                    wl_range_loaded = f"{np.min(wavelengths):.1f}-{np.max(wavelengths):.1f}"
+                    wl_range_expected = f"{np.min(expected_wl):.1f}-{np.max(expected_wl):.1f}"
+
+                    # Refuse outright when resampling would extrapolate outside
+                    # the fitted range (interpolation inside it is fine)
+                    if not self._ct_refuse_uncovered_grid(
+                            wavelengths, expected_wl, "loaded spectra"):
+                        return
 
                     # Check if ranges overlap enough for reasonable resampling
-                    overlap_start = max(wavelengths[0], expected_wl[0])
-                    overlap_end = min(wavelengths[-1], expected_wl[-1])
+                    overlap_start = max(np.min(wavelengths), np.min(expected_wl))
+                    overlap_end = min(np.max(wavelengths), np.max(expected_wl))
 
                     if overlap_start < overlap_end:
                         # Reasonable overlap - offer resampling
@@ -52128,7 +53541,7 @@ External Validation Performance (n={n_val}):
                             f"Wavelength ranges don't overlap!\n\n"
                             f"Loaded: {wl_range_loaded} nm\n"
                             f"Expected: {wl_range_expected} nm\n\n"
-                            f"Cannot proceed - data is incompatible."
+                            "Cannot proceed - data is incompatible."
                         )
                         return
             elif transfer_model is None:
@@ -52359,6 +53772,33 @@ External Validation Performance (n={n_val}):
         else:
             return [f"Sample_{i+1}" for i in range(n_samples)]
 
+    def _ct_refuse_uncovered_grid(self, wavelengths, target_wl, what):
+        """Refuse grids that do not cover the fitted wavelengths (no extrapolation).
+
+        Interpolation inside the fitted range is fine, but ``resample_to_grid``
+        would silently linear-extrapolate outside it. Returns True when the
+        loaded grid covers the target (a wider range is fine); otherwise shows
+        an error naming both ranges and returns False.
+        """
+        from tkinter import messagebox
+
+        wl = np.asarray(wavelengths, dtype=float)
+        tgt = np.asarray(target_wl, dtype=float)
+        tol = 0.01
+        if wl.size and tgt.size and (
+                wl.min() > tgt.min() + tol or wl.max() < tgt.max() - tol):
+            messagebox.showerror(
+                "Wavelength Range Too Narrow",
+                f"The {what} span {wl.min():.1f}-{wl.max():.1f} nm, which does "
+                f"not cover the transfer model's fitted range "
+                f"{tgt.min():.1f}-{tgt.max():.1f} nm.\n\n"
+                "Calibration transfer would have to extrapolate outside the "
+                "fitted range, which is unreliable. Load spectra covering "
+                f"{tgt.min():.1f}-{tgt.max():.1f} nm (a wider range is fine; "
+                "only the fitted part is used).")
+            return False
+        return True
+
     def _run_prediction_workflow(self):
         """Run the complete prediction workflow: transform -> predict -> display."""
         from tkinter import messagebox
@@ -52389,11 +53829,30 @@ External Validation Performance (n={n_val}):
             if hasattr(transfer_model, 'wavelengths_common') and transfer_model.wavelengths_common is not None:
                 common_wl = transfer_model.wavelengths_common
                 if len(wavelengths) != len(common_wl) or not np.allclose(wavelengths, common_wl):
+                    if not self._ct_refuse_uncovered_grid(
+                            wavelengths, common_wl, "new satellite spectra"):
+                        return
                     X_satellite = resample_to_grid(X_satellite, wavelengths, common_wl)
                 source_wl = common_wl
 
-            # Transform satellite data to primary domain
-            X_transferred = self._apply_transfer_with_roi(X_satellite, transfer_model)
+            # Transform satellite data to primary domain. value_scale keeps a
+            # percent-vs-fraction reflectance mismatch from silently skewing the
+            # transfer (physical_match refuses percent data outright).
+            pred_scale = (
+                float(getattr(self, 'ct_pred_value_scale', 1.0) or 1.0)
+                if self.ct_pred_data_type.get() == 'reflectance' else None)
+            self._ct_legacy_scale_note(transfer_model, pred_scale)
+            X_transferred = self._apply_transfer_with_roi(
+                X_satellite, transfer_model, value_scale=pred_scale)
+
+            # The prediction model was trained on the primary instrument's
+            # loaded data, and a .dasp does not record that scale; hand it
+            # transferred spectra in the primary's loaded scale (files without
+            # the fit-time keys get no conversion — their old behaviour).
+            p_scale, f_scale = self._ct_primary_scale_of(transfer_model)
+            X_for_model = X_transferred
+            if p_scale is not None and p_scale != f_scale:
+                X_for_model = X_transferred * (p_scale / f_scale)
 
             # Step 2: Use prediction model to predict properties
             if self.current_prediction_model_dict is not None:
@@ -52417,14 +53876,14 @@ External Validation Performance (n={n_val}):
                 if required_wl:
                     target_wl = np.array(required_wl, dtype=float)
                     if source_wl is not None and len(target_wl) > 0:
-                        X_for_prediction = resample_to_grid(X_transferred, source_wl, target_wl)
+                        X_for_prediction = resample_to_grid(X_for_model, source_wl, target_wl)
                     else:
-                        X_for_prediction = X_transferred
+                        X_for_prediction = X_for_model
                     y_pred = predict_with_model(self.current_prediction_model_dict, X_for_prediction, validate_wavelengths=True)
                 else:
-                    y_pred = predict_with_model(self.current_prediction_model_dict, X_transferred, validate_wavelengths=False)
+                    y_pred = predict_with_model(self.current_prediction_model_dict, X_for_model, validate_wavelengths=False)
             else:
-                y_pred = self.current_prediction_model.predict(X_transferred)
+                y_pred = self.current_prediction_model.predict(X_for_model)
 
             # Step 3: Display results
             # Clear existing results
@@ -52453,8 +53912,17 @@ External Validation Performance (n={n_val}):
             # Enable export button
             self.ct_export_predictions_button.config(state='normal')
 
+            # The before/after plot shows the transferred spectra in the loaded
+            # data's scale, not the fit scale the model consumed
+            X_transferred_plot = X_transferred
+            fit_scale = (getattr(transfer_model, 'meta', None) or {}).get('value_scale')
+            if (fit_scale in (1.0, 100.0) and pred_scale in (1.0, 100.0)
+                    and float(pred_scale) != float(fit_scale)):
+                X_transferred_plot = X_transferred * (float(pred_scale) / float(fit_scale))
+
             # Create plots
-            self._plot_ct_prediction_results(y_pred, X_satellite, X_transferred)
+            self._plot_ct_prediction_results(y_pred, X_satellite, X_transferred_plot,
+                                             source_wl)
 
             # Play success sound (removed popup - results shown in tree and plots)
             self.play_sound('success')
@@ -52462,7 +53930,8 @@ External Validation Performance (n={n_val}):
         except Exception as e:
             messagebox.showerror("Error", f"Prediction workflow failed:\n{str(e)}")
 
-    def _plot_ct_prediction_results(self, y_pred, X_satellite_original, X_transferred):
+    def _plot_ct_prediction_results(self, y_pred, X_satellite_original, X_transferred,
+                                    wavelengths=None):
         """Create plots showing prediction results and spectral transformation."""
         if not HAS_MATPLOTLIB:
             return
@@ -52490,7 +53959,9 @@ External Validation Performance (n={n_val}):
         mean_satellite = X_satellite_original.mean(axis=0)
         mean_transferred = X_transferred.mean(axis=0)
 
-        wavelengths = self.new_satellite_data_predict[0]
+        wavelengths = (np.asarray(wavelengths, dtype=float)
+                       if wavelengths is not None
+                       else np.asarray(self.new_satellite_data_predict[0], dtype=float))
         ax2.plot(wavelengths, mean_satellite, label='Satellite (Before)', color='red', alpha=0.7)
         ax2.plot(wavelengths, mean_transferred, label='Transferred (After)', color='blue', alpha=0.7)
         ax2.set_xlabel(self._get_spectral_xlabel(), color=self.colors['text'])
@@ -52806,12 +54277,25 @@ External Validation Performance (n={n_val}):
                     # Wavelengths don't match - offer to resample
                     from spectral_predict.calibration_transfer import resample_to_grid
 
-                    wl_range_loaded = f"{wavelengths[0]:.1f}-{wavelengths[-1]:.1f}"
-                    wl_range_expected = f"{expected_wl[0]:.1f}-{expected_wl[-1]:.1f}"
+                    # Descending grids: sort ascending (with the data) and
+                    # compare min/max, or a covering grid reads as no overlap
+                    wl_arr = np.asarray(wavelengths, dtype=float)
+                    if wl_arr.size >= 2 and wl_arr[0] > wl_arr[-1]:
+                        order = np.argsort(wl_arr, kind='stable')
+                        wavelengths = wl_arr[order]
+                        X = np.asarray(X, dtype=float)[:, order]
+                    wl_range_loaded = f"{np.min(wavelengths):.1f}-{np.max(wavelengths):.1f}"
+                    wl_range_expected = f"{np.min(expected_wl):.1f}-{np.max(expected_wl):.1f}"
+
+                    # Refuse outright when resampling would extrapolate outside
+                    # the fitted range (interpolation inside it is fine)
+                    if not self._ct_refuse_uncovered_grid(
+                            wavelengths, expected_wl, "loaded spectra"):
+                        return
 
                     # Check if ranges overlap enough for reasonable resampling
-                    overlap_start = max(wavelengths[0], expected_wl[0])
-                    overlap_end = min(wavelengths[-1], expected_wl[-1])
+                    overlap_start = max(np.min(wavelengths), np.min(expected_wl))
+                    overlap_end = min(np.max(wavelengths), np.max(expected_wl))
 
                     if overlap_start < overlap_end:
                         # Reasonable overlap - offer resampling
@@ -52841,7 +54325,7 @@ External Validation Performance (n={n_val}):
                             f"Wavelength ranges don't overlap!\n\n"
                             f"Loaded: {wl_range_loaded} nm\n"
                             f"Expected: {wl_range_expected} nm\n\n"
-                            f"Cannot proceed - data is incompatible."
+                            "Cannot proceed - data is incompatible."
                         )
                         return
             elif transfer_model is None:
@@ -52953,6 +54437,10 @@ External Validation Performance (n={n_val}):
             if model_wavelengths is not None:
                 if not np.array_equal(wavelengths_satellite, model_wavelengths):
                     from spectral_predict.calibration_transfer import resample_to_grid
+                    if not self._ct_refuse_uncovered_grid(
+                            wavelengths_satellite, model_wavelengths,
+                            "loaded satellite spectra"):
+                        return
                     X_satellite_resampled = resample_to_grid(X_satellite, wavelengths_satellite, model_wavelengths)
                 else:
                     X_satellite_resampled = X_satellite
@@ -52960,13 +54448,32 @@ External Validation Performance (n={n_val}):
                 X_satellite_resampled = X_satellite
                 model_wavelengths = wavelengths_satellite
 
-            # Apply transfer (ROI-aware: splices region back into full spectrum)
-            X_transferred = self._apply_transfer_with_roi(X_satellite_resampled, transfer_model)
+            # Apply transfer (ROI-aware: splices region back into full spectrum).
+            # The exported spectra are meant to look like primary-instrument
+            # data, so they come back in the primary's loaded reflectance scale
+            # when the fit recorded it (older files: the loaded data's own scale).
+            export_scale = (
+                float(getattr(self, 'ct_export_value_scale', 1.0) or 1.0)
+                if self.ct_export_data_type.get() == 'reflectance' else None)
+            legacy_scale_note = self._ct_legacy_scale_note(transfer_model, export_scale)
+            X_transferred = self._apply_transfer_with_roi(
+                X_satellite_resampled, transfer_model, value_scale=export_scale,
+                output_scale="incoming")
+            output_scale_note = None
+            out_scale = export_scale
+            p_scale, _f_scale = self._ct_primary_scale_of(transfer_model)
+            if p_scale is not None and export_scale is not None:
+                out_scale = p_scale
+                if export_scale in (1.0, 100.0) and p_scale != export_scale:
+                    X_transferred = X_transferred * (p_scale / float(export_scale))
+                output_scale_note = (
+                    "percent (0-100) reflectance" if p_scale == 100.0
+                    else "fraction (0-1) reflectance")
 
             # Store transformed spectra, with the data type they carry (after any
             # conversion), for "use as working data"
             self.transformed_spectra = (model_wavelengths, X_transferred)
-            self._record_transformed_spectra_type()
+            self._record_transformed_spectra_type(value_scale=out_scale)
 
             # Calculate statistics
             rmse = np.sqrt(np.mean((X_transferred - X_satellite_resampled) ** 2))
@@ -52976,6 +54483,11 @@ External Validation Performance (n={n_val}):
             stats_text = f"Transformation Complete!\n"
             stats_text += f"RMSE: {rmse:.6f}\n"
             stats_text += f"Coverage: {coverage:.1f}% ({X_transferred.shape[0]} samples)"
+            if output_scale_note:
+                stats_text += (f"\nOutput scale: {output_scale_note} — like the "
+                               "primary instrument's loaded data")
+            if legacy_scale_note:
+                stats_text += "\n" + legacy_scale_note
 
             self.ct_transform_stats_text.config(state='normal')
             self.ct_transform_stats_text.delete('1.0', tk.END)
@@ -53008,12 +54520,13 @@ External Validation Performance (n={n_val}):
         else:
             self.ct_use_as_working_btn.config(state='disabled')
 
-    def _record_transformed_spectra_type(self):
+    def _record_transformed_spectra_type(self, value_scale=None):
         """Record the Mode B data type (after any conversion) with the transformed spectra.
 
         "Use as working data" applies it instead of re-detecting from values; the
         value scale travels with it so percent reflectance converted to absorbance
-        converts back to percent.
+        converts back to percent. ``value_scale`` overrides the loaded scale when
+        the export came back in another scale (the primary's loaded scale).
         """
         export_type = self.ct_export_data_type.get()
         self.transformed_spectra_type = {
@@ -53023,7 +54536,10 @@ External Validation Performance (n={n_val}):
                 None if self.ct_export_data_converted
                 else getattr(self, 'ct_export_source_data_type', None)
             ),
-            'value_scale': getattr(self, 'ct_export_value_scale', 1.0),
+            'value_scale': (
+                value_scale if value_scale is not None
+                else getattr(self, 'ct_export_value_scale', 1.0)
+            ),
         } if export_type else None
 
     def _ct_use_as_working_data(self):
@@ -53320,6 +54836,10 @@ External Validation Performance (n={n_val}):
         self.current_primary_data = (wavelengths, X_converted)
         self.ct_primary_data_type.set(target)
         self.ct_primary_was_converted = True
+        # Keep the pairing DataFrame in step and drop everything fitted on the
+        # unconverted values (pairing, board, fitted transfer)
+        self._ct_sync_converted_standards('primary', X_converted)
+        self._ct_invalidate_standards_state()
 
         # Update UI
         self.ct_primary_type_status_label.config(
@@ -53396,6 +54916,10 @@ External Validation Performance (n={n_val}):
         self.current_satellite_data = (wavelengths, X_converted)
         self.ct_satellite_data_type.set(target)
         self.ct_satellite_was_converted = True
+        # Keep the pairing DataFrame in step and drop everything fitted on the
+        # unconverted values (pairing, board, fitted transfer)
+        self._ct_sync_converted_standards('satellite', X_converted)
+        self._ct_invalidate_standards_state()
 
         # Update UI
         self.ct_satellite_type_status_label.config(
@@ -55429,14 +56953,30 @@ External Validation Performance (n={n_val}):
         if not self.apply_transfer.get() or not self.transfer_models:
             return X_data
 
-        from spectral_predict import calibration_transfer
         import pandas as pd
         import numpy as np
 
         X_current = X_data.copy()
 
+        # Reflectance scale of the data entering the chain (None = absorbance
+        # or unknown). Each step converts to its transfer's fit scale through
+        # the same funnel as Mode A/B; the chain's output is an export path
+        # and comes back in the primary's loaded scale (Mode B convention).
+        data_type_var = getattr(self, 'comparison_data_type', None)
+        data_type = data_type_var.get() if data_type_var is not None else None
+        scale_current = (
+            float(getattr(self, 'comparison_value_scale', 1.0) or 1.0)
+            if data_type == 'reflectance' else None)
+        # primary_value_scale recorded by the last new (scale-recorded)
+        # transfer in the chain — the scale a following legacy file most
+        # plausibly saw, since standalone it was fitted on the instruments'
+        # loaded data.
+        ref_primary_scale = None
+
+        last_model = None
         for i, transfer_dict in enumerate(self.transfer_models):
             transfer_model = transfer_dict['model']
+            last_model = transfer_model
 
             print(f"Applying transfer {i+1}/{len(self.transfer_models)}: {transfer_dict['description']}")
 
@@ -55448,21 +56988,44 @@ External Validation Performance (n={n_val}):
                 X_values = X_current
                 sample_names = None
 
-            # Apply transfer using the dispatcher (ROI-aware)
+            # A legacy file (no value_scale recorded) cannot say what scale
+            # it was fitted on: feed it the preceding recorded transfer's
+            # primary value scale rather than whatever the chain happens to
+            # carry at that point (after a 0-1 step that means converting
+            # back up). With no recorded step before it, keep the old
+            # behaviour and say so.
+            meta = getattr(transfer_model, 'meta', None) or {}
+            fit_scale = meta.get('value_scale')
+            if fit_scale in (1.0, 100.0):
+                self._ct_legacy_scale_note(transfer_model, scale_current)
+            elif (scale_current is not None
+                    and ref_primary_scale in (1.0, 100.0)
+                    and ref_primary_scale != scale_current):
+                factor = float(ref_primary_scale) / float(scale_current)
+                X_values = np.asarray(X_values, dtype=float) * factor
+                scale_current = float(ref_primary_scale)
+                print(f"Transfer chain: converting spectra to "
+                      f"x{ref_primary_scale:g} for the legacy step "
+                      f"'{transfer_dict['description']}' (the previous "
+                      f"transfer's primary scale).")
+            else:
+                self._ct_legacy_scale_note(transfer_model, scale_current)
+
+            # Apply through the shared funnel (value-scale conversion + ROI
+            # splice); output is in this transfer's fit scale.
             try:
-                roi_info = getattr(transfer_model, 'meta', {}).get('region_of_interest', {})
-                if roi_info.get('enabled', False):
-                    roi_indices = np.array(roi_info['indices'])
-                    X_region = X_values[:, roi_indices]
-                    X_region_transferred = calibration_transfer.apply_transfer_dispatch(X_region, transfer_model)
-                    X_transferred = X_values.copy()
-                    X_transferred[:, roi_indices] = X_region_transferred
-                else:
-                    X_transferred = calibration_transfer.apply_transfer_dispatch(X_values, transfer_model)
+                X_transferred = self._apply_transfer_with_roi(
+                    X_values, transfer_model, value_scale=scale_current)
             except Exception as e:
                 messagebox.showerror("Transfer Error",
                                    f"Failed to apply transfer model {transfer_dict['description']}: {str(e)}")
                 return X_data  # Return original data on error
+
+            if fit_scale in (1.0, 100.0):
+                scale_current = float(fit_scale)
+                p_recorded = meta.get('primary_value_scale')
+                if p_recorded in (1.0, 100.0):
+                    ref_primary_scale = float(p_recorded)
 
             # Reconstruct DataFrame with new wavelengths
             if sample_names is not None:
@@ -55473,6 +57036,15 @@ External Validation Performance (n={n_val}):
                 )
             else:
                 X_current = X_transferred
+
+        if last_model is not None:
+            p_scale, _fit_scale = self._ct_primary_scale_of(last_model)
+            if (p_scale is not None and scale_current is not None
+                    and p_scale != scale_current):
+                factor = p_scale / scale_current
+                X_current = X_current * factor
+                print(f"Transfer chain output converted to the primary "
+                      f"instrument's loaded scale (x{factor:g}).")
 
         # Log the transformation
         transfer_chain_desc = " -> ".join([t['description'] for t in self.transfer_models])
@@ -56401,6 +57973,166 @@ External Validation Performance (n={n_val}):
         ttk.Button(data_section, text="Preview Primary vs Satellite Spectra",
                   command=self._preview_spectra,
                   style='Modern.TButton').pack(anchor='w')
+
+        # Sub-section A1b: pair the loaded standards and validate/compare methods
+        validate_section = ttk.LabelFrame(
+            self.ct_build_new_frame,
+            text="A1b) Pair Standards by Sample ID & Validate Transfer Methods",
+            style='Card.TFrame', padding=10)
+        validate_section.pack(fill='x', pady=(0, 10))
+
+        # Pairs table row (optional CSV naming primary/satellite pairs)
+        pairs_table_frame = ttk.Frame(validate_section)
+        pairs_table_frame.pack(fill='x', pady=(0, 5))
+        ttk.Label(pairs_table_frame,
+                  text="Pairs table (optional CSV: primary, satellite [, group]):",
+                  style='Caption.TLabel').pack(anchor='w')
+        pairs_table_row = ttk.Frame(pairs_table_frame)
+        pairs_table_row.pack(fill='x')
+        ttk.Entry(pairs_table_row, textvariable=self.ct_pairs_table_path_var,
+                  width=50).pack(side='left', padx=(0, 8))
+        ttk.Button(pairs_table_row, text="Browse...", command=self._browse_ct_pairs_table,
+                   style='Modern.TButton').pack(side='left', padx=(0, 8))
+        ttk.Button(pairs_table_row, text="Load Pairs Table",
+                   command=self._load_ct_pairs_table,
+                   style='Modern.TButton').pack(side='left', padx=(0, 8))
+        ttk.Button(pairs_table_row, text="Clear Table",
+                   command=self._clear_ct_pairs_table,
+                   style='Modern.TButton').pack(side='left', padx=(0, 8))
+        self._create_accent_button(pairs_table_row, "Pair by Sample ID",
+                                   self._pair_ct_standards).pack(side='left')
+
+        self.ct_pairs_status_label = ttk.Label(validate_section, text="No standards paired yet.",
+                                               style='Caption.TLabel',
+                                               foreground=self.colors['text_light'])
+        self.ct_pairs_status_label.pack(anchor='w', pady=(0, 5))
+
+        # Pairs table: primary | satellite | group, with unmatched IDs listed
+        pairs_tree_frame = ttk.Frame(validate_section)
+        pairs_tree_frame.pack(fill='x', pady=(0, 5))
+        self.ct_pairs_tree = ttk.Treeview(
+            pairs_tree_frame, columns=('primary', 'satellite', 'group'),
+            show='headings', height=5, selectmode='extended')
+        self.ct_pairs_tree.heading('primary', text='Primary')
+        self.ct_pairs_tree.heading('satellite', text='Satellite')
+        self.ct_pairs_tree.heading('group', text='Group (unit / session / batch)')
+        self.ct_pairs_tree.column('primary', width=180)
+        self.ct_pairs_tree.column('satellite', width=180)
+        self.ct_pairs_tree.column('group', width=160)
+        pairs_scroll = ttk.Scrollbar(pairs_tree_frame, orient='vertical',
+                                     command=self.ct_pairs_tree.yview)
+        self.ct_pairs_tree.configure(yscrollcommand=pairs_scroll.set)
+        self.ct_pairs_tree.pack(side='left', fill='both', expand=True)
+        pairs_scroll.pack(side='left', fill='y')
+
+        # Group editing on the selected rows
+        group_row = ttk.Frame(validate_section)
+        group_row.pack(fill='x', pady=(0, 2))
+        ttk.Label(group_row, text="Group:", style='Caption.TLabel').pack(side='left', padx=(0, 5))
+        ttk.Entry(group_row, textvariable=self.ct_pair_group_entry_var,
+                  width=20).pack(side='left', padx=(0, 8))
+        ttk.Button(group_row, text="Set group on selected rows",
+                   command=self._ct_set_group_on_selected,
+                   style='Modern.TButton').pack(side='left')
+
+        # Optional prediction model: adds RMSD/slope columns to the board
+        eval_model_row = ttk.Frame(validate_section)
+        eval_model_row.pack(fill='x', pady=(4, 0))
+        ttk.Label(eval_model_row, text="Prediction model (.dasp, optional):",
+                  style='Caption.TLabel').pack(side='left', padx=(0, 8))
+        ttk.Entry(eval_model_row, textvariable=self.ct_eval_model_path_var,
+                  width=36).pack(side='left', padx=(0, 8))
+        ttk.Button(eval_model_row, text="Browse...",
+                   command=self._browse_ct_eval_model,
+                   style='Modern.TButton').pack(side='left', padx=(0, 8))
+        ttk.Button(eval_model_row, text="Load Model",
+                   command=self._load_ct_eval_model,
+                   style='Modern.TButton').pack(side='left', padx=(0, 8))
+        self.ct_eval_model_status_label = ttk.Label(
+            eval_model_row, text="no model (spectral scores only)",
+            style='Caption.TLabel', foreground=self.colors['text_light'])
+        self.ct_eval_model_status_label.pack(side='left')
+
+        # Spectral space + detector joins
+        eval_options_row = ttk.Frame(validate_section)
+        eval_options_row.pack(fill='x', pady=(4, 0))
+        ttk.Label(eval_options_row, text="Space:", style='Caption.TLabel').pack(
+            side='left', padx=(0, 4))
+        self.ct_eval_space_combo = ttk.Combobox(
+            eval_options_row, textvariable=self.ct_eval_space_var,
+            state='readonly', width=16,
+            values=('auto (detected)', 'reflectance', 'absorbance'))
+        self.ct_eval_space_combo.pack(side='left', padx=(0, 14))
+        self.ct_eval_space_combo.bind(
+            '<<ComboboxSelected>>',
+            lambda e: self._on_ct_eval_settings_changed())
+        ttk.Label(eval_options_row, text="Detector joins:",
+                  style='Caption.TLabel').pack(side='left', padx=(0, 4))
+        self.ct_eval_joins_combo = ttk.Combobox(
+            eval_options_row, textvariable=self.ct_eval_joins_var,
+            state='readonly', width=16,
+            values=('auto', 'ASD file header', 'none', 'custom'))
+        self.ct_eval_joins_combo.pack(side='left', padx=(0, 6))
+        self.ct_eval_joins_combo.bind(
+            '<<ComboboxSelected>>',
+            lambda e: self._on_ct_eval_settings_changed())
+        ttk.Label(eval_options_row, text="Custom (nm):",
+                  style='Caption.TLabel').pack(side='left', padx=(0, 4))
+        ttk.Entry(eval_options_row, textvariable=self.ct_eval_joins_custom_var,
+                  width=12).pack(side='left')
+        # The frozen Validate context reads this entry; any edit (typed or
+        # written through the variable) must invalidate the board exactly
+        # like the comboboxes above, or Fit keeps fitting under old joins.
+        self.ct_eval_joins_custom_var.trace_add(
+            'write', lambda *_: self._on_ct_eval_settings_changed())
+        self.ct_eval_joins_used_label = ttk.Label(
+            validate_section, text="", style='Caption.TLabel',
+            foreground=self.colors['text_light'])
+        self.ct_eval_joins_used_label.pack(anchor='w', pady=(2, 0))
+
+        # Run + fit
+        eval_run_row = ttk.Frame(validate_section)
+        eval_run_row.pack(fill='x', pady=(6, 2))
+        self.ct_validate_button = self._create_accent_button(
+            eval_run_row, "Validate & Compare", self._run_ct_validate)
+        self.ct_validate_button.pack(side='left', padx=(0, 10))
+        self.ct_fit_selected_button = ttk.Button(
+            eval_run_row, text="Fit Selected Method", command=self._fit_ct_selected,
+            style='Modern.TButton', state='disabled')
+        self.ct_fit_selected_button.pack(side='left', padx=(0, 10))
+        ttk.Button(eval_run_row, text="Plan Transfer Standards…",
+                   command=self._open_ct_plan_standards,
+                   style='Modern.TButton').pack(side='left')
+        self.ct_validate_status_label = ttk.Label(
+            eval_run_row, text="", style='Caption.TLabel',
+            foreground=self.colors['text_light'])
+        self.ct_validate_status_label.pack(side='left', padx=(10, 0))
+
+        # Leaderboard
+        self.ct_leaderboard_header_label = ttk.Label(
+            validate_section,
+            text="Leaderboard: pair standards and run Validate to compare methods.",
+            style='Caption.TLabel', foreground=self.colors['text_light'])
+        self.ct_leaderboard_header_label.pack(anchor='w')
+        board_frame = ttk.Frame(validate_section)
+        board_frame.pack(fill='both', expand=True, pady=(2, 4))
+        self.ct_leaderboard_tree = ttk.Treeview(board_frame, columns=('label',),
+                                                show='headings', height=8)
+        self.ct_leaderboard_tree.heading('label', text='Method')
+        self.ct_leaderboard_tree.column('label', width=300)
+        board_scroll = ttk.Scrollbar(board_frame, orient='vertical',
+                                     command=self.ct_leaderboard_tree.yview)
+        self.ct_leaderboard_tree.configure(yscrollcommand=board_scroll.set)
+        self.ct_leaderboard_tree.pack(side='left', fill='both', expand=True)
+        board_scroll.pack(side='left', fill='y')
+
+        # Warnings + noise/join diagnostics
+        self.ct_diagnostics_text = tk.Text(
+            validate_section, height=6, width=80, state='disabled', wrap='word',
+            relief='flat', borderwidth=0, bg=self.colors['panel'],
+            fg=self.colors['text'], selectbackground=self.colors['accent'],
+            selectforeground=self.colors['text_inverse'])
+        self.ct_diagnostics_text.pack(fill='x', pady=(0, 6))
 
         # Sub-section A2: Configure Method
         method_section = ttk.LabelFrame(self.ct_build_new_frame, text="A2) Configure Transfer Method",

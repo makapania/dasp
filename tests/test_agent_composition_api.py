@@ -68,8 +68,10 @@ PRIMITIVES: dict[str, list[str]] = {
         "plsda_head_kwargs",
     ],
     "model_io": ["save_model", "load_model", "predict_with_model"],
-    # QW4: KS / SPXY / DUPLEX calibration-holdout split (KS/SPXY pick calibration)
-    "sample_selection": ["split_calibration_holdout"],
+    # QW4: KS / SPXY / DUPLEX calibration-holdout split (KS/SPXY pick calibration);
+    # F2 part 2: the GUI's Plan Transfer Standards uses kennard_stone (the JYPLS
+    # path already imported it undeclared)
+    "sample_selection": ["split_calibration_holdout", "kennard_stone", "spxy"],
     # F2 part 1: transfer estimators and leave-one-standard-out evaluation
     "calibration_transfer": [
         "estimate_pds_lowrank",

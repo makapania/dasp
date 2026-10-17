@@ -697,7 +697,7 @@ listed is an internal implementation detail that may change without notice.
 | `contamination` | `PCASIMCA` |
 | `models` | `PLSTransformer`; results-row rebuild helpers `parse_row_params`, `estimator_params_from_row`, `plsda_head_kwargs` (and its `PLSDA_HEAD_DEFAULT_RANDOM_STATE` default) |
 | `model_io` | `save_model`, `load_model`, `predict_with_model` |
-| `sample_selection` | `split_calibration_holdout` |
+| `sample_selection` | `split_calibration_holdout`, `kennard_stone`, `spxy` |
 | `calibration_transfer` | `estimate_pds_lowrank`, `apply_pds_centred`, `estimate_ds_dual`, `apply_ds_dual`, `estimate_tsr`, `apply_tsr`, `estimate_prediction_correction`, `apply_prediction_correction`, `estimate_physical_match`, `apply_physical_match`, `apply_transfer_dispatch`, `TransferModel`, `save_transfer_model`, `load_transfer_model` |
 | `spectral_diagnostics` | `estimate_noise`, `noise_profile`, `noisy_regions`, `noise_comparison`, `detect_detector_joins`, `resolve_joins`, `read_asd_header_joins`, `NoiseEstimate`, `JoinDetection` |
 | `transfer_evaluation` | `evaluate_transfer`, `default_transfer_candidates`, `fit_transfer`, `TransferCandidate`, `TransferEvaluation`, `pair_standards_by_id`, `PairedStandards`, `predict_fn_from_model` |

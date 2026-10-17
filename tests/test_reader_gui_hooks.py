@@ -686,7 +686,7 @@ def test_ct_prediction_checks_data_type(tmp_path, monkeypatch, dialogs):
     app.ct_pred_data_converted = False
     app.ct_pred_source_data_type = "kubelka_munk"
     app.ct_pred_loaded_sample_ids = None
-    app._apply_transfer_with_roi = lambda X, model: X
+    app._apply_transfer_with_roi = lambda X, model, **kwargs: X
     app._plot_ct_prediction_results = lambda *a: None
     app.play_sound = lambda *a, **k: None
     app.ct_predictions_tree = _AnyWidget()

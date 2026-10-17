@@ -31,6 +31,15 @@ evidence SESSION_LOG 2026-10-16). Driven by SPYDER Bone's 40 bones scanned on La
 joins (header / detected / user override) and the physical-match notes; ID pairing in the loaders (the GUI still
 pairs by row order: SPYDER found 0/40 rows correct in the user's earlier DS files — do not reuse those), a group
 column for standards, "Plan transfer standards", delete the dead `_build_ct_transfer_model`/`_load_ct_paired_spectra`.
+**Part 2 built** (branch `zcode/f2-part2-gui`, plan `docs/plans/2026-10-16-F2-part2-ct-gui.md`, as-built blocks per
+review round): ID pairing in the loaders plus a pairs table (an active table alone defines the pairs; "Clear Table"
+returns to ID matching), group column, Validate & Compare panel (worker thread, leaderboard, joins control, Fit
+Selected), Plan Transfer Standards (Kennard-Stone), dead row-order code deleted. Prediction models get spectra in
+the **primary's loaded scale** (fits record `meta['primary_value_scale']`; legacy transfer files keep old behaviour
+with a one-line warning). Every input change goes through one invalidation entry point with per-launch run ids.
+Five review rounds (GLM, then Codex confirms) to a Codex MERGE verdict; full suite 5173 passed / 26 skipped.
+**Follow-ups:** the File Equalize UI (Section F) and `_load_and_predict_ct` have helpers and tests but no widgets in
+the tab (nothing creates `ct_eq_*`, `ct_new_satellite_dir_var`, `ct_prediction_text`): wire them or delete them.
 **Part 2b (after part 2):** `docs/plans/2026-10-17-F2-part2b-transfer-fit-regions-dn-joins.md`: a fit-regions option
 for the physical-match gain ("exclude water bands"), and detector joins from raw DN (Trek). Both found on SPYDER's
 Beasley FieldSpec 3/Trek pairs; no bone-specific mode.

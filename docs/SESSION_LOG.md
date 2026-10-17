@@ -6,6 +6,113 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 Older entries are in [SESSION_LOG_ARCHIVE.md](SESSION_LOG_ARCHIVE.md) — grep it for historical context; batch 8 on 2026-10-03 moved every entry dated 2026-09-14 to 2026-09-28; batch 7 on 2026-09-15 moved every entry dated before 2026-09-14 plus the full round-by-round PR #79 crash-resume history (condensed here into the 2026-09-15 "PR #79 crash-resume (merged a5f9a70)" entry); batch 6 moved entries dated before 2026-09-01.
 
+## 2026-10-17 - F2 part 2 review round 4: table-active flag; run abandonment
+
+Branch `zcode/f2-part2-gui`, six Codex findings on round 3. Durable lessons:
+
+- **"Pairs table active" must be independent of how many rows resolve.** A reload can empty
+  the recorded mappings before the table is re-applied; if a zero-rows re-apply then raises
+  (round 3's behaviour), the path stays set while the mappings are gone and pairing silently
+  falls back to ID matching. The flag is set as soon as a load is *attempted* against the
+  loaded files — a failed parse also leaves it active with zero rows (refuse, don't guess);
+  only Clear Table clears it.
+- **Invalidation owns the busy state, once.** Bumping the input-generation counter is not
+  enough while the active run id survives: the stale callback passes the run-id check, takes
+  the stale-generation branch and rewrites running flag/buttons/status a second time.
+  Invalidation now clears the active run id itself; callbacks compare run ids and touch
+  nothing when they do not own the panel. Round 3's comment ("a newer run was launched")
+  described too narrow a case — invalidation alone must abandon the run.
+- Treeview item ids do not survive a delete+re-insert refresh: re-read `get_children()` for
+  every `selection_set` in a multi-edit test sequence (I001 & co. are never reused).
+
+## 2026-10-17 - F2 part 2 review round 2: unwired Section F; chain scale bookkeeping
+
+Branch `zcode/f2-part2-gui`, four findings on top of the round-1 fixes:
+
+- **Section F "File Equalize" is not wired into the tab.** Its helper methods
+  (`_file_equalize_batch`, `_load_ct_eq_transfer_model`, `_browse_ct_eq_*`) exist and a help
+  message points users at Section F, but no widget-creation code exists — nothing instantiates
+  the `ct_eq_*` StringVars/Text, so the path is unreachable from the UI today. The round-2 fix
+  still routed it through the value-scale funnel (it is a real export path), and the test
+  provisions the vars (`_provision_equalize_ui`) exactly as a wired frame would. If Section F is
+  ever wired up, check that its vars match those names.
+- **`_apply_transfer_chain` (Model Comparison tab) must track the scale step to step**: each
+  transfer's output is in *its* fit scale, which is the next transfer's incoming
+  `value_scale`; the final result is converted once, to the last transfer's
+  `primary_value_scale` (Mode B convention). Chaining per-step `output_scale='incoming'` would
+  undo the next step's conversion — don't.
+- **Pairs-table collisions: exclusion beats guessing.** Loaded files folding to one normalized
+  key are dropped from the lookup (table rows naming them come back "ambiguous" in the existing
+  not-found warning) rather than matched to whichever file hashed last. First-row-wins for
+  duplicate table rows is deterministic and reported; last-wins was silent.
+- Destroyed-Tk-widget checks: `winfo_exists()` is safe on a destroyed widget (returns False, no
+  TclError) — the guard in `_on_ct_plan_done` needs no try/except. Reset non-widget flags (the
+  running flag) BEFORE the early return, or a closed dialog leaves the feature wedged.
+
+## 2026-10-16 - F2 part 2 (CT GUI): mixed-order pytest args break tests/gui fixtures; value-scale convention
+
+Branch `zcode/f2-part2-gui`. Gotchas from building the Validate & Compare panel:
+
+- **Do not interleave pytest args between `tests/` and `tests/gui/`.** `pytest tests/test_a.py
+  tests/gui/test_b.py tests/test_c.py tests/gui/test_d.py` (a gui path first, top-level paths in
+  between, gui again later) makes the later gui files fail at setup with `fixture 'gui_app' not
+  found` — reproducible on pre-existing files (e.g. `tests/gui/test_dataset_state.py`, 95 errors),
+  so it is a repo conftest/layout quirk (both `tests/` and `tests/gui/` are packages), not a test
+  bug. The same set in another order, `tests/gui` as one contiguous path, or the whole `tests/`
+  suite works. If you see mass `gui_app not found` errors, check argument order before blaming the
+  test.
+- **`spectral_predict_gui_optimized.py` is not black-clean** (~26k diff lines at this branch's
+  base). Never run black on it; hand-format new hunks (`black -l 100 --target-version py314` is
+  fine for new test files).
+- **Value-scale convention for CT fit vs apply (lead requirement A).** Panel fits normalize
+  percent reflectance to 0-1 and record `meta['value_scale'] = 1.0`; the legacy A2 build path
+  records the as-loaded satellite scale. `_apply_transfer_model(X, tm, value_scale=...)` converts
+  incoming data to the fit scale and returns transferred spectra **in the fit scale** by default —
+  Mode A then feeds the prediction model exactly what the Validate board scored — and
+  `output_scale='incoming'` converts back for Mode B export (exports stay in the loaded scale).
+  Without the meta, physical_match's percent guard raises at apply time, which is the failure the
+  meta prevents (asserted in a test).
+- **Pairs tables are ground truth.** A pairs-table test that assigns LAB names positionally over
+  shuffled satellite rows defines a *wrong* pairing on purpose; rename-then-pair then correctly
+  pairs the wrong specimens and the array assertion fails. Label each shuffled row with its own
+  specimen's name.
+- `model_io.save_model` requires metadata fields `model_name`, `task_type`, `wavelengths`,
+  `n_vars` (ValueError otherwise) when hand-building a .dasp in tests.
+
+## 2026-10-17 - F2 part 2 review round: .dasp training scale; percent-scale test fixtures
+
+Branch `zcode/f2-part2-gui` (fixes `b06124d`..`7b7102f`). Root causes worth keeping:
+
+- **A `.dasp` model does not record the reflectance scale it was trained on.** The Validate panel
+  normalizes percent reflectance to 0-1 (physical match refuses percent), so a percent-trained
+  model silently received spectra 100x too small — derivative/PLS models scale linearly and are
+  simply wrong; SNV models hide it. The safe assumption is the **primary instrument's loaded
+  scale** (that is what the model was built on): the board wraps `predict` to scale back up, fits
+  record `meta['primary_value_scale']` beside `meta['value_scale']`, and Mode A/B use it. Mode B
+  exports **primary-scale** spectra now (supersedes the 2026-10-16 "exports stay in the loaded
+  scale" note above — a fraction-primary/percent-satellite load must still export fraction).
+- **Testing percent-scale flows: make the DATA percent-valued.** Setting
+  `ct_*_reflectance_scale = 100` while the fixture arrays hold 0-1 values claims "0.5 percent
+  reflectance" — the app is then right and the test's expectation is wrong (a linear model makes
+  the wrong numbers coincide deceivingly: rmsd ratios of exactly 100). Multiply the arrays by 100
+  and compute expectations from `ct_paired.*` (the paired arrays are in primary order; the
+  satellite df is shuffled).
+- **Stale-state family (B/C/E):** the Convert buttons updated `current_*_data` but not
+  `current_*_df`, and reload kept pairing/board/fitted-model state. All invalidation funnels
+  through `_ct_invalidate_standards_state` + an input-generation counter (`_ct_input_generation`)
+  that discards worker results computed on replaced inputs — the pattern to copy when another tab
+  gains background workers over replaceable inputs.
+- **`resample_to_grid` extrapolates silently** (`fill_value='extrapolate'`), and the Mode A/B
+  load-time "resample?" dialogs offered it after checking only *overlap*, not *coverage* — a
+  loaded 1500-2500 nm grid vs a 1000-2000 nm model interpolated 500 nm of invented spectrum.
+  Coverage (loaded ⊇ fitted) is the correct gate; `_ct_refuse_uncovered_grid` names both ranges.
+- Splitting one working-tree diff into per-finding commits on a CRLF repo: `git apply --cached`
+  rejects hunks that end mid-insertion with no trailing context here, and any Python round-trip
+  via `str.splitlines()` strips `\r` and breaks every hunk. What worked: reconstruct each
+  commit's file by string-replacing hunk old→new blocks on the HEAD blob (split on `"\n"` only,
+  `newline=""`), byte-compare the accumulation against the working tree first, then write and
+  commit state by state with a pytest gate per state.
+
 ## 2026-10-02 - User rule: chemometrics validation conventions, not ML "leakage" rules
 The user (Unscrambler is the reference standard) ruled that these are NOT leakage and must not be "fixed": row-wise
 preprocessing (SNV, SG derivatives) applied before CV; bands/regions chosen a priori from chemistry (wavelengths must
@@ -1132,3 +1239,50 @@ is `planning/08_transfer.md` there.
   bands do not (1450: 1.89, 1930: 1.27), so the block gains are a water correction: good for the 2045 models, bad for
   oh1545 (1.18 -> 1.70). The board's "No method beat No correction" warning caught it. Possible follow-up: fit the gain
   with water bands excluded (`exclude=`), or per model window.
+
+## 2026-10-17 (b) — F2 part 2 review round 3 (Codex confirm on rounds 1-2)
+- **Stale-run mechanism (HIGH):** bumping the generation only in standards invalidation left every
+  other pairing-input change (pairs-table load, re-pair, group edit, eval model/settings) able to
+  land a stale board. Fix shape worth reusing: ONE invalidation entry point that bumps the input
+  generation and drops derived state, PLUS a per-launch run id — a completion handler accepts a
+  result only if run id AND generation both match; a run-id mismatch returns without touching the
+  busy state (that was the separate MEDIUM: a stale callback unlocked controls mid-newer-run).
+  Invalidation also abandons the in-flight run (its callback then no-ops), which makes the
+  enabled-button state and the running flag consistent after any input change.
+- **Pairs-table decision (HIGH, lead's call):** an active pairs table DEFINES the pairs — only its
+  accepted mappings pair, everything else (files not in the table, rows that no longer resolve) is
+  listed unmatched with an explicit status; no ID-matching fallback. "Clear Table" returns to ID
+  matching. The old rename+ID-match scheme let a partly matched table auto-pair by name luck
+  (table C->z, z missing, satellite file C exists -> C paired).
+- **Mixed transfer chains (HIGH):** a legacy file (no meta['value_scale']) after a new 0-1 step
+  received 0-1 unchanged. Chain now tracks the last recorded primary_value_scale and converts to it
+  before a legacy step. A trailing legacy step then already leaves the output in the primary's
+  loaded scale — the final Mode-B conversion stays correct.
+- **interp1d sorts its samples** (assume_sorted=False default), so resampling itself tolerates a
+  descending source grid; what broke was GUI-side overlap logic reading [0]/[-1]. Still sort
+  explicitly — the overlap check and range labels need it.
+- **Two more unwired Section C/F paths found while testing:** `_load_and_predict_ct` reads
+  `ct_new_satellite_dir_var` and writes `ct_prediction_text`, and neither is created by any widget
+  (same as File Equalize's `ct_eq_*` vars, round 2). Tests provision them; wiring the frames will
+  create exactly that state.
+- pytest heredoc gotcha (again): a bash heredoc carrying test code with em-dashes/quotes truncated
+  mid-write on Windows Git Bash; prefer the Edit tool or `python - << PYEOF` file rewrites.
+
+## 2026-10-17 (c) — F2 part 2 review round 5 (Codex confirm on round 4)
+- **Invalidation keys off the ATTEMPT, not the success** (HIGH): `_load_ct_pairs_table` cleared the
+  rename mapping before parsing but only invalidated `ct_paired`/board after a good parse, so a
+  malformed replacement file left the previous pairing usable behind a fit-ready board (Validate
+  reused cached `ct_paired`). Rule: the moment an input change supersedes old state, run the
+  invalidation entry point — error paths included; the failed table still stays active (round 4),
+  so pairing refuses until fixed or cleared.
+- **Manual edits beat re-applied file state** (MEDIUM): a pairs-table reload re-seeds group labels
+  and had been overwriting manual Treeview overrides. Decision: manual wins — the reload skips IDs
+  whose label is not in table provenance (`ct_pair_groups_table_keys`), on first load and reload
+  alike; Clear Table keeps them too.
+- **Ambiguous folded names are still "named by the table"** (LOW): the collision lookup rightly
+  excludes them from pairing, but the named-file sets must include the colliding ids (the lookup
+  now returns key → ids for ambiguous names) or the status over-counts "files not in the table".
+- Test smell (round 5): stale-callback tests that assign run ids/busy state directly prove the
+  guard but not the launch bookkeeping. `_captured_validate_run` / new `_captured_fit_run` (patch
+  only the completion handler, workers inline) launch real runs with callbacks withheld — both
+  launches in both stale tests now go through the real `_run_ct_validate` / `_fit_ct_selected`.
