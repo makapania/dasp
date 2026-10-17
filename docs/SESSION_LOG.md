@@ -1121,3 +1121,14 @@ is `planning/08_transfer.md` there.
   channels per spectrum (interpolation in absorbance) before anything else, and dilate the exclusion by the D2
   half-window. Also: Savitzky-Golay delta and the nm blur need even spacing inside a block (now refused otherwise);
   an ASCII ".asd" can start with "ASD" (binary headers have a NUL after the magic).
+- **Second real pair: Beasley FieldSpec 3 <-> Trek (16 clean scan pairs, 15 bones; report in SPYDER
+  `planning/work/transfer_dasp/REPORT_beasley_transfer.md`).** Leave-one-bone-out, physical match equalizes the two
+  (cons3 inter-instrument RMSD 1.40 -> 0.87 / 1.02, slopes 0.89 / 1.01; DS worse than nothing, PDS rank >= 2 diverges).
+  Two lessons for dasp: (1) **Trek joins are invisible in reflectance.** The as7 header stores 0/0 and the
+  sample/reference ratio cancels the detector steps, so `joins='auto'` on Trek reflectance finds none; the raw DN shows
+  1000/1785. In a pair, 'auto' takes the union with the other instrument's joins (1000/1800 here), which is close but
+  not exact; reading DN-based joins when the file has DN would be better. (2) **A per-block gain can import a band
+  mismatch the models do not use.** Here the collagen bands already agree (Trek/FS3 D2 ratio 1.05-1.16) but the water
+  bands do not (1450: 1.89, 1930: 1.27), so the block gains are a water correction: good for the 2045 models, bad for
+  oh1545 (1.18 -> 1.70). The board's "No method beat No correction" warning caught it. Possible follow-up: fit the gain
+  with water bands excluded (`exclude=`), or per model window.
