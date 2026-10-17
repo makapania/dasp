@@ -6,6 +6,36 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 Older entries are in [SESSION_LOG_ARCHIVE.md](SESSION_LOG_ARCHIVE.md) — grep it for historical context; batch 8 on 2026-10-03 moved every entry dated 2026-09-14 to 2026-09-28; batch 7 on 2026-09-15 moved every entry dated before 2026-09-14 plus the full round-by-round PR #79 crash-resume history (condensed here into the 2026-09-15 "PR #79 crash-resume (merged a5f9a70)" entry); batch 6 moved entries dated before 2026-09-01.
 
+## 2026-10-16 - F2 part 2 (CT GUI): mixed-order pytest args break tests/gui fixtures; value-scale convention
+
+Branch `zcode/f2-part2-gui`. Gotchas from building the Validate & Compare panel:
+
+- **Do not interleave pytest args between `tests/` and `tests/gui/`.** `pytest tests/test_a.py
+  tests/gui/test_b.py tests/test_c.py tests/gui/test_d.py` (a gui path first, top-level paths in
+  between, gui again later) makes the later gui files fail at setup with `fixture 'gui_app' not
+  found` — reproducible on pre-existing files (e.g. `tests/gui/test_dataset_state.py`, 95 errors),
+  so it is a repo conftest/layout quirk (both `tests/` and `tests/gui/` are packages), not a test
+  bug. The same set in another order, `tests/gui` as one contiguous path, or the whole `tests/`
+  suite works. If you see mass `gui_app not found` errors, check argument order before blaming the
+  test.
+- **`spectral_predict_gui_optimized.py` is not black-clean** (~26k diff lines at this branch's
+  base). Never run black on it; hand-format new hunks (`black -l 100 --target-version py314` is
+  fine for new test files).
+- **Value-scale convention for CT fit vs apply (lead requirement A).** Panel fits normalize
+  percent reflectance to 0-1 and record `meta['value_scale'] = 1.0`; the legacy A2 build path
+  records the as-loaded satellite scale. `_apply_transfer_model(X, tm, value_scale=...)` converts
+  incoming data to the fit scale and returns transferred spectra **in the fit scale** by default —
+  Mode A then feeds the prediction model exactly what the Validate board scored — and
+  `output_scale='incoming'` converts back for Mode B export (exports stay in the loaded scale).
+  Without the meta, physical_match's percent guard raises at apply time, which is the failure the
+  meta prevents (asserted in a test).
+- **Pairs tables are ground truth.** A pairs-table test that assigns LAB names positionally over
+  shuffled satellite rows defines a *wrong* pairing on purpose; rename-then-pair then correctly
+  pairs the wrong specimens and the array assertion fails. Label each shuffled row with its own
+  specimen's name.
+- `model_io.save_model` requires metadata fields `model_name`, `task_type`, `wavelengths`,
+  `n_vars` (ValueError otherwise) when hand-building a .dasp in tests.
+
 ## 2026-10-02 - User rule: chemometrics validation conventions, not ML "leakage" rules
 The user (Unscrambler is the reference standard) ruled that these are NOT leakage and must not be "fixed": row-wise
 preprocessing (SNV, SG derivatives) applied before CV; bands/regions chosen a priori from chemistry (wavelengths must
