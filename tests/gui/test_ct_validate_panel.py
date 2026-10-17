@@ -37,6 +37,9 @@ _CT_STATE_ATTRS = (
     "current_satellite_data",
     "current_primary_df",
     "current_satellite_df",
+    "ct_eval_model_dict",
+    "_ct_validate_running",
+    "_ct_eval_context",
     "current_primary_ids_positional",
     "current_satellite_ids_positional",
     "ct_primary_header_joins",
@@ -79,6 +82,13 @@ def ct_app(gui_app):
     app.ct_pairs_rename = None
     app.ct_last_evaluation = None
     app.ct_transfer_model = None
+    app.ct_eval_model_dict = None
+    app._ct_validate_running = False
+    app._ct_eval_context = None
+    app.ct_eval_space_var.set("auto (detected)")
+    app.ct_eval_joins_var.set("auto")
+    app.ct_primary_data_type.set("reflectance")
+    app.ct_satellite_data_type.set("reflectance")
     app.ct_roi_mode_var.set("full")
     yield app, wl, primary, satellite
 
@@ -290,3 +300,414 @@ def test_build_uses_paired_rows_not_row_order(ct_app):
 
 def test_dead_load_ct_paired_spectra_is_gone(gui_app):
     assert not hasattr(gui_app, "_load_ct_paired_spectra")
+
+
+# ---------------------------------------------------------------------------
+# Commit 2: the Validate & Compare panel
+# ---------------------------------------------------------------------------
+
+
+class _InlineThread:
+    """threading.Thread stand-in that runs the worker synchronously."""
+
+    def __init__(self, target=None, daemon=False, **kwargs):
+        self._target = target
+
+    def start(self):
+        self._target()
+
+
+@pytest.fixture
+def inline_workers(ct_app):
+    """Workers run synchronously; root.after fires the callback immediately."""
+    app = ct_app[0]
+    with (
+        patch.object(
+            type(app.root),
+            "after",
+            lambda self, ms, fn=None: fn() if callable(fn) else None,
+        ),
+        patch("threading.Thread", _InlineThread),
+    ):
+        yield ct_app
+
+
+def _board_labels(app):
+    return [
+        str(app.ct_leaderboard_tree.item(item, "values")[0])
+        for item in app.ct_leaderboard_tree.get_children()
+    ]
+
+
+def test_validate_board_has_physical_rows(inline_workers):
+    app, wl, primary, satellite = inline_workers
+    with patch("tkinter.messagebox.showerror") as err:
+        app._run_ct_validate()
+    assert not err.called, err.call_args_list
+
+    labels = _board_labels(app)
+    assert any("Physical match" in label for label in labels)
+    assert any("No correction" in label for label in labels)
+    assert app.ct_last_evaluation is not None
+    assert app._ct_eval_context is not None
+    # No reference values (decision 1): no reference row can exist
+    assert not any("reference" in label.lower() for label in labels)
+    assert "RMSD_vs_primary" in app.ct_leaderboard_tree.cget("columns")
+    diag = app.ct_diagnostics_text.get("1.0", "end-1c")
+    assert "Ranked by" in diag and "Joins used" in diag
+    assert str(app.ct_fit_selected_button.cget("state")) == "normal"
+
+
+def test_validate_with_groups_ranks_by_grouped_columns(inline_workers):
+    app, _, _, _ = inline_workers
+    groups = {f"bone_{i + 1:02d}": ("unitA" if i < 6 else "unitB") for i in range(12)}
+    app.ct_pair_groups = groups
+    with patch("tkinter.messagebox.showerror") as err:
+        app._run_ct_validate()
+    assert not err.called, err.call_args_list
+
+    columns = app.ct_leaderboard_tree.cget("columns")
+    assert "RMSD_vs_primary_grouped" in columns
+    assert "Slope_vs_primary_grouped" in columns
+    # No prediction model loaded: the grouped rank column is the spectral one
+    assert app.ct_last_evaluation.score_column == "spectral_RMSE_grouped"
+    header = str(app.ct_leaderboard_header_label.cget("text"))
+    assert "spectral_RMSE_grouped" in header
+
+
+def test_type_mismatch_refuses_before_running(inline_workers):
+    app, _, _, _ = inline_workers
+    app.ct_satellite_data_type.set("absorbance")
+    started = []
+    with patch("threading.Thread", side_effect=lambda *a, **k: started.append(1)):
+        with patch("tkinter.messagebox.showerror") as err:
+            app._run_ct_validate()
+    assert err.called
+    assert not started
+    assert app.ct_last_evaluation is None
+
+
+def test_joins_override_reaches_evaluate(inline_workers):
+    app, _, _, _ = inline_workers
+    captured = {}
+
+    def fake_evaluate(**kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop here")
+
+    import spectral_predict.transfer_evaluation as te
+
+    with patch.object(te, "evaluate_transfer", fake_evaluate):
+        with patch("tkinter.messagebox.showerror"):
+            app._run_ct_validate()
+    assert captured["joins"] == "auto"
+    assert captured["ids"] == list(app.ct_paired.ids)
+    assert np.allclose(captured["wavelengths"], app.ct_paired.wavelengths)
+
+    # header joins come from the per-instrument attribute captured at load time
+    app.ct_primary_header_joins = (1000.0, 1800.0)
+    app.ct_eval_joins_var.set("ASD file header")
+    with patch.object(te, "evaluate_transfer", fake_evaluate):
+        with patch("tkinter.messagebox.showerror"):
+            app._run_ct_validate()
+    assert captured["joins"] == (1000.0, 1800.0)
+
+    app.ct_eval_joins_var.set("custom")
+    app.ct_eval_joins_custom_var.set("1005, 1810")
+    with patch.object(te, "evaluate_transfer", fake_evaluate):
+        with patch("tkinter.messagebox.showerror"):
+            app._run_ct_validate()
+    assert captured["joins"] == (1005.0, 1810.0)
+
+    app.ct_eval_joins_var.set("none")
+    with patch.object(te, "evaluate_transfer", fake_evaluate):
+        with patch("tkinter.messagebox.showerror"):
+            app._run_ct_validate()
+    assert captured["joins"] is None
+
+
+def test_percent_reflectance_divided_before_evaluate(inline_workers):
+    app, wl, primary, satellite = inline_workers
+    app.ct_primary_reflectance_scale = 100.0
+    app.ct_satellite_reflectance_scale = 100.0
+    captured = {}
+
+    def fake_evaluate(**kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop here")
+
+    import spectral_predict.transfer_evaluation as te
+
+    contexts = []
+    with (
+        patch.object(te, "evaluate_transfer", fake_evaluate),
+        patch.object(
+            app, "_on_ct_validate_done", lambda payload, context: contexts.append(context)
+        ),
+    ):
+        with patch("tkinter.messagebox.showerror"):
+            app._run_ct_validate()
+    # the arrays are pairing-ordered (primary order), each divided by its scale
+    np.testing.assert_allclose(captured["X_primary"], app.ct_paired.X_primary / 100.0)
+    np.testing.assert_allclose(captured["X_satellite"], app.ct_paired.X_satellite / 100.0)
+    assert "divided by 100" in contexts[0]["scale_note"]
+
+
+def _physical_standards(n=14, p=160, seed=5):
+    """0-1 reflectance pairs with band structure; satellite bands deeper + blurred."""
+    from scipy.ndimage import gaussian_filter1d
+
+    wl = np.linspace(1000.0, 2200.0, p)
+    t = np.linspace(0.0, 1.0, n)
+    level = 0.60 + 0.04 * np.sin(2 * np.pi * t)
+    band1 = 0.10 * np.exp(-(((wl - 1450.0) / 70.0) ** 2))
+    band2 = 0.06 * np.exp(-(((wl - 1950.0) / 90.0) ** 2))
+    rng = np.random.default_rng(seed)
+    A_p = np.zeros((n, p))
+    for i in range(n):
+        depth = t[i]
+        spectrum = level[i] - depth * band1 - (1 - depth) * band2
+        A_p[i] = -np.log10(np.clip(spectrum, 1e-3, None))
+    A_p += 0.002 * rng.standard_normal(A_p.shape)
+    # satellite: blur + deepen, i.e. the physical match must undo both
+    A_s = gaussian_filter1d(A_p * 1.25, sigma=1.1, axis=1)
+    X_p = 10**-A_p
+    X_s = 10**-A_s
+    ids = [f"std{i + 1:02d}" for i in range(n)]
+    return (
+        wl,
+        pd.DataFrame(X_p, index=ids, columns=wl),
+        pd.DataFrame(X_s, index=ids, columns=wl),
+    )
+
+
+@pytest.fixture
+def physical_app(gui_app):
+    """gui_app loaded with physical-match-shaped standards, ready to validate."""
+    app = gui_app
+    saved = {
+        name: getattr(app, name, None)
+        for name in (
+            "ct_paired",
+            "ct_pair_groups",
+            "ct_last_evaluation",
+            "ct_transfer_model",
+            "current_transfer_model",
+            "ct_eval_model_dict",
+            "_ct_eval_context",
+            "_ct_validate_running",
+        )
+    }
+    wl, primary, satellite = _physical_standards()
+    app.current_primary_df = primary
+    app.current_satellite_df = satellite
+    app.ct_primary_data_type.set("reflectance")
+    app.ct_satellite_data_type.set("reflectance")
+    app.ct_primary_reflectance_scale = 1.0
+    app.ct_satellite_reflectance_scale = 1.0
+    app.ct_pair_groups = None
+    app.ct_pairs_rename = None
+    app.ct_transfer_model = None
+    app.current_transfer_model = None
+    app.ct_eval_model_dict = None
+    app.ct_last_evaluation = None
+    app._ct_eval_context = None
+    app._ct_validate_running = False
+    yield app, wl, primary, satellite
+    for name, value in saved.items():
+        setattr(app, name, value)
+    for widget in app.ct_transfer_plot_frame.winfo_children():
+        widget.destroy()
+
+
+def _run_inline(app, fn):
+    """Run a worker method with the thread and after() inlined."""
+    with (
+        patch.object(
+            type(app.root),
+            "after",
+            lambda self, ms, fn=None: fn() if callable(fn) else None,
+        ),
+        patch("threading.Thread", _InlineThread),
+    ):
+        with patch("tkinter.messagebox.showerror") as err:
+            fn()
+    assert not err.called, err.call_args_list
+
+
+def _select_physical_row(app):
+    target = next(
+        item
+        for item in app.ct_leaderboard_tree.get_children()
+        if "Physical match" in str(app.ct_leaderboard_tree.item(item, "values")[0])
+    )
+    app.ct_leaderboard_tree.selection_set(target)
+
+
+def test_fit_selected_physical_match_through_existing_paths(physical_app, tmp_path):
+    """Requirement B: fit, quality plot, save button, save -> load, apply."""
+    from spectral_predict.calibration_transfer import (
+        apply_transfer_dispatch,
+        load_transfer_model,
+        resample_to_grid,
+        save_transfer_model,
+    )
+
+    app, wl, primary, satellite = physical_app
+    app._pair_ct_standards()
+    _run_inline(app, app._run_ct_validate)
+
+    labels = _board_labels(app)
+    assert any("Physical match" in label for label in labels)
+    _select_physical_row(app)
+    _run_inline(app, app._fit_ct_selected)
+
+    tm = app.ct_transfer_model
+    assert tm is not None and tm.method == "physical_match"
+    assert tm.meta["value_scale"] == 1.0  # fitted on 0-1 reflectance
+    assert str(app.ct_save_tm_button.cget("state")) == "normal"
+    assert "Physical match" in app.ct_transfer_info_text.get("1.0", "end-1c")
+    # the quality plot rendered for physical_match (no "unsupported" bail-out)
+    assert app.ct_transfer_plot_frame.winfo_children()
+
+    # save -> load through the GUI's load-existing path
+    prefix = save_transfer_model(tm, tmp_path, name="phys")
+    app.ct_load_model_path_var.set(str(prefix) + ".json")
+    app._load_existing_transfer_model()
+    loaded = app.current_transfer_model
+    assert loaded is not None and loaded.method == "physical_match"
+    # dispatch gets the wavelengths it needs from the model itself
+    X_transferred = apply_transfer_dispatch(satellite.to_numpy(), loaded)
+    assert X_transferred.shape == satellite.shape
+
+    # different-grid satellite data is resampled onto wavelengths_common
+    X_common = resample_to_grid(
+        satellite.to_numpy(), satellite.columns.to_numpy(), loaded.wavelengths_common
+    )
+    np.testing.assert_allclose(apply_transfer_dispatch(X_common, loaded), X_transferred)
+
+
+def test_percent_scale_consistent_between_fit_and_apply(physical_app):
+    """Requirement A: fit on percent standards, apply to percent satellite data."""
+    from spectral_predict.calibration_transfer import apply_transfer_dispatch
+
+    app, wl, primary, satellite = physical_app
+    # percent-scale loads: the panel divides to 0-1 for fit and records it
+    app.ct_primary_reflectance_scale = 100.0
+    app.ct_satellite_reflectance_scale = 100.0
+    app._pair_ct_standards()
+    _run_inline(app, app._run_ct_validate)
+    _select_physical_row(app)
+    _run_inline(app, app._fit_ct_selected)
+    tm = app.ct_transfer_model
+    assert tm is not None
+
+    X_new_percent = 100.0 * satellite.to_numpy()  # percent-scale new satellite data
+    # without conversion, physical match refuses percent data outright
+    with pytest.raises(ValueError):
+        apply_transfer_dispatch(X_new_percent, tm)
+
+    # the GUI funnel converts to the fit scale: the result is the fraction-scale
+    # computation (the scale the Validate board scored the model on)
+    out = app._apply_transfer_model(X_new_percent, tm, value_scale=100.0)
+    expected_fraction = apply_transfer_dispatch(X_new_percent / 100.0, tm)
+    np.testing.assert_allclose(out, expected_fraction)
+    # Mode B asks for the incoming scale: the fraction computation x100
+    out_incoming = app._apply_transfer_model(
+        X_new_percent, tm, value_scale=100.0, output_scale="incoming"
+    )
+    np.testing.assert_allclose(out_incoming, expected_fraction * 100.0)
+    # without the meta the GUI cannot convert, and physical match refuses
+    # percent data — exactly the apply-time failure the meta prevents
+    tm.meta.pop("value_scale")
+    with pytest.raises(ValueError):
+        app._apply_transfer_model(X_new_percent, tm, value_scale=100.0)
+
+
+def test_physical_match_mode_a_prediction_end_to_end(physical_app, tmp_path):
+    """Requirement B: Mode A predicts through a panel-fitted physical match."""
+    from sklearn.cross_decomposition import PLSRegression
+    from spectral_predict import model_io
+    from spectral_predict.calibration_transfer import apply_transfer_dispatch
+
+    app, wl, primary, satellite = physical_app
+    app._pair_ct_standards()
+    _run_inline(app, app._run_ct_validate)
+    _select_physical_row(app)
+    _run_inline(app, app._fit_ct_selected)
+    tm = app.ct_transfer_model
+    assert tm is not None
+
+    # a regression model trained on the primary (fraction reflectance)
+    y = np.linspace(1.0, 9.0, primary.shape[0])
+    pls = PLSRegression(n_components=2).fit(primary.to_numpy(), y)
+    model_path = tmp_path / "primary.dasp"
+    model_io.save_model(
+        pls,
+        None,
+        {
+            "model_name": "PLS",
+            "task_type": "regression",
+            "wavelengths": [float(w) for w in wl],
+            "n_vars": len(wl),
+            "target_name": "y",
+        },
+        str(model_path),
+    )
+    app.current_prediction_model_dict = model_io.load_model(str(model_path))
+    app.current_prediction_model = app.current_prediction_model_dict["model"]
+
+    # new satellite data in PERCENT reflectance, on the transfer's grid
+    X_new_percent = 100.0 * satellite.to_numpy()
+    app.new_satellite_data_predict = (wl, X_new_percent)
+    app.ct_pred_data_type.set("reflectance")
+    app.ct_pred_value_scale = 100.0
+    app.ct_pred_data_converted = False
+    app.ct_pred_source_data_type = None
+
+    with patch("tkinter.messagebox.showwarning"):
+        _run_inline(app, app._run_prediction_workflow)
+
+    expected = pls.predict(apply_transfer_dispatch(X_new_percent / 100.0, tm)).ravel()
+    got = np.asarray(app.ct_pred_y_pred, dtype=float)
+    np.testing.assert_allclose(got, expected, rtol=1e-6)
+    assert len(app.ct_predictions_tree.get_children()) == len(y)
+
+
+def test_physical_match_mode_b_export_end_to_end(physical_app):
+    """Requirement B: Mode B transforms and exports in the loaded scale."""
+    from spectral_predict.calibration_transfer import apply_transfer_dispatch
+
+    app, wl, primary, satellite = physical_app
+    app._pair_ct_standards()
+    _run_inline(app, app._run_ct_validate)
+    _select_physical_row(app)
+    _run_inline(app, app._fit_ct_selected)
+    tm = app.ct_transfer_model
+
+    X_new_percent = 100.0 * satellite.to_numpy()
+    app.new_satellite_data_export = (wl, X_new_percent)
+    app.ct_export_data_type.set("reflectance")
+    app.ct_export_value_scale = 100.0
+    app.ct_export_data_converted = False
+
+    _run_inline(app, app._transform_spectra)
+
+    wl_out, X_out = app.transformed_spectra
+    assert len(wl_out) == len(tm.wavelengths_common)
+    expected = apply_transfer_dispatch(X_new_percent / 100.0, tm) * 100.0
+    np.testing.assert_allclose(X_out, expected)
+
+
+def test_eval_model_loader_rejects_non_regression(ct_app, tmp_path):
+    app, *_ = ct_app
+    app.ct_eval_model_path_var.set(str(tmp_path / "model.dasp"))
+    with patch.object(
+        app,
+        "_load_model_file_for_ct",
+        return_value={"metadata": {"task_type": "classification"}},
+    ):
+        with patch("tkinter.messagebox.showerror") as err:
+            app._load_ct_eval_model()
+    assert err.called
+    assert app.ct_eval_model_dict is None

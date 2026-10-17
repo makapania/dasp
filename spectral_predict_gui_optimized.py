@@ -3076,6 +3076,15 @@ class SpectralPredictApp:
         self.ct_pairs_table_path_var = tk.StringVar()  # pairs-table CSV path (A1b)
         self.ct_pair_group_entry_var = tk.StringVar()  # group label to apply to selected pairs
 
+        # A1b Validate & Compare state
+        self.ct_eval_model_dict = None  # loaded .dasp for prediction scores (optional)
+        self.ct_eval_model_path_var = tk.StringVar()
+        self.ct_eval_space_var = tk.StringVar(value="auto (detected)")
+        self.ct_eval_joins_var = tk.StringVar(value="auto")
+        self.ct_eval_joins_custom_var = tk.StringVar(value="1000, 1800")
+        self._ct_validate_running = False  # guards Validate/Fit double launches
+        self._ct_eval_context = None  # frozen inputs of the last Validate run (for Fit)
+
         # Enhanced loading with Y values (for JYPLS-inv)
         # Primary data with Y values
         self.ct_primary_X = None  # pd.DataFrame with sample IDs as index
@@ -49018,8 +49027,15 @@ External Validation Performance (n={n_val}):
             common_wl = self.ct_pred_transfer_model.wavelengths_common
             X_satellite_common = resample_to_grid(X_satellite_new, wavelengths_satellite, common_wl)
 
-            # Apply transfer model (ROI-aware: splices region back into full spectrum)
-            X_transferred = self._apply_transfer_with_roi(X_satellite_common, self.ct_pred_transfer_model)
+            # Apply transfer model (ROI-aware: splices region back into full
+            # spectrum), converting percent reflectance to the fit scale
+            dir_metadata = getattr(self, '_last_dir_load_metadata', None)
+            loaded_type, _, _ = _resolve_loaded_data_type(dir_metadata, X_satellite_new)
+            new_scale = (
+                _loaded_value_scale(dir_metadata, X_satellite_new, loaded_type)
+                if loaded_type == 'reflectance' else None)
+            X_transferred = self._apply_transfer_with_roi(
+                X_satellite_common, self.ct_pred_transfer_model, value_scale=new_scale)
 
             # Resample transferred spectra to primary model's wavelength grid
             metadata = self.ct_primary_model_dict.get('metadata', {})
@@ -50724,6 +50740,418 @@ External Validation Performance (n={n_val}):
         self.ct_pairs_status_label.config(text=status, foreground=self.colors['text'])
         return paired
 
+    # ========================================================================
+    # A1b VALIDATE & COMPARE (evaluate_transfer board, fit the chosen row)
+    # ========================================================================
+
+    def _browse_ct_eval_model(self):
+        """Browse for the optional prediction model used to score the board."""
+        filepath = filedialog.askopenfilename(
+            title="Select Prediction Model (regression)",
+            filetypes=[("Model files", "*.dasp;*.pkl"), ("DASP Model files", "*.dasp"),
+                       ("Pickle files", "*.pkl"), ("All files", "*.*")],
+        )
+        if filepath:
+            self.ct_eval_model_path_var.set(filepath)
+
+    def _load_ct_eval_model(self):
+        """Load the optional prediction model (.dasp) for RMSD/slope columns."""
+        from tkinter import messagebox
+
+        path = self.ct_eval_model_path_var.get()
+        if not path:
+            messagebox.showwarning("No File", "Browse and select a prediction model first.")
+            return
+        try:
+            model_dict = self._load_model_file_for_ct(path, allow_ensemble=True)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load model:\n{str(e)}")
+            return
+        metadata = model_dict.get('metadata', {}) or {}
+        task = metadata.get('task_type', 'regression')
+        if task != 'regression':
+            messagebox.showerror(
+                "Not a Regression Model",
+                f"Prediction scores need a regression model; this file is task_type "
+                f"'{task}'. Load a regression .dasp, or clear the model to validate "
+                "with spectral scores only.")
+            return
+        self.ct_eval_model_dict = model_dict
+        wl = np.array(metadata.get('wavelengths', []), dtype=float)
+        name = metadata.get('model_name', metadata.get('model_type', 'model'))
+        if wl.size:
+            shown = f"{name} ({wl.min():.0f}-{wl.max():.0f} nm)"
+        else:
+            shown = str(name)
+        self.ct_eval_model_status_label.config(
+            text=shown, foreground=self.colors['text'])
+
+    def _resolve_ct_eval_joins(self):
+        """Map the joins combobox to evaluate_transfer's ``joins`` argument.
+
+        Returns ``(joins, provenance)`` with provenance one of 'detected',
+        'header', 'user', 'none' — the GUI's own record of where the joins came
+        from (the backend reports 'given' for both header and user joins).
+        Header joins were captured per instrument at load time.
+        """
+        mode = self.ct_eval_joins_var.get()
+        if mode == 'auto':
+            return 'auto', 'detected'
+        if mode == 'none':
+            return None, 'none'
+        if mode.startswith('ASD'):
+            joins = self.ct_primary_header_joins or self.ct_satellite_header_joins
+            if not joins:
+                raise ValueError(
+                    "No ASD header joins were found in the loaded files (readers "
+                    "report them only for ASD files that carry them). Use 'auto' "
+                    "(detect from the spectra) or 'custom' instead.")
+            return tuple(float(j) for j in joins), 'header'
+        text = self.ct_eval_joins_custom_var.get()
+        try:
+            values = [float(v) for v in re.split(r"[,;\s]+", str(text).strip()) if v]
+        except ValueError:
+            raise ValueError(f"'{text}' is not a list of wavelengths (e.g. '1000, 1800').") from None
+        if not values:
+            raise ValueError("Custom joins need at least one wavelength in nm (e.g. '1000, 1800').")
+        return tuple(sorted(values)), 'user'
+
+    def _ct_eval_groups_list(self, paired):
+        """Group label per standard (unit / session / batch), or None."""
+        groups_map = self.ct_pair_groups or {}
+        labels = [str(groups_map.get(pid, "")).strip() for pid in paired.ids]
+        if not any(labels):
+            return None
+        if not all(labels):
+            n_missing = sum(1 for v in labels if not v)
+            labels = [v or "(no group)" for v in labels]
+            self.ct_pairs_status_label.config(
+                text=f"{n_missing} standard(s) have no group; they group together as '(no group)'.",
+                foreground=self.colors['warning'])
+        return labels
+
+    def _set_ct_validate_busy(self, busy, message=""):
+        state = 'disabled' if busy else 'normal'
+        self.ct_validate_button.config(state=state)
+        self.ct_fit_selected_button.config(
+            state='disabled' if busy else (
+                'normal' if self.ct_last_evaluation is not None else 'disabled'))
+        if message:
+            self.ct_validate_status_label.config(
+                text=message, foreground=self.colors['text'])
+        elif not busy:
+            self.ct_validate_status_label.config(text="")
+
+    def _run_ct_validate(self):
+        """Run the transfer bake-off on the paired standards (worker thread)."""
+        from tkinter import messagebox
+        from spectral_predict.transfer_evaluation import (
+            evaluate_transfer, predict_fn_from_model)
+
+        if self._ct_validate_running:
+            return
+        paired = self.ct_paired
+        if paired is None:
+            paired = self._pair_ct_standards()
+            if paired is None:
+                return
+
+        p_type = self.ct_primary_data_type.get()
+        s_type = self.ct_satellite_data_type.get()
+        if p_type != s_type:
+            messagebox.showerror(
+                "Data Type Mismatch",
+                f"Primary data is {p_type}, satellite data is {s_type}. Use the "
+                "Convert buttons in A1 so both are the same type, then validate again.")
+            return
+        space_choice = self.ct_eval_space_var.get()
+        space = p_type if space_choice.startswith('auto') else space_choice
+        if space != p_type:
+            messagebox.showerror(
+                "Space Mismatch",
+                f"The panel is set to {space} but the loaded data is {p_type}.")
+            return
+
+        # Percent reflectance is normalized to 0-1 (physical match refuses it)
+        Xp = np.array(paired.X_primary, dtype=float, copy=True)
+        Xs = np.array(paired.X_satellite, dtype=float, copy=True)
+        scale_note = None
+        if space == 'reflectance':
+            notes = []
+            for name, arr, attr in (
+                ("primary", Xp, 'ct_primary_reflectance_scale'),
+                ("satellite", Xs, 'ct_satellite_reflectance_scale'),
+            ):
+                scale = float(getattr(self, attr, 1.0) or 1.0)
+                if scale == 100.0:
+                    arr /= 100.0
+                    notes.append(f"{name} percent reflectance divided by 100")
+            if notes:
+                scale_note = "; ".join(notes)
+
+        try:
+            joins, joins_source = self._resolve_ct_eval_joins()
+        except ValueError as e:
+            messagebox.showerror("Detector Joins", str(e))
+            return
+
+        groups = self._ct_eval_groups_list(paired)
+
+        predict = None
+        model_wavelengths = None
+        if self.ct_eval_model_dict is not None:
+            try:
+                predict = predict_fn_from_model(self.ct_eval_model_dict,
+                                                paired.wavelengths)
+            except Exception as e:
+                messagebox.showerror(
+                    "Prediction Model",
+                    f"The loaded model cannot score predictions:\n{e}\n\nLoad a "
+                    "regression .dasp, or clear the model to validate with "
+                    "spectral scores only.")
+                return
+            mw = np.array((self.ct_eval_model_dict.get('metadata', {}) or {})
+                          .get('wavelengths', []), dtype=float)
+            if mw.size:
+                model_wavelengths = mw
+
+        # Every input is frozen here: the worker never reads Tk state
+        context = dict(
+            Xp=Xp, Xs=Xs,
+            wavelengths=np.asarray(paired.wavelengths, dtype=float),
+            space=space, joins=joins, joins_source=joins_source, groups=groups,
+            predict=predict, model_wavelengths=model_wavelengths,
+            ids=list(paired.ids), scale_note=scale_note,
+            resample_note=self.ct_pair_resample_note,
+            primary_id=os.path.basename(self.ct_primary_data_path_var.get()) or 'primary',
+            satellite_id=os.path.basename(self.ct_satellite_data_path_var.get()) or 'satellite',
+        )
+        args = dict(X_primary=Xp, X_satellite=Xs, predict=predict, ids=context['ids'],
+                    groups=groups, wavelengths=context['wavelengths'], space=space,
+                    joins=joins, model_wavelengths=model_wavelengths)
+
+        self._ct_validate_running = True
+        self._set_ct_validate_busy(True, "Running evaluate_transfer ...")
+
+        def _worker():
+            try:
+                ev = evaluate_transfer(**args)
+                payload = (True, ev, "")
+            except Exception as e:  # noqa: BLE001 — reported on the main thread
+                import traceback
+                payload = (False, None, f"{e}\n{traceback.format_exc(limit=6)}")
+            self.root.after(0, lambda: self._on_ct_validate_done(payload, context))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_ct_validate_done(self, payload, context):
+        """Main-thread completion of a Validate run (also driven directly by tests)."""
+        from tkinter import messagebox
+
+        ok, ev, err = payload
+        self._ct_validate_running = False
+        if not ok:
+            self._set_ct_validate_busy(False)
+            self.ct_validate_status_label.config(
+                text="Validation failed.", foreground=self.colors['warning'])
+            messagebox.showerror("Validate & Compare", f"evaluate_transfer failed:\n{err}")
+            return
+        self.ct_last_evaluation = ev
+        self._ct_eval_context = context
+        self._set_ct_validate_busy(False)
+        self.ct_validate_status_label.config(
+            text=f"{ev.n_candidates} candidates scored on {ev.n_standards} standards.",
+            foreground=self.colors['text'])
+        self._populate_ct_leaderboard(ev)
+        self._show_ct_diagnostics(ev, context)
+
+    _CT_BOARD_COLUMNS = (
+        'RMSD_vs_primary_grouped', 'RMSD_vs_primary',
+        'Slope_vs_primary_grouped', 'Slope_vs_primary',
+        'RMSEP_grouped', 'RMSEP',
+        'spectral_RMSE_grouped', 'spectral_RMSE', 'improvement',
+    )
+
+    def _populate_ct_leaderboard(self, ev):
+        """Fill the leaderboard Treeview, best first; the reference row last."""
+        board = ev.leaderboard
+        cols = ['label'] + [c for c in self._CT_BOARD_COLUMNS if c in board.columns]
+        self.ct_leaderboard_tree.configure(columns=cols)
+        self.ct_leaderboard_tree.heading('label', text='Method')
+        self.ct_leaderboard_tree.column('label', width=300, stretch=True)
+        for c in cols[1:]:
+            self.ct_leaderboard_tree.heading(c, text=c.replace('_', ' '))
+            self.ct_leaderboard_tree.column(c, width=95, anchor='e')
+        for item in self.ct_leaderboard_tree.get_children():
+            self.ct_leaderboard_tree.delete(item)
+        for rec in board.to_dict('records'):
+            values = []
+            for c in cols:
+                v = rec.get(c, "")
+                if isinstance(v, float):
+                    values.append("" if np.isnan(v) else f"{v:.4g}")
+                else:
+                    values.append(str(v))
+            tags = ()
+            if 'reference' in str(rec.get('label', '')).lower():
+                tags = ('reference',)
+            self.ct_leaderboard_tree.insert('', 'end', values=values, tags=tags)
+        self.ct_leaderboard_tree.tag_configure('reference',
+                                               foreground=self.colors['text_light'])
+        self.ct_leaderboard_header_label.config(
+            text=(f"Leaderboard — ranked by {ev.score_column} "
+                  f"({ev.n_candidates} candidates, {ev.n_standards} standards; "
+                  "the reference row is unranked)"),
+            foreground=self.colors['text'])
+
+    @staticmethod
+    def _format_ct_regions(regions):
+        regions = list(regions or [])
+        if not regions:
+            return "none"
+        return ", ".join(f"{lo:g}-{hi:g} nm" for lo, hi in regions)
+
+    def _show_ct_diagnostics(self, ev, context):
+        """Warnings, joins provenance and noise diagnostics under the leaderboard."""
+        lines = [f"Ranked by {ev.score_column}."]
+        diag = ev.diagnostics or {}
+        joins = diag.get('joins') or ()
+        source = context.get('joins_source') or diag.get('joins_source') or 'none'
+        lines.append("Joins used: "
+                     + (", ".join(f"{j:g}" for j in joins) + " nm" if joins else "none")
+                     + f" (source: {source})")
+        for note in (context.get('resample_note'), context.get('scale_note')):
+            if note:
+                lines.append(note)
+        if ev.warnings:
+            lines.append("Warnings:")
+            lines.extend(f"  - {w}" for w in ev.warnings)
+        lines.append("Primary noisy regions: "
+                     + self._format_ct_regions(diag.get('primary_noisy_regions')))
+        lines.append("Satellite noisy regions: "
+                     + self._format_ct_regions(diag.get('satellite_noisy_regions')))
+        lines.append("Satellite much noisier than primary: "
+                     + self._format_ct_regions(diag.get('satellite_much_noisier')))
+        text = "\n".join(lines)
+        self.ct_diagnostics_text.config(state='normal')
+        self.ct_diagnostics_text.delete('1.0', tk.END)
+        self.ct_diagnostics_text.insert('1.0', text)
+        self.ct_diagnostics_text.config(state='disabled')
+
+    def _fit_ct_selected(self):
+        """Fit the leaderboard row the user picked, on the frozen Validate inputs."""
+        from tkinter import messagebox
+        from spectral_predict.transfer_evaluation import fit_transfer
+
+        if self._ct_validate_running:
+            return
+        ev = self.ct_last_evaluation
+        context = self._ct_eval_context
+        if ev is None or context is None:
+            messagebox.showwarning("No Board",
+                                   "Run 'Validate & Compare' first, then pick a row.")
+            return
+        selection = self.ct_leaderboard_tree.selection()
+        if not selection:
+            messagebox.showwarning("No Selection",
+                                   "Select a row in the leaderboard first.")
+            return
+        label = str(self.ct_leaderboard_tree.item(selection[0], 'values')[0])
+        candidate = ev.candidates.get(label)
+        if candidate is None:
+            messagebox.showerror("Unknown Row", f"No candidate for '{label}'.")
+            return
+
+        self._ct_validate_running = True
+        self._set_ct_validate_busy(True, f"Fitting {label} ...")
+
+        def _worker():
+            try:
+                result = fit_transfer(
+                    candidate, context['Xp'], context['Xs'],
+                    wavelengths=context['wavelengths'], space=context['space'],
+                    joins=context['joins'], primary_id=context['primary_id'],
+                    satellite_id=context['satellite_id'])
+                payload = (True, result, "")
+            except Exception as e:  # noqa: BLE001 — reported on the main thread
+                import traceback
+                payload = (False, None, f"{e}\n{traceback.format_exc(limit=6)}")
+            self.root.after(0, lambda: self._on_ct_fit_done(payload, label, context))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_ct_fit_done(self, payload, label, context):
+        """Main-thread completion of Fit Selected (also driven directly by tests)."""
+        from datetime import datetime
+        from tkinter import messagebox
+        from spectral_predict.calibration_transfer import TransferModel
+
+        ok, result, err = payload
+        self._ct_validate_running = False
+        self._set_ct_validate_busy(False)
+        if not ok:
+            self.ct_validate_status_label.config(
+                text="Fit failed.", foreground=self.colors['warning'])
+            messagebox.showerror("Fit Selected Method", f"fit_transfer failed:\n{err}")
+            return
+
+        if result is None:
+            self.ct_validate_status_label.config(
+                text=f"'{label}': no correction needed — predict the raw satellite spectra.",
+                foreground=self.colors['text'])
+            return
+        if not isinstance(result, TransferModel):
+            # A prediction slope/bias dict (needs y; the panel has none). Shown,
+            # not silently dropped.
+            messagebox.showinfo(
+                "Prediction Correction",
+                f"'{label}' is a prediction slope/bias correction:\n{result}\n\n"
+                "It corrects predictions, not spectra, and cannot be saved as a "
+                "transfer model here.")
+            return
+
+        # The panel normalizes reflectance to 0-1 before fitting, so the model
+        # works in fraction units (absorbance has no scale). Apply sites read
+        # this to convert incoming data the same way.
+        result.meta['value_scale'] = 1.0
+        result.meta['spectral_data_type'] = context['space']
+        result.meta['validated_by'] = (
+            f"leave-one-out board, ranked by {self.ct_last_evaluation.score_column}")
+        result.meta['build_date'] = datetime.now().isoformat()
+
+        self.ct_transfer_model = result
+        self.current_transfer_model = result
+        self.ct_wavelengths_common = context['wavelengths']
+        self.ct_X_primary_common = context['Xp']
+        self.ct_X_satellite_common = context['Xs']
+
+        info_lines = [
+            f"Transfer model fitted from the board: {label}",
+            f"Method: {ct_method_display_name(result.method)}",
+            f"Paired standards: {context['Xp'].shape[0]}",
+            f"Wavelength Range: {context['wavelengths'][0]:.1f} - "
+            f"{context['wavelengths'][-1]:.1f} nm ({len(context['wavelengths'])} points)",
+        ]
+        notes = result.params.get('notes')
+        if isinstance(notes, (list, tuple)):
+            notes = "; ".join(str(n) for n in notes)
+        if notes:
+            info_lines.append(f"Notes: {notes}")
+        if context.get('scale_note'):
+            info_lines.append(context['scale_note'] + " (model works in 0-1 reflectance)")
+        info_text = "\n".join(info_lines) + "\n"
+        self.ct_transfer_info_text.config(state='normal')
+        self.ct_transfer_info_text.delete('1.0', tk.END)
+        self.ct_transfer_info_text.insert('1.0', info_text)
+        self.ct_transfer_info_text.config(state='disabled')
+
+        self.ct_save_tm_button.config(state='normal')
+        self._update_active_transfer_model_status()
+        self.ct_validate_status_label.config(
+            text=f"Fitted '{label}'. Save it or switch to Mode A/B.",
+            foreground=self.colors['text'])
+        self._plot_transfer_quality(result.method)
+
     def _update_data_info(self):
         """Update data information display."""
         info_text = ""
@@ -51042,12 +51470,19 @@ External Validation Performance (n={n_val}):
 
             # Build metadata with data type information
             from datetime import datetime
+            # The scale of the satellite data this transfer was fitted on (1 or
+            # 100); apply sites convert incoming data to it. Absorbance has no
+            # scale, so it records 1.
+            build_value_scale = (
+                float(getattr(self, 'ct_satellite_reflectance_scale', 1.0) or 1.0)
+                if self.ct_satellite_data_type.get() == 'reflectance' else 1.0)
             transfer_meta = {
                 'spectral_data_type': primary_type,
                 'original_primary_type': self.ct_primary_original_data_type,
                 'original_satellite_type': self.ct_satellite_original_data_type,
                 'primary_was_converted': self.ct_primary_was_converted,
                 'satellite_was_converted': self.ct_satellite_was_converted,
+                'value_scale': build_value_scale,
                 'build_date': datetime.now().isoformat(),
                 'pairing': {
                     'by': 'sample_id',
@@ -51903,7 +52338,8 @@ External Validation Performance (n={n_val}):
             raise ValueError(f"ROI Start ({start}) must be less than End ({end}).")
         return {'enabled': True, 'start': start, 'end': end}
 
-    def _apply_transfer_model(self, X_satellite, transfer_model):
+    def _apply_transfer_model(self, X_satellite, transfer_model, value_scale=None,
+                              output_scale="fit"):
         """Apply a transfer model to transform satellite spectra to primary domain.
 
         Parameters
@@ -51912,33 +52348,58 @@ External Validation Performance (n={n_val}):
             Satellite spectra, shape (n_samples, n_wavelengths)
         transfer_model : TransferModel
             Transfer model object with method and params
+        value_scale : float, optional
+            Reflectance scale (1 or 100) of X_satellite as loaded. When the
+            transfer was fitted on a different scale (``meta['value_scale']``),
+            the data is converted to the fit scale before applying. Pass None
+            for non-reflectance data (absorbance has no scale).
+        output_scale : {'fit', 'incoming'}
+            'fit' (default) returns the transferred spectra in the transfer's
+            fit scale — the scale the Validate board scored the prediction
+            model on, so Mode A predictions match the board. 'incoming'
+            converts them to the loaded data's own scale (Mode B export).
 
         Returns
         -------
         np.ndarray
-            Transformed spectra in primary domain
+            Transformed spectra in the requested scale
         """
         from spectral_predict.calibration_transfer import apply_transfer_dispatch
 
-        return apply_transfer_dispatch(X_satellite, transfer_model)
+        fit_scale = (getattr(transfer_model, 'meta', None) or {}).get('value_scale')
+        factor = None
+        if (fit_scale in (1.0, 100.0) and value_scale in (1.0, 100.0)
+                and float(value_scale) != float(fit_scale)):
+            factor = float(fit_scale) / float(value_scale)
+            X_satellite = np.asarray(X_satellite, dtype=float) * factor
+        result = apply_transfer_dispatch(X_satellite, transfer_model)
+        if factor is not None and output_scale == "incoming":
+            result = result / factor
+        return result
 
-    def _apply_transfer_with_roi(self, X_satellite, transfer_model):
+    def _apply_transfer_with_roi(self, X_satellite, transfer_model, value_scale=None,
+                                 output_scale="fit"):
         """Apply transfer model, handling ROI splice if the model was built with one.
 
         If the transfer model was built on a region of interest, this extracts
         the ROI columns, applies the transfer to just those columns, and splices
         the result back into the full spectrum. If no ROI was used, it falls
-        through to the standard apply.
+        through to the standard apply. ``value_scale`` and ``output_scale``
+        reach the apply with the same meaning as in ``_apply_transfer_model``.
         """
         roi_info = getattr(transfer_model, 'meta', {}).get('region_of_interest', {})
         if roi_info.get('enabled', False):
             roi_indices = np.array(roi_info['indices'])
             X_region = X_satellite[:, roi_indices]
-            X_region_transferred = self._apply_transfer_model(X_region, transfer_model)
+            X_region_transferred = self._apply_transfer_model(
+                X_region, transfer_model, value_scale=value_scale,
+                output_scale=output_scale)
             X_out = X_satellite.copy()
             X_out[:, roi_indices] = X_region_transferred
             return X_out
-        return self._apply_transfer_model(X_satellite, transfer_model)
+        return self._apply_transfer_model(
+            X_satellite, transfer_model, value_scale=value_scale,
+            output_scale=output_scale)
 
     # ========================================================================
     # STEP 3A HELPER METHODS: Prediction Workflow
@@ -52557,8 +53018,14 @@ External Validation Performance (n={n_val}):
                     X_satellite = resample_to_grid(X_satellite, wavelengths, common_wl)
                 source_wl = common_wl
 
-            # Transform satellite data to primary domain
-            X_transferred = self._apply_transfer_with_roi(X_satellite, transfer_model)
+            # Transform satellite data to primary domain. value_scale keeps a
+            # percent-vs-fraction reflectance mismatch from silently skewing the
+            # transfer (physical_match refuses percent data outright).
+            pred_scale = (
+                float(getattr(self, 'ct_pred_value_scale', 1.0) or 1.0)
+                if self.ct_pred_data_type.get() == 'reflectance' else None)
+            X_transferred = self._apply_transfer_with_roi(
+                X_satellite, transfer_model, value_scale=pred_scale)
 
             # Step 2: Use prediction model to predict properties
             if self.current_prediction_model_dict is not None:
@@ -52618,8 +53085,16 @@ External Validation Performance (n={n_val}):
             # Enable export button
             self.ct_export_predictions_button.config(state='normal')
 
+            # The before/after plot shows the transferred spectra in the loaded
+            # data's scale, not the fit scale the model consumed
+            X_transferred_plot = X_transferred
+            fit_scale = (getattr(transfer_model, 'meta', None) or {}).get('value_scale')
+            if (fit_scale in (1.0, 100.0) and pred_scale in (1.0, 100.0)
+                    and float(pred_scale) != float(fit_scale)):
+                X_transferred_plot = X_transferred * (float(pred_scale) / float(fit_scale))
+
             # Create plots
-            self._plot_ct_prediction_results(y_pred, X_satellite, X_transferred)
+            self._plot_ct_prediction_results(y_pred, X_satellite, X_transferred_plot)
 
             # Play success sound (removed popup - results shown in tree and plots)
             self.play_sound('success')
@@ -53125,8 +53600,14 @@ External Validation Performance (n={n_val}):
                 X_satellite_resampled = X_satellite
                 model_wavelengths = wavelengths_satellite
 
-            # Apply transfer (ROI-aware: splices region back into full spectrum)
-            X_transferred = self._apply_transfer_with_roi(X_satellite_resampled, transfer_model)
+            # Apply transfer (ROI-aware: splices region back into full spectrum).
+            # Exported spectra come back in the loaded data's own reflectance scale.
+            export_scale = (
+                float(getattr(self, 'ct_export_value_scale', 1.0) or 1.0)
+                if self.ct_export_data_type.get() == 'reflectance' else None)
+            X_transferred = self._apply_transfer_with_roi(
+                X_satellite_resampled, transfer_model, value_scale=export_scale,
+                output_scale="incoming")
 
             # Store transformed spectra, with the data type they carry (after any
             # conversion), for "use as working data"
@@ -56624,6 +57105,89 @@ External Validation Performance (n={n_val}):
         ttk.Button(group_row, text="Set group on selected rows",
                    command=self._ct_set_group_on_selected,
                    style='Modern.TButton').pack(side='left')
+
+        # Optional prediction model: adds RMSD/slope columns to the board
+        eval_model_row = ttk.Frame(validate_section)
+        eval_model_row.pack(fill='x', pady=(4, 0))
+        ttk.Label(eval_model_row, text="Prediction model (.dasp, optional):",
+                  style='Caption.TLabel').pack(side='left', padx=(0, 8))
+        ttk.Entry(eval_model_row, textvariable=self.ct_eval_model_path_var,
+                  width=36).pack(side='left', padx=(0, 8))
+        ttk.Button(eval_model_row, text="Browse...",
+                   command=self._browse_ct_eval_model,
+                   style='Modern.TButton').pack(side='left', padx=(0, 8))
+        ttk.Button(eval_model_row, text="Load Model",
+                   command=self._load_ct_eval_model,
+                   style='Modern.TButton').pack(side='left', padx=(0, 8))
+        self.ct_eval_model_status_label = ttk.Label(
+            eval_model_row, text="no model (spectral scores only)",
+            style='Caption.TLabel', foreground=self.colors['text_light'])
+        self.ct_eval_model_status_label.pack(side='left')
+
+        # Spectral space + detector joins
+        eval_options_row = ttk.Frame(validate_section)
+        eval_options_row.pack(fill='x', pady=(4, 0))
+        ttk.Label(eval_options_row, text="Space:", style='Caption.TLabel').pack(
+            side='left', padx=(0, 4))
+        ttk.Combobox(eval_options_row, textvariable=self.ct_eval_space_var,
+                     state='readonly', width=16,
+                     values=('auto (detected)', 'reflectance', 'absorbance')
+                     ).pack(side='left', padx=(0, 14))
+        ttk.Label(eval_options_row, text="Detector joins:",
+                  style='Caption.TLabel').pack(side='left', padx=(0, 4))
+        ttk.Combobox(eval_options_row, textvariable=self.ct_eval_joins_var,
+                     state='readonly', width=16,
+                     values=('auto', 'ASD file header', 'none', 'custom')
+                     ).pack(side='left', padx=(0, 6))
+        ttk.Label(eval_options_row, text="Custom (nm):",
+                  style='Caption.TLabel').pack(side='left', padx=(0, 4))
+        ttk.Entry(eval_options_row, textvariable=self.ct_eval_joins_custom_var,
+                  width=12).pack(side='left')
+        self.ct_eval_joins_used_label = ttk.Label(
+            validate_section, text="", style='Caption.TLabel',
+            foreground=self.colors['text_light'])
+        self.ct_eval_joins_used_label.pack(anchor='w', pady=(2, 0))
+
+        # Run + fit
+        eval_run_row = ttk.Frame(validate_section)
+        eval_run_row.pack(fill='x', pady=(6, 2))
+        self.ct_validate_button = self._create_accent_button(
+            eval_run_row, "Validate & Compare", self._run_ct_validate)
+        self.ct_validate_button.pack(side='left', padx=(0, 10))
+        self.ct_fit_selected_button = ttk.Button(
+            eval_run_row, text="Fit Selected Method", command=self._fit_ct_selected,
+            style='Modern.TButton', state='disabled')
+        self.ct_fit_selected_button.pack(side='left')
+        self.ct_validate_status_label = ttk.Label(
+            eval_run_row, text="", style='Caption.TLabel',
+            foreground=self.colors['text_light'])
+        self.ct_validate_status_label.pack(side='left', padx=(10, 0))
+
+        # Leaderboard
+        self.ct_leaderboard_header_label = ttk.Label(
+            validate_section,
+            text="Leaderboard: pair standards and run Validate to compare methods.",
+            style='Caption.TLabel', foreground=self.colors['text_light'])
+        self.ct_leaderboard_header_label.pack(anchor='w')
+        board_frame = ttk.Frame(validate_section)
+        board_frame.pack(fill='both', expand=True, pady=(2, 4))
+        self.ct_leaderboard_tree = ttk.Treeview(board_frame, columns=('label',),
+                                                show='headings', height=8)
+        self.ct_leaderboard_tree.heading('label', text='Method')
+        self.ct_leaderboard_tree.column('label', width=300)
+        board_scroll = ttk.Scrollbar(board_frame, orient='vertical',
+                                     command=self.ct_leaderboard_tree.yview)
+        self.ct_leaderboard_tree.configure(yscrollcommand=board_scroll.set)
+        self.ct_leaderboard_tree.pack(side='left', fill='both', expand=True)
+        board_scroll.pack(side='left', fill='y')
+
+        # Warnings + noise/join diagnostics
+        self.ct_diagnostics_text = tk.Text(
+            validate_section, height=6, width=80, state='disabled', wrap='word',
+            relief='flat', borderwidth=0, bg=self.colors['panel'],
+            fg=self.colors['text'], selectbackground=self.colors['accent'],
+            selectforeground=self.colors['text_inverse'])
+        self.ct_diagnostics_text.pack(fill='x', pady=(0, 6))
 
         # Sub-section A2: Configure Method
         method_section = ttk.LabelFrame(self.ct_build_new_frame, text="A2) Configure Transfer Method",
