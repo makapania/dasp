@@ -382,7 +382,8 @@ def estimate_physical_match(
     Xp, A_p = _fill_invalid(Xp, A_p, valid_p, wl, space)
     Xs, A_s = _fill_invalid(Xs, A_s, valid_s, wl, space)
     bad = ~(valid_p.all(axis=0) & valid_s.all(axis=0))
-    valid = ~_dilate(bad, wl, 0.5 * sd.D2_WINDOW_NM)
+    # the D2 window is rounded to whole channels, so reach one channel further
+    valid = ~_dilate(bad, wl, 0.5 * sd.D2_WINDOW_NM + float(np.max(np.diff(wl))))
     blocks = sd.block_slices(wl, joins)
     B = len(blocks)
     ne_p = sd.estimate_noise(A_p, wl, joins)
