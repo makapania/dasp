@@ -36,6 +36,40 @@ Branch `zcode/f2-part2-gui`. Gotchas from building the Validate & Compare panel:
 - `model_io.save_model` requires metadata fields `model_name`, `task_type`, `wavelengths`,
   `n_vars` (ValueError otherwise) when hand-building a .dasp in tests.
 
+## 2026-10-17 - F2 part 2 review round: .dasp training scale; percent-scale test fixtures
+
+Branch `zcode/f2-part2-gui` (fixes `b06124d`..`7b7102f`). Root causes worth keeping:
+
+- **A `.dasp` model does not record the reflectance scale it was trained on.** The Validate panel
+  normalizes percent reflectance to 0-1 (physical match refuses percent), so a percent-trained
+  model silently received spectra 100x too small — derivative/PLS models scale linearly and are
+  simply wrong; SNV models hide it. The safe assumption is the **primary instrument's loaded
+  scale** (that is what the model was built on): the board wraps `predict` to scale back up, fits
+  record `meta['primary_value_scale']` beside `meta['value_scale']`, and Mode A/B use it. Mode B
+  exports **primary-scale** spectra now (supersedes the 2026-10-16 "exports stay in the loaded
+  scale" note above — a fraction-primary/percent-satellite load must still export fraction).
+- **Testing percent-scale flows: make the DATA percent-valued.** Setting
+  `ct_*_reflectance_scale = 100` while the fixture arrays hold 0-1 values claims "0.5 percent
+  reflectance" — the app is then right and the test's expectation is wrong (a linear model makes
+  the wrong numbers coincide deceivingly: rmsd ratios of exactly 100). Multiply the arrays by 100
+  and compute expectations from `ct_paired.*` (the paired arrays are in primary order; the
+  satellite df is shuffled).
+- **Stale-state family (B/C/E):** the Convert buttons updated `current_*_data` but not
+  `current_*_df`, and reload kept pairing/board/fitted-model state. All invalidation funnels
+  through `_ct_invalidate_standards_state` + an input-generation counter (`_ct_input_generation`)
+  that discards worker results computed on replaced inputs — the pattern to copy when another tab
+  gains background workers over replaceable inputs.
+- **`resample_to_grid` extrapolates silently** (`fill_value='extrapolate'`), and the Mode A/B
+  load-time "resample?" dialogs offered it after checking only *overlap*, not *coverage* — a
+  loaded 1500-2500 nm grid vs a 1000-2000 nm model interpolated 500 nm of invented spectrum.
+  Coverage (loaded ⊇ fitted) is the correct gate; `_ct_refuse_uncovered_grid` names both ranges.
+- Splitting one working-tree diff into per-finding commits on a CRLF repo: `git apply --cached`
+  rejects hunks that end mid-insertion with no trailing context here, and any Python round-trip
+  via `str.splitlines()` strips `\r` and breaks every hunk. What worked: reconstruct each
+  commit's file by string-replacing hunk old→new blocks on the HEAD blob (split on `"\n"` only,
+  `newline=""`), byte-compare the accumulation against the working tree first, then write and
+  commit state by state with a pytest gate per state.
+
 ## 2026-10-02 - User rule: chemometrics validation conventions, not ML "leakage" rules
 The user (Unscrambler is the reference standard) ruled that these are NOT leakage and must not be "fixed": row-wise
 preprocessing (SNV, SG derivatives) applied before CV; bands/regions chosen a priori from chemistry (wavelengths must
