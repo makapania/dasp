@@ -1787,20 +1787,29 @@ def test_stale_fit_callback_does_not_unlock_newer_run(ct_app):
 def test_partly_matched_table_does_not_pair_unintended_ids(ct_app, tmp_path):
     """R3-3: with a table active, only its rows pair — no silent ID fallback.
 
-    The table says bone_03 -> LAB-B-03, but LAB-B-03 is not loaded and a
-    satellite file literally named bone_03 exists. That file must stay
+    The table says bone_03 -> LAB-missing, but LAB-missing is not loaded and
+    a satellite file literally named bone_03 exists. That file must stay
     unmatched; the table, not name luck, defines the pairs.
     """
     app, wl, primary, satellite = ct_app
+    # satellite files carry per-specimen names (rows stay shuffled, so each
+    # name belongs to its own row's specimen)
     sat = satellite.copy()
-    names = [f"LAB-B{int(i.split('_')[1]):02d}" for i in satellite.index]
-    names[2] = "bone_03"  # a satellite file named like the primary specimen
-    sat.index = names
+    sat.index = [f"LAB-{pid}" for pid in satellite.index]
+    # the trap: one extra satellite file named exactly like primary bone_03
+    trap = sat.iloc[[0]].copy()
+    trap.index = ["bone_03"]
+    sat = pd.concat([sat, trap])
     app.current_satellite_df = sat
-    table = pd.DataFrame({"primary": list(primary.index), "satellite": names})
-    table.loc[2, "satellite"] = "LAB-B-03"  # not loaded -> row unresolved
+    rows = {
+        "primary": [pid for pid in primary.index if pid != "bone_03"],
+        "satellite": [f"LAB-{pid}" for pid in primary.index
+                      if pid != "bone_03"],
+    }
+    rows["primary"].append("bone_03")
+    rows["satellite"].append("LAB-missing")  # not loaded -> row unresolved
     table_path = tmp_path / "pairs.csv"
-    table.to_csv(table_path, index=False)
+    pd.DataFrame(rows).to_csv(table_path, index=False)
     app.ct_pairs_table_path_var.set(str(table_path))
 
     with patch("tkinter.messagebox.showwarning") as warn:
@@ -1817,20 +1826,18 @@ def test_partly_matched_table_does_not_pair_unintended_ids(ct_app, tmp_path):
     status = str(app.ct_pairs_status_label.cget("text"))
     assert "11 rows paired" in status
     assert "1 rows unresolved" in status
-    assert "2 files not in the table" in status
+    # bone_03 primary, its real satellite file LAB-bone_03, and the trap file
+    assert "3 files not in the table" in status
 
 
 def test_clearing_pairs_table_returns_to_id_matching(ct_app, tmp_path):
     """R3-3: clearing the table returns pairing to plain ID matching."""
     app, wl, primary, satellite = ct_app
-    sat = satellite.copy()
-    names = [f"LAB-B{int(i.split('_')[1]):02d}" for i in satellite.index]
-    sat.index = names
-    app.current_satellite_df = sat
     table_path = tmp_path / "pairs.csv"
-    pd.DataFrame(
-        {"primary": list(primary.index), "satellite": names}
-    ).to_csv(table_path, index=False)
+    pd.DataFrame({  # an identity table: the same IDs on both instruments
+        "primary": list(primary.index),
+        "satellite": list(primary.index),
+    }).to_csv(table_path, index=False)
     app.ct_pairs_table_path_var.set(str(table_path))
     app._load_ct_pairs_table()
     assert app.ct_pairs_rename
@@ -2117,3 +2124,4 @@ def test_load_and_predict_warns_on_legacy_transfer_file(physical_app, tmp_path,
                                    rtol=1e-6)
     finally:
         app.ct_new_satellite_dir_var.set("")
+

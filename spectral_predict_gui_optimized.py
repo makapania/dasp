@@ -3080,6 +3080,7 @@ class SpectralPredictApp:
         self.ct_paired = None  # PairedStandards from pair_standards_by_id
         self.ct_pair_groups = None  # primary sample ID -> group label
         self.ct_pairs_rename = None  # satellite ID -> primary ID from a pairs table
+        self.ct_pairs_table_unresolved = None  # table rows without a mapping
         self.ct_pairs_collisions = None  # naming conflicts found by the pairs table
         self.ct_pair_resample_note = None  # set when pairing resampled the satellite
         self.ct_last_evaluation = None  # TransferEvaluation of the last Validate run
@@ -50617,6 +50618,7 @@ External Validation Performance (n={n_val}):
         self.ct_pair_resample_note = None
         self.ct_pair_groups = None
         self.ct_pairs_rename = None
+        self.ct_pairs_table_unresolved = None
         self.ct_pairs_collisions = None
         self.ct_X_primary_common = None
         self.ct_X_satellite_common = None
@@ -50774,6 +50776,7 @@ External Validation Performance (n={n_val}):
             self.ct_pairs_rename = rename
             self.ct_pair_groups = groups
             self.ct_pairs_collisions = collisions or None
+            self.ct_pairs_table_unresolved = len(table) - len(rename)
             self.ct_paired = None  # forces a re-pair with the new table
             self._ct_invalidate_eval_state("The pairs table")
             self._refresh_ct_pairs_tree()
@@ -50858,14 +50861,20 @@ External Validation Performance (n={n_val}):
     def _pair_ct_standards(self):
         """Pair the loaded A1 standards by sample ID (never row order).
 
-        When the two wavelength grids differ, the satellite is resampled onto the
-        primary grid over their overlap (a visible, reported operation) before
-        pairing; a too-small overlap is refused. Returns the PairedStandards or
-        None (with a dialog) on failure.
+        When a pairs table is loaded, the TABLE defines the pairs: only its
+        accepted mappings pair, and files it does not name stay unmatched —
+        there is no silent fall-back to ID matching, which on a partly
+        matched table pairs files the table never named. Without a table,
+        shared sample IDs pair directly. When the two wavelength grids
+        differ, the satellite is resampled onto the primary grid over their
+        overlap (a visible, reported operation) before pairing; a too-small
+        overlap is refused. Returns the PairedStandards or None (with a
+        dialog) on failure.
         """
         from tkinter import messagebox
         from spectral_predict.calibration_transfer import resample_to_grid
-        from spectral_predict.transfer_evaluation import pair_standards_by_id
+        from spectral_predict.transfer_evaluation import (
+            PairedStandards, pair_standards_by_id)
 
         if self.current_primary_df is None or self.current_satellite_df is None:
             messagebox.showwarning(
@@ -50875,8 +50884,6 @@ External Validation Performance (n={n_val}):
 
         primary_df = self.current_primary_df
         satellite_df = self.current_satellite_df
-        if self.ct_pairs_rename:
-            satellite_df = satellite_df.rename(index=self.ct_pairs_rename)
 
         def _columns_ascending(df):
             # Some instruments write descending wavelength grids; the overlap
@@ -50927,15 +50934,40 @@ External Validation Performance (n={n_val}):
                 f"{target[0]:.1f}-{target[-1]:.1f} nm ({target.size} points)"
             )
 
-        try:
-            paired = pair_standards_by_id(primary_df, satellite_df)
-        except ValueError as e:
-            self.ct_paired = None
-            self._ct_invalidate_eval_state("The pairing")
-            self._refresh_ct_pairs_tree()
-            self.ct_pairs_status_label.config(text=str(e), foreground=self.colors['warning'])
-            messagebox.showerror("Pairing Failed", str(e))
-            return None
+        if self.ct_pairs_rename:
+            sat_ids = list(self.ct_pairs_rename.keys())
+            ids = [self.ct_pairs_rename[s] for s in sat_ids]
+            if len(ids) < 2:
+                msg = (f"The pairs table matched only {len(ids)} of the loaded "
+                       "spectra; a transfer needs at least 2 pairs.")
+                self.ct_paired = None
+                self._ct_invalidate_eval_state("The pairing")
+                self._refresh_ct_pairs_tree()
+                self.ct_pairs_status_label.config(
+                    text=msg, foreground=self.colors['warning'])
+                messagebox.showerror("Pairing Failed", msg)
+                return None
+            paired = PairedStandards(
+                X_primary=primary_df.loc[ids].to_numpy(dtype=float),
+                X_satellite=satellite_df.loc[sat_ids].to_numpy(dtype=float),
+                ids=ids,
+                satellite_ids=sat_ids,
+                wavelengths=np.asarray(primary_df.columns, dtype=float),
+                unmatched_primary=[p for p in primary_df.index
+                                   if p not in set(ids)],
+                unmatched_satellite=[s for s in satellite_df.index
+                                     if s not in set(sat_ids)],
+            )
+        else:
+            try:
+                paired = pair_standards_by_id(primary_df, satellite_df)
+            except ValueError as e:
+                self.ct_paired = None
+                self._ct_invalidate_eval_state("The pairing")
+                self._refresh_ct_pairs_tree()
+                self.ct_pairs_status_label.config(text=str(e), foreground=self.colors['warning'])
+                messagebox.showerror("Pairing Failed", str(e))
+                return None
 
         self.ct_paired = paired
         self.ct_pair_resample_note = resample_note
@@ -50949,18 +50981,41 @@ External Validation Performance (n={n_val}):
             if self.current_primary_ids_positional
             else ""
         )
-        parts = [
-            f"{len(paired.ids)} pairs matched",
-            f"{len(paired.unmatched_primary)} primary-only",
-            f"{len(paired.unmatched_satellite)} satellite-only",
-        ]
-        status = "; ".join(parts)
+        if self.ct_pairs_rename:
+            # The table is the ground truth: say exactly how much of the
+            # loaded data it accounts for (decision, review round 3).
+            n_unresolved = int(getattr(self, 'ct_pairs_table_unresolved', 0) or 0)
+            n_not_in_table = (len(paired.unmatched_primary)
+                              + len(paired.unmatched_satellite))
+            status = (f"Pairs table active: {len(paired.ids)} rows paired, "
+                      f"{n_unresolved} rows unresolved, "
+                      f"{n_not_in_table} files not in the table")
+        else:
+            status = "; ".join([
+                f"{len(paired.ids)} pairs matched",
+                f"{len(paired.unmatched_primary)} primary-only",
+                f"{len(paired.unmatched_satellite)} satellite-only",
+            ])
         if resample_note:
             status += f" | {resample_note}"
         if positional:
             status += f" | {positional}"
         self.ct_pairs_status_label.config(text=status, foreground=self.colors['text'])
         return paired
+
+    def _clear_ct_pairs_table(self):
+        """Forget the loaded pairs table; pairing falls back to ID matching."""
+        self.ct_pairs_table_path_var.set("")
+        self.ct_pairs_rename = None
+        self.ct_pairs_table_unresolved = None
+        self.ct_pairs_collisions = None
+        self.ct_paired = None
+        self._ct_invalidate_eval_state("The pairs table")
+        self._refresh_ct_pairs_tree()
+        self.ct_pairs_status_label.config(
+            text="Pairs table cleared — pairing by sample ID. "
+                 "Click 'Pair by Sample ID'.",
+            foreground=self.colors['text'])
 
     # ========================================================================
     # A1b VALIDATE & COMPARE (evaluate_transfer board, fit the chosen row)
@@ -57759,6 +57814,9 @@ External Validation Performance (n={n_val}):
                    style='Modern.TButton').pack(side='left', padx=(0, 8))
         ttk.Button(pairs_table_row, text="Load Pairs Table",
                    command=self._load_ct_pairs_table,
+                   style='Modern.TButton').pack(side='left', padx=(0, 8))
+        ttk.Button(pairs_table_row, text="Clear Table",
+                   command=self._clear_ct_pairs_table,
                    style='Modern.TButton').pack(side='left', padx=(0, 8))
         self._create_accent_button(pairs_table_row, "Pair by Sample ID",
                                    self._pair_ct_standards).pack(side='left')
