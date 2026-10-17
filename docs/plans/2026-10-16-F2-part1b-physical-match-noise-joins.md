@@ -4,6 +4,62 @@ Branch `feat/ct-physical-match`. Follows F2 part 1 (PR #97, `transfer_evaluation
 which will then show these candidates, the noise map and the joins from the start. Evidence: SESSION_LOG
 2026-10-16 (SPYDER Bone's 40 real instrument pairs) and SPYDER `planning/08_transfer.md`.
 
+> **Plan review (GLM 5.3 via zcode, DeepSeek Flash via opencode; both GO WITH CHANGES, 2026-10-16).** These
+> supersede the text below where they differ:
+> 1. **Serialisation.** `save_transfer_model` keeps only arrays and scalars. Store `blocks` as a (B, 2) float array,
+>    per-block `sigma_nm`/`shift_nm`/`gain`/`offset` as 1-D arrays, `space` as a string, notes in `meta['notes']`
+>    (joined string); version in `meta['format_version']`, not params. Test: loaded params keys == saved keys and
+>    values equal.
+> 2. **Header joins verified** on real files: as8 (LabSpec, dasp example) and legacy v1 (FieldSpec 3) store 1000/1800
+>    as float32 at 444/448; as7 (Trek) stores 0/0 (absent). Modern files go through SpecDAL, which drops the header,
+>    so `read_asd_header_joins` reads the first 484 bytes itself. Plausibility: finite, ordered, inside
+>    `[ch1, ch1 + step·(channels−1)]`, ≥ 100 nm from the ends; else None.
+> 3. **Gain: correct the errors-in-variables bias, don't just weight.** Averaging over standards is what removes most
+>    of it; weights only change efficiency. Final gain at the selected σ uses the noise-corrected denominator
+>    `Σw·d̄_s² − Σw·v̄_s` (v̄_s = noise variance of the satellite mean D2), floored so it stays ≥ 50% of the
+>    uncorrected one. Not inside the σ grid loop.
+> 4. **σ selection on the noise-floor-subtracted residual:** for each σ subtract its expected noise contribution
+>    `Σw·(v̄_p + ĝ²·k_σ·v̄_s)`, k_σ = Σh² of the truncated kernel, then take the smallest σ within 2% of the best
+>    corrected residual. Blur can no longer win by denoising. Same corrected residuals for the direction test.
+> 5. **Direction test:** `satellite_coarser` when the corrected primary-blur residual is ≥ 20% lower than the best
+>    satellite-blur one. Then σ = 0 and the gain is refitted satellite→primary at σ = 0, with the warning.
+> 6. **Featureless block:** statistic `SNR_b = sqrt(Σ_fit d̄_p² / Σ_fit v̄_p)` (RMS of the primary mean D2 over the
+>    RMS of its noise). Below 10: σ = 0, **g = 1**, offset fitted, note. Pooled gain is an explicit option
+>    (`featureless='pooled'`), not the default.
+> 7. **Noise maps, noisy-region exclusion, fit masks and detected joins are computed inside each fold from the fit
+>    rows only** (LOSO and grouped), never once over all standards. Header and user joins may be global.
+> 8. **Noise estimators.** Weights and floors use the D2 noise measured directly: per-spectrum D2 minus its own
+>    smooth over ~3x the D2 window, robust spread over standards, ÷ √n for the mean. This includes interpolation
+>    correlation by construction. The residual-from-smooth profile is used only for `noisy_regions` and warnings.
+>    A test checks both estimators against known simulated noise (white and 3-channel-correlated) within 30%.
+> 9. **Joins:** fit windows in nm (8 nm). A candidate must also show a persistent level step: means of
+>    [b−30, b−10] and [b+10, b+30] nm differ with the same sign and ≥ 30% of the boundary step (a splice persists,
+>    a band edge reverts). Header vs detected within 2 nm = agree (header kept); further apart = warning. Test: a
+>    synthetic sharp absorption edge away from the joins is not selected.
+> 10. **Cut `space='linear'`** (no caller yet; would take D2 of a derivative). Reflectance input: values > 1.5 in more
+>    than half the channels → refuse ("percent reflectance? divide by 100"); channels with R ≤ 0 are excluded from the
+>    fit and clamped on output. Rationale stated in the docstring: convolution is linear in intensity, band depth
+>    scales in absorbance (Beer-Lambert), so blur in R + gain in A is the consistent model; for absorbance input
+>    the blur is applied to A (small-blur approximation). `shift` stays, off by default.
+> 11. **Grouped evaluation contract.** New columns `RMSD_vs_primary_grouped`, `Slope_vs_primary_grouped`,
+>    `RMSEP_grouped` (with y), `spectral_RMSE_grouped` (no model). `_resolve_rank_by` accepts them; `auto` with
+>    groups ranks by the grouped RMSD (or grouped spectral RMSE without a model). Grouped out-of-fold arrays go in
+>    `oof_predictions_grouped` (LOSO arrays unchanged). Fold failures use the existing error-row path. `groups`
+>    length must equal n (raise); one distinct group → warning, LOSO only; < 3 groups or any group < 3 standards →
+>    warning. Warnings: the LOSO-best and grouped-best candidates differ; a candidate's grouped RMSD > 1.25x its LOSO
+>    RMSD and > 0.1 of the y spread ("learns this session, or too few standards per fit"). With 2 groups the board
+>    note says "fit on one group, tested on the other".
+> 12. **Noise-ratio warning:** denominator floored at the primary block's quiet-half median; threshold configurable
+>    (default 5x), ≥ 10 nm runs, reported only where it overlaps `model_wavelengths`.
+> 13. **Registration points:** `_METHOD_KINDS['physical']='spectral'`, label, `min_fit_standards = 2`,
+>    `fit_transfer` branch, `MethodType` literal, `METHOD_DISPLAY_NAMES`/`METHOD_SHORT_LABELS`,
+>    `apply_transfer_dispatch` branch. Unknown methods still fail loudly in old builds.
+> 14. `estimate_smoothing_between_instruments` keeps its float return; it reports σ from the gain-aware fit (same
+>    units as before, channels) and its docstring points to `estimate_physical_match` for the gain.
+> 15. **Tests/acceptance:** the recovery test uses satellite noise 10-30x the primary inside the fit blocks; a
+>    hand-computed 2-group LOGO check; SPYDER acceptance re-baselined after the first faithful run (target ≤ 3.2 RMSD,
+>    slope ≥ 0.85 cross-unit, M2045).
+
 ## Why
 
 On 40 bones scanned on LabSpec 4 Hi-Res and Standard-Res (two independent unit pairs), dasp's part-1 bake-off
