@@ -3094,7 +3094,9 @@ class SpectralPredictApp:
         self.ct_eval_joins_custom_var = tk.StringVar(value="1000, 1800")
         self._ct_validate_running = False  # guards Validate/Fit double launches
         self._ct_eval_context = None  # frozen inputs of the last Validate run (for Fit)
-        self._ct_input_generation = 0  # bumped whenever the loaded standards change
+        self._ct_input_generation = 0  # bumped whenever the pairing inputs change
+        self._ct_run_seq = 0  # each Validate/Fit launch gets a fresh run id
+        self._ct_active_run_id = 0  # the run that currently owns the busy state
         self._ct_plan_dialog = None  # Plan Transfer Standards Toplevel, if open
         self._ct_plan_running = False
         self.ct_plan_source_var = tk.StringVar(value="primary")
@@ -50547,6 +50549,50 @@ External Validation Performance (n={n_val}):
         self._ct_invalidate_standards_state()
         return df, positional
 
+    def _ct_invalidate_eval_state(self, reason):
+        """Drop every piece of state derived from the Validate panel's inputs.
+
+        Single entry point for every change of what the board was computed
+        from besides the raw standards (those go through
+        ``_ct_invalidate_standards_state``, which calls this first): a
+        pairs-table load or clear, a re-pair, a group edit, the evaluation
+        model, or the space/joins settings. The input generation is bumped so
+        a validate/fit worker still running on the old inputs has its result
+        discarded, and the run in flight is abandoned — its callback belongs
+        to an older run id and will touch nothing (see the run-id checks in
+        ``_on_ct_validate_done`` / ``_on_ct_fit_done``). The pairing itself
+        and a transfer model loaded from a file are NOT panel state and stay.
+        """
+        self._ct_input_generation = getattr(self, '_ct_input_generation', 0) + 1
+        had_board = (self.ct_last_evaluation is not None
+                     or self.ct_transfer_model is not None)
+        self.ct_last_evaluation = None
+        self._ct_eval_context = None
+        panel_model = self.ct_transfer_model
+        if panel_model is not None:
+            self.ct_transfer_model = None
+            if self.current_transfer_model is panel_model:
+                self.current_transfer_model = None
+            self.ct_transfer_info_text.config(state='normal')
+            self.ct_transfer_info_text.delete('1.0', tk.END)
+            self.ct_transfer_info_text.config(state='disabled')
+            self.ct_save_tm_button.config(state='disabled')
+            self._update_active_transfer_model_status()
+        for item in self.ct_leaderboard_tree.get_children():
+            self.ct_leaderboard_tree.delete(item)
+        self.ct_leaderboard_header_label.config(text="")
+        self.ct_diagnostics_text.config(state='normal')
+        self.ct_diagnostics_text.delete('1.0', tk.END)
+        self.ct_diagnostics_text.config(state='disabled')
+        # A worker still running computed on the old inputs; abandon it.
+        self._ct_validate_running = False
+        self._set_ct_validate_busy(False)
+        if had_board:
+            self.ct_validate_status_label.config(
+                text=f"{reason} changed — leaderboard and fitted transfer "
+                     "cleared. Run Validate & Compare again.",
+                foreground=self.colors['text'])
+
     def _ct_invalidate_standards_state(self):
         """Drop every piece of state derived from the previously loaded standards.
 
@@ -50559,46 +50605,27 @@ External Validation Performance (n={n_val}):
         to the old pairing and go with it. A transfer model loaded from a file
         is kept — it is not panel state; the panel-fitted one is cleared.
         """
-        self._ct_input_generation = getattr(self, '_ct_input_generation', 0) + 1
-        panel_model = self.ct_transfer_model
         had_derived = any((
             self.ct_paired is not None,
             self.ct_last_evaluation is not None,
             self.ct_pair_groups is not None,
             self.ct_pairs_rename is not None,
-            panel_model is not None,
+            self.ct_transfer_model is not None,
         ))
+        self._ct_invalidate_eval_state("The loaded standards")
         self.ct_paired = None
         self.ct_pair_resample_note = None
         self.ct_pair_groups = None
         self.ct_pairs_rename = None
         self.ct_pairs_collisions = None
-        self.ct_last_evaluation = None
-        self._ct_eval_context = None
         self.ct_X_primary_common = None
         self.ct_X_satellite_common = None
         self.ct_wavelengths_common = None
-        if panel_model is not None:
-            self.ct_transfer_model = None
-            if self.current_transfer_model is panel_model:
-                self.current_transfer_model = None
-            self.ct_transfer_info_text.config(state='normal')
-            self.ct_transfer_info_text.delete('1.0', tk.END)
-            self.ct_transfer_info_text.config(state='disabled')
-            self.ct_save_tm_button.config(state='disabled')
-            self._update_active_transfer_model_status()
         self._refresh_ct_pairs_tree()
         self.ct_pairs_status_label.config(
             text=("Standards changed — pairing, leaderboard and fitted transfer "
                   "cleared." if had_derived else ""),
             foreground=self.colors['text'])
-        for item in self.ct_leaderboard_tree.get_children():
-            self.ct_leaderboard_tree.delete(item)
-        self.ct_leaderboard_header_label.config(text="")
-        self.ct_diagnostics_text.config(state='normal')
-        self.ct_diagnostics_text.delete('1.0', tk.END)
-        self.ct_diagnostics_text.config(state='disabled')
-        self._set_ct_validate_busy(False)
         if (self.ct_pairs_table_path_var.get()
                 and self.current_primary_df is not None
                 and self.current_satellite_df is not None):
@@ -50748,6 +50775,7 @@ External Validation Performance (n={n_val}):
             self.ct_pair_groups = groups
             self.ct_pairs_collisions = collisions or None
             self.ct_paired = None  # forces a re-pair with the new table
+            self._ct_invalidate_eval_state("The pairs table")
             self._refresh_ct_pairs_tree()
             n_grouped = sum(1 for v in (groups or {}).values() if v) if has_group else 0
             n_collisions = len(collisions)
@@ -50819,6 +50847,8 @@ External Validation Performance (n={n_val}):
                 groups[primary] = label
             n += 1
         self.ct_pair_groups = groups
+        # Grouped board columns were computed with the old labels.
+        self._ct_invalidate_eval_state("Groups")
         self._refresh_ct_pairs_tree()
         self.ct_pairs_status_label.config(
             text=f"Group '{label or '(cleared)'}' applied to {n} pair(s).",
@@ -50901,6 +50931,7 @@ External Validation Performance (n={n_val}):
             paired = pair_standards_by_id(primary_df, satellite_df)
         except ValueError as e:
             self.ct_paired = None
+            self._ct_invalidate_eval_state("The pairing")
             self._refresh_ct_pairs_tree()
             self.ct_pairs_status_label.config(text=str(e), foreground=self.colors['warning'])
             messagebox.showerror("Pairing Failed", str(e))
@@ -50908,7 +50939,9 @@ External Validation Performance (n={n_val}):
 
         self.ct_paired = paired
         self.ct_pair_resample_note = resample_note
-        self.ct_last_evaluation = None  # a stale board must not be fitted
+        # The pairing inputs changed (table, groups or a re-pair); anything
+        # computed on the previous pairing is stale.
+        self._ct_invalidate_eval_state("The pairing")
         self._refresh_ct_pairs_tree()
 
         positional = (
@@ -50966,6 +50999,8 @@ External Validation Performance (n={n_val}):
                 "with spectral scores only.")
             return
         self.ct_eval_model_dict = model_dict
+        # The board's RMSD/slope columns were scored by the previous model.
+        self._ct_invalidate_eval_state("The prediction model")
         wl = np.array(metadata.get('wavelengths', []), dtype=float)
         name = metadata.get('model_name', metadata.get('model_type', 'model'))
         if wl.size:
@@ -51018,6 +51053,10 @@ External Validation Performance (n={n_val}):
                 text=f"{n_missing} standard(s) have no group; they group together as '(no group)'.",
                 foreground=self.colors['warning'])
         return labels
+
+    def _on_ct_eval_settings_changed(self):
+        """Space / Detector-joins change: the board's inputs are frozen per run."""
+        self._ct_invalidate_eval_state("Evaluation settings")
 
     def _set_ct_validate_busy(self, busy, message=""):
         state = 'disabled' if busy else 'normal'
@@ -51124,6 +51163,7 @@ External Validation Performance (n={n_val}):
                 model_wavelengths = mw
 
         # Every input is frozen here: the worker never reads Tk state
+        self._ct_run_seq = getattr(self, '_ct_run_seq', 0) + 1
         context = dict(
             Xp=Xp, Xs=Xs,
             wavelengths=np.asarray(paired.wavelengths, dtype=float),
@@ -51132,6 +51172,7 @@ External Validation Performance (n={n_val}):
             ids=list(paired.ids), scale_note=scale_note,
             resample_note=self.ct_pair_resample_note,
             generation=self._ct_input_generation,
+            run_id=self._ct_run_seq,
             primary_value_scale=primary_value_scale,
             primary_id=os.path.basename(self.ct_primary_data_path_var.get()) or 'primary',
             satellite_id=os.path.basename(self.ct_satellite_data_path_var.get()) or 'satellite',
@@ -51140,6 +51181,7 @@ External Validation Performance (n={n_val}):
                     groups=groups, wavelengths=context['wavelengths'], space=space,
                     joins=joins, model_wavelengths=model_wavelengths)
 
+        self._ct_active_run_id = self._ct_run_seq
         self._ct_validate_running = True
         self._set_ct_validate_busy(True, "Running evaluate_transfer ...")
 
@@ -51159,13 +51201,18 @@ External Validation Performance (n={n_val}):
         from tkinter import messagebox
 
         ok, ev, err = payload
+        if context.get('run_id') != getattr(self, '_ct_active_run_id', None):
+            # A newer run was launched (or the inputs were invalidated and a
+            # new run started); its worker owns the panel's busy state —
+            # touch nothing, just drop this result.
+            return
         if context.get('generation') != getattr(self, '_ct_input_generation', 0):
-            # The standards were reloaded or converted while the worker ran;
-            # the board was computed on inputs that no longer exist.
+            # The pairing inputs changed while the worker ran; the board was
+            # computed on inputs that no longer exist.
             self._ct_validate_running = False
             self._set_ct_validate_busy(False)
             self.ct_validate_status_label.config(
-                text="The loaded standards changed while validating; result "
+                text="The pairing inputs changed while validating; result "
                      "discarded. Run Validate & Compare again.",
                 foreground=self.colors['warning'])
             return
@@ -51282,6 +51329,9 @@ External Validation Performance (n={n_val}):
             messagebox.showerror("Unknown Row", f"No candidate for '{label}'.")
             return
 
+        self._ct_run_seq = getattr(self, '_ct_run_seq', 0) + 1
+        self._ct_active_run_id = self._ct_run_seq
+        fit_context = dict(context, run_id=self._ct_run_seq)
         self._ct_validate_running = True
         self._set_ct_validate_busy(True, f"Fitting {label} ...")
 
@@ -51296,7 +51346,7 @@ External Validation Performance (n={n_val}):
             except Exception as e:  # noqa: BLE001 — reported on the main thread
                 import traceback
                 payload = (False, None, f"{e}\n{traceback.format_exc(limit=6)}")
-            self.root.after(0, lambda: self._on_ct_fit_done(payload, label, context))
+            self.root.after(0, lambda: self._on_ct_fit_done(payload, label, fit_context))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -51307,12 +51357,15 @@ External Validation Performance (n={n_val}):
         from spectral_predict.calibration_transfer import TransferModel
 
         ok, result, err = payload
+        if context.get('run_id') != getattr(self, '_ct_active_run_id', None):
+            # A newer run owns the busy state; drop this result untouched.
+            return
         if context.get('generation') != getattr(self, '_ct_input_generation', 0):
-            # The standards were reloaded or converted while the fit ran.
+            # The pairing inputs changed while the fit ran.
             self._ct_validate_running = False
             self._set_ct_validate_busy(False)
             self.ct_validate_status_label.config(
-                text="The loaded standards changed while fitting; result "
+                text="The pairing inputs changed while fitting; result "
                      "discarded. Nothing was installed.",
                 foreground=self.colors['warning'])
             return
@@ -57766,16 +57819,24 @@ External Validation Performance (n={n_val}):
         eval_options_row.pack(fill='x', pady=(4, 0))
         ttk.Label(eval_options_row, text="Space:", style='Caption.TLabel').pack(
             side='left', padx=(0, 4))
-        ttk.Combobox(eval_options_row, textvariable=self.ct_eval_space_var,
-                     state='readonly', width=16,
-                     values=('auto (detected)', 'reflectance', 'absorbance')
-                     ).pack(side='left', padx=(0, 14))
+        self.ct_eval_space_combo = ttk.Combobox(
+            eval_options_row, textvariable=self.ct_eval_space_var,
+            state='readonly', width=16,
+            values=('auto (detected)', 'reflectance', 'absorbance'))
+        self.ct_eval_space_combo.pack(side='left', padx=(0, 14))
+        self.ct_eval_space_combo.bind(
+            '<<ComboboxSelected>>',
+            lambda e: self._on_ct_eval_settings_changed())
         ttk.Label(eval_options_row, text="Detector joins:",
                   style='Caption.TLabel').pack(side='left', padx=(0, 4))
-        ttk.Combobox(eval_options_row, textvariable=self.ct_eval_joins_var,
-                     state='readonly', width=16,
-                     values=('auto', 'ASD file header', 'none', 'custom')
-                     ).pack(side='left', padx=(0, 6))
+        self.ct_eval_joins_combo = ttk.Combobox(
+            eval_options_row, textvariable=self.ct_eval_joins_var,
+            state='readonly', width=16,
+            values=('auto', 'ASD file header', 'none', 'custom'))
+        self.ct_eval_joins_combo.pack(side='left', padx=(0, 6))
+        self.ct_eval_joins_combo.bind(
+            '<<ComboboxSelected>>',
+            lambda e: self._on_ct_eval_settings_changed())
         ttk.Label(eval_options_row, text="Custom (nm):",
                   style='Caption.TLabel').pack(side='left', padx=(0, 4))
         ttk.Entry(eval_options_row, textvariable=self.ct_eval_joins_custom_var,

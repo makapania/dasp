@@ -49,6 +49,7 @@ _CT_STATE_ATTRS = (
     "ct_pairs_rename",
     "ct_pairs_collisions",
     "ct_pair_resample_note",
+    "ct_pairs_table_unresolved",
     "ct_last_evaluation",
     "ct_transfer_model",
     "current_transfer_model",
@@ -58,6 +59,8 @@ _CT_STATE_ATTRS = (
     "ct_pairs_table_path_var",
     "ct_pair_group_entry_var",
     "_ct_input_generation",
+    "_ct_run_seq",
+    "_ct_active_run_id",
     "ct_primary_reflectance_scale",
     "ct_satellite_reflectance_scale",
     "new_satellite_data_predict",
@@ -887,7 +890,9 @@ def test_stale_fit_result_discarded(ct_app):
     app.ct_transfer_model = None
     app.current_transfer_model = None
 
-    app._on_ct_fit_done((True, None, ""), "No correction", {"generation": 4})
+    app._on_ct_fit_done((True, None, ""), "No correction",
+                        {"generation": 4,
+                         "run_id": getattr(app, "_ct_active_run_id", 0)})
 
     assert app.ct_transfer_model is None and app.current_transfer_model is None
     assert app._ct_validate_running is False
@@ -1617,3 +1622,498 @@ def test_plan_done_after_dialog_closed_does_not_touch_dead_widgets(gui_app):
         if app._ct_plan_dialog is not None and app._ct_plan_dialog.winfo_exists():
             app._ct_plan_dialog.destroy()
         app._ct_plan_dialog = None
+
+
+# ---------------------------------------------------------------------------
+# Review round 3
+# ---------------------------------------------------------------------------
+
+
+def _captured_validate_run(app):
+    """Run Validate inline, returning its (payload, context) before delivery."""
+    captured = []
+    with (patch.object(app, "_on_ct_validate_done",
+                       lambda payload, context: captured.append((payload, context))),
+          patch("tkinter.messagebox.showerror")):
+        app._run_ct_validate()
+    assert captured
+    return captured[0]
+
+
+def test_pairs_table_reload_discards_inflight_validate(inline_workers, tmp_path):
+    """R3-1: loading a different pairs table invalidates a run in flight."""
+    app, wl, primary, satellite = inline_workers
+    sat_names = [f"LAB-B{int(i.split('_')[1]):02d}" for i in satellite.index]
+    sat = satellite.copy()
+    sat.index = sat_names
+    app.current_satellite_df = sat
+    table_full = tmp_path / "full.csv"
+    pd.DataFrame(
+        {"primary": list(primary.index), "satellite": sat_names}
+    ).to_csv(table_full, index=False)
+    app.ct_pairs_table_path_var.set(str(table_full))
+    app._load_ct_pairs_table()
+    app._pair_ct_standards()
+    with patch("tkinter.messagebox.showerror") as err:
+        app._run_ct_validate()
+    assert not err.called
+    assert app.ct_last_evaluation is not None
+
+    payload, context = _captured_validate_run(app)
+
+    # meanwhile the user loads a table that pairs only half the files
+    table_half = tmp_path / "half.csv"
+    pd.DataFrame({
+        "primary": list(primary.index)[:6],
+        "satellite": sat_names[:6],
+    }).to_csv(table_half, index=False)
+    app.ct_pairs_table_path_var.set(str(table_half))
+    with patch("tkinter.messagebox.showwarning"):
+        app._load_ct_pairs_table()
+
+    assert app.ct_last_evaluation is None  # the board belonged to the old pairs
+    app._on_ct_validate_done(payload, context)
+    assert app.ct_last_evaluation is None  # the stale run is not installed
+    assert "discarded" in str(app.ct_validate_status_label.cget("text"))
+
+
+def test_group_edit_discards_inflight_validate(inline_workers):
+    """R3-1: a group edit invalidates a run started before the edit."""
+    app, wl, primary, satellite = inline_workers
+    app._pair_ct_standards()
+    with patch("tkinter.messagebox.showerror") as err:
+        app._run_ct_validate()
+    assert not err.called
+    assert app.ct_last_evaluation is not None
+
+    payload, context = _captured_validate_run(app)
+
+    app.ct_pair_group_entry_var.set("unitZ")
+    app.ct_pairs_tree.selection_set(app.ct_pairs_tree.get_children()[0])
+    app._ct_set_group_on_selected()
+
+    assert app.ct_last_evaluation is None
+    app._on_ct_validate_done(payload, context)
+    assert app.ct_last_evaluation is None
+    assert "discarded" in str(app.ct_validate_status_label.cget("text"))
+
+
+def test_eval_settings_change_discards_board(inline_workers):
+    """R3-1: changing Space or Detector joins invalidates the board."""
+    app, wl, primary, satellite = inline_workers
+    app._pair_ct_standards()
+    with patch("tkinter.messagebox.showerror") as err:
+        app._run_ct_validate()
+    assert not err.called
+    assert app.ct_last_evaluation is not None
+
+    app.ct_eval_space_var.set("reflectance")
+    app._on_ct_eval_settings_changed()
+    assert app.ct_last_evaluation is None and app._ct_eval_context is None
+    assert not app.ct_leaderboard_tree.get_children()
+    assert "cleared" in str(app.ct_validate_status_label.cget("text"))
+
+    # the settings widgets are wired to the same handler
+    assert app.ct_eval_space_combo.bind("<<ComboboxSelected>>")
+    assert app.ct_eval_joins_combo.bind("<<ComboboxSelected>>")
+
+    with patch("tkinter.messagebox.showerror") as err:
+        app._run_ct_validate()
+    assert not err.called
+    assert app.ct_last_evaluation is not None
+    app.ct_eval_joins_var.set("none")
+    app._on_ct_eval_settings_changed()
+    assert app.ct_last_evaluation is None
+
+
+def test_eval_model_load_discards_board(inline_workers, tmp_path):
+    """R3-1: loading a different prediction model invalidates the board."""
+    app, wl, primary, satellite = inline_workers
+    app._pair_ct_standards()
+    with patch("tkinter.messagebox.showerror") as err:
+        app._run_ct_validate()
+    assert not err.called
+    assert app.ct_last_evaluation is not None
+
+    y = np.linspace(1.0, 9.0, primary.shape[0])
+    model = _regression_model_on(tmp_path, primary.to_numpy(), y, wl)
+    app.ct_eval_model_path_var.set(str(tmp_path / "PLS.dasp"))
+    with patch("tkinter.messagebox.showinfo"):
+        app._load_ct_eval_model()
+
+    assert app.ct_eval_model_dict is not None
+    assert app.ct_last_evaluation is None and app._ct_eval_context is None
+
+
+def test_stale_callback_does_not_unlock_newer_run(inline_workers):
+    """R3-2: an old callback must leave the newer run's busy state alone."""
+    app, wl, primary, satellite = inline_workers
+    app._pair_ct_standards()
+    payload1, ctx1 = _captured_validate_run(app)
+
+    # a newer run is in flight when run 1's callback finally arrives
+    app._ct_active_run_id = ctx1["run_id"] + 1
+    app._ct_validate_running = True
+    app._set_ct_validate_busy(True, "Running evaluate_transfer ...")
+    app._on_ct_validate_done(payload1, ctx1)
+
+    assert app._ct_validate_running is True
+    assert str(app.ct_validate_button.cget("state")) == "disabled"
+    assert app.ct_last_evaluation is None
+
+    # the newer run's callback still installs and unlocks normally
+    app._on_ct_validate_done(payload1, dict(ctx1, run_id=app._ct_active_run_id))
+    assert app.ct_last_evaluation is payload1[1]
+    assert app._ct_validate_running is False
+    assert str(app.ct_validate_button.cget("state")) == "normal"
+
+
+def test_stale_fit_callback_does_not_unlock_newer_run(ct_app):
+    """R3-2: a stale fit callback must not re-enable controls mid-run."""
+    app, *_ = ct_app
+    app._ct_active_run_id = 3
+    app._ct_validate_running = True
+    app._set_ct_validate_busy(True, "Fitting DS ...")
+
+    app._on_ct_fit_done((True, None, ""), "No correction",
+                        {"generation": getattr(app, "_ct_input_generation", 0),
+                         "run_id": 2})
+
+    assert app._ct_validate_running is True
+    assert str(app.ct_validate_button.cget("state")) == "disabled"
+    assert str(app.ct_fit_selected_button.cget("state")) == "disabled"
+
+
+def test_partly_matched_table_does_not_pair_unintended_ids(ct_app, tmp_path):
+    """R3-3: with a table active, only its rows pair — no silent ID fallback.
+
+    The table says bone_03 -> LAB-B-03, but LAB-B-03 is not loaded and a
+    satellite file literally named bone_03 exists. That file must stay
+    unmatched; the table, not name luck, defines the pairs.
+    """
+    app, wl, primary, satellite = ct_app
+    sat = satellite.copy()
+    names = [f"LAB-B{int(i.split('_')[1]):02d}" for i in satellite.index]
+    names[2] = "bone_03"  # a satellite file named like the primary specimen
+    sat.index = names
+    app.current_satellite_df = sat
+    table = pd.DataFrame({"primary": list(primary.index), "satellite": names})
+    table.loc[2, "satellite"] = "LAB-B-03"  # not loaded -> row unresolved
+    table_path = tmp_path / "pairs.csv"
+    table.to_csv(table_path, index=False)
+    app.ct_pairs_table_path_var.set(str(table_path))
+
+    with patch("tkinter.messagebox.showwarning") as warn:
+        app._load_ct_pairs_table()
+    assert warn.called  # the unresolved row is reported, not silently dropped
+
+    paired = app._pair_ct_standards()
+    assert paired is not None
+    assert len(paired.ids) == 11
+    assert "bone_03" in paired.unmatched_primary  # its table row is unresolved
+    assert "bone_03" in paired.unmatched_satellite  # the stray file is NOT paired
+    # the pairs really are the table's rows, in its order
+    np.testing.assert_allclose(paired.X_satellite, 0.9 * paired.X_primary + 0.03)
+    status = str(app.ct_pairs_status_label.cget("text"))
+    assert "11 rows paired" in status
+    assert "1 rows unresolved" in status
+    assert "2 files not in the table" in status
+
+
+def test_clearing_pairs_table_returns_to_id_matching(ct_app, tmp_path):
+    """R3-3: clearing the table returns pairing to plain ID matching."""
+    app, wl, primary, satellite = ct_app
+    sat = satellite.copy()
+    names = [f"LAB-B{int(i.split('_')[1]):02d}" for i in satellite.index]
+    sat.index = names
+    app.current_satellite_df = sat
+    table_path = tmp_path / "pairs.csv"
+    pd.DataFrame(
+        {"primary": list(primary.index), "satellite": names}
+    ).to_csv(table_path, index=False)
+    app.ct_pairs_table_path_var.set(str(table_path))
+    app._load_ct_pairs_table()
+    assert app.ct_pairs_rename
+
+    app._clear_ct_pairs_table()
+    assert app.ct_pairs_rename is None
+    assert app.ct_pairs_table_path_var.get() == ""
+
+    paired = app._pair_ct_standards()  # no table: every shared ID pairs
+    assert paired is not None
+    assert len(paired.ids) == len(primary.index)
+
+
+class _chain_state:
+    """Point the comparison tab at a transfer chain over percent data."""
+
+    def __init__(self, app, models):
+        self.app = app
+        self.models = models
+        self.saved = {
+            "comparison_data": app.comparison_data,
+            "comparison_value_scale": getattr(app, "comparison_value_scale", None),
+            "transfer_models": list(app.transfer_models),
+            "type": app.comparison_data_type.get(),
+        }
+
+    def __enter__(self):
+        self.app.comparison_data_type.set("reflectance")
+        self.app.comparison_value_scale = 100.0
+        self.app.apply_transfer.set(True)
+        self.app.transfer_models = self.models
+        return self.app
+
+    def __exit__(self, *exc):
+        app = self.app
+        app.apply_transfer.set(False)
+        app.transfer_models = self.saved["transfer_models"]
+        app.comparison_data = self.saved["comparison_data"]
+        app.comparison_value_scale = self.saved["comparison_value_scale"]
+        app.comparison_data_type.set(self.saved["type"])
+        return False
+
+
+def _legacy_percent_transfer(app, wl, primary, satellite):
+    """A transfer file that predates scale recording: DS fitted on percent."""
+    from spectral_predict.calibration_transfer import TransferModel, estimate_ds
+
+    A = estimate_ds((primary * 100.0).to_numpy(), (satellite * 100.0).to_numpy(),
+                    lam=1e-6)
+    return TransferModel("p", "s", "ds", np.asarray(wl, dtype=float),
+                         {"A": A}, {})
+
+
+def test_chain_new_then_legacy_feeds_legacy_primary_scale(physical_app):
+    """R3-4: a legacy step after a new one receives the primary's loaded scale."""
+    from spectral_predict.calibration_transfer import apply_transfer_dispatch
+
+    app, wl, primary, satellite = physical_app
+    tm_new = _fit_percent_transfer(app, primary, satellite, "DS")
+    legacy = _legacy_percent_transfer(app, wl, primary, satellite)
+    X_pct = satellite * 100.0
+
+    with _chain_state(app, [
+            {"path": "new", "model": tm_new, "description": "new (0-1 fit)"},
+            {"path": "legacy", "model": legacy, "description": "legacy (percent)"}]):
+        with patch("tkinter.messagebox.showerror") as err:
+            out = app._apply_transfer_chain(X_pct)
+        assert not err.called, err.call_args_list
+
+    expected = apply_transfer_dispatch(
+        apply_transfer_dispatch(X_pct.to_numpy() / 100.0, tm_new) * 100.0, legacy)
+    np.testing.assert_allclose(out.to_numpy(), expected, rtol=1e-5)
+
+
+def test_chain_legacy_then_new_keeps_conversion(physical_app):
+    """R3-4: a legacy step first keeps its old behaviour; the new one funnels."""
+    from spectral_predict.calibration_transfer import apply_transfer_dispatch
+
+    app, wl, primary, satellite = physical_app
+    tm_new = _fit_percent_transfer(app, primary, satellite, "DS")
+    legacy = _legacy_percent_transfer(app, wl, primary, satellite)
+    X_pct = satellite * 100.0
+
+    with _chain_state(app, [
+            {"path": "legacy", "model": legacy, "description": "legacy (percent)"},
+            {"path": "new", "model": tm_new, "description": "new (0-1 fit)"}]):
+        with patch("tkinter.messagebox.showerror") as err:
+            out = app._apply_transfer_chain(X_pct)
+        assert not err.called, err.call_args_list
+
+    expected = apply_transfer_dispatch(
+        apply_transfer_dispatch(X_pct.to_numpy(), legacy) / 100.0, tm_new) * 100.0
+    np.testing.assert_allclose(out.to_numpy(), expected, rtol=1e-5)
+
+
+def test_chain_two_new_steps_convert_once_at_end(physical_app):
+    """R3-4: two recorded steps stay in the fit scale; one conversion at the end."""
+    from spectral_predict.calibration_transfer import apply_transfer_dispatch
+
+    app, wl, primary, satellite = physical_app
+    tm1 = _fit_percent_transfer(app, primary, satellite, "DS")
+    tm2 = _fit_percent_transfer(app, primary, satellite, "Physical match")
+    X_pct = satellite * 100.0
+
+    with _chain_state(app, [
+            {"path": "a", "model": tm1, "description": "new 1"},
+            {"path": "b", "model": tm2, "description": "new 2"}]):
+        with patch("tkinter.messagebox.showerror") as err:
+            out = app._apply_transfer_chain(X_pct)
+        assert not err.called, err.call_args_list
+
+    expected = apply_transfer_dispatch(
+        apply_transfer_dispatch(X_pct.to_numpy() / 100.0, tm1), tm2) * 100.0
+    np.testing.assert_allclose(out.to_numpy(), expected, rtol=1e-5)
+
+
+def _descending_csv(tmp_path, name, wl, X_sat, n_samples=4):
+    """Column-oriented CSV whose wavelength column runs descending.
+
+    The ends sit just past the fitted range by float rounding, so the
+    coverage gate passes only through its min/max comparison.
+    """
+    from spectral_predict.calibration_transfer import resample_to_grid
+
+    coarse = np.linspace(wl[-1] + 1e-7, wl[0] - 1e-7, 60)
+    values = resample_to_grid(X_sat[:n_samples], wl, coarse)  # columns follow coarse
+    lines = ["wavelength," + ",".join(f"s{i + 1}" for i in range(n_samples))]
+    for j, w in enumerate(coarse):
+        lines.append(",".join(repr(float(w)))
+                     + "," + ",".join(repr(float(v)) for v in values[:, j]))
+    path = tmp_path / name
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return coarse, values
+
+
+def test_mode_a_load_handler_accepts_descending_grid(physical_app, tmp_path):
+    """R3-5: a descending grid that covers the range is resampled, not refused."""
+    from spectral_predict.calibration_transfer import resample_to_grid as rgrid
+
+    app, wl, primary, satellite = physical_app
+    tm = _fitted_physical_transfer(app)
+    coarse, values = _descending_csv(tmp_path, "descending.csv", wl,
+                                     satellite.to_numpy())
+    app.ct_pred_satellite_path_var.set(str(tmp_path / "descending.csv"))
+    app.new_satellite_data_predict = None
+
+    with (patch("spectral_predict.io.read_combined_csv", side_effect=ValueError),
+          patch("tkinter.messagebox.askyesno", return_value=True) as ask,
+          patch("tkinter.messagebox.showerror") as err):
+        app._load_new_satellite_data_predict()
+    assert err.called is False, err.call_args_list
+    assert ask.called
+
+    stored_wl, stored_X = app.new_satellite_data_predict
+    np.testing.assert_allclose(stored_wl, tm.wavelengths_common)
+    expected = rgrid(values, coarse[::-1], tm.wavelengths_common)
+    np.testing.assert_allclose(stored_X, expected, rtol=1e-6)
+
+
+def test_mode_b_load_handler_accepts_descending_grid(physical_app, tmp_path):
+    """R3-5: Mode B's load handler resamples a descending grid too."""
+    from spectral_predict.calibration_transfer import resample_to_grid as rgrid
+
+    app, wl, primary, satellite = physical_app
+    tm = _fitted_physical_transfer(app)
+    # legacy layout the export loader understands: row 0 = wavelengths
+    coarse = np.linspace(wl[-1] + 1e-7, wl[0] - 1e-7, 60)
+    values = rgrid(satellite.to_numpy()[:4], wl, coarse)
+    lines = [",".join(repr(float(w)) for w in coarse)]
+    lines += [",".join(repr(float(v)) for v in row) for row in values]
+    csv_path = tmp_path / "descending_export.csv"
+    csv_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    app.ct_export_satellite_path_var.set(str(csv_path))
+    app.new_satellite_data_export = None
+
+    with (patch("tkinter.messagebox.askyesno", return_value=True) as ask,
+          patch("tkinter.messagebox.showerror") as err):
+        app._load_new_satellite_data_export()
+    assert err.called is False, err.call_args_list
+    assert ask.called
+
+    stored_wl, stored_X = app.new_satellite_data_export
+    np.testing.assert_allclose(stored_wl, tm.wavelengths_common)
+    expected = rgrid(values, coarse[::-1], tm.wavelengths_common)
+    np.testing.assert_allclose(stored_X, expected, rtol=1e-6)
+
+
+def test_pairing_keeps_collision_count_in_status(ct_app, tmp_path):
+    """R3-6: pairing must not overwrite the table's naming-conflict warning."""
+    app, wl, primary, satellite = ct_app
+    sat = satellite.copy()
+    sat.index = [f"LAB-B-{i + 1:02d}" for i in range(len(sat))]
+    app.current_satellite_df = sat
+    table_path = tmp_path / "pairs.csv"
+    pd.DataFrame({
+        "primary": ["bone_01", "bone_02", "bone_03"],
+        "satellite": ["LAB-B-01", "LAB-B-02", "LAB-B-02"],  # row 3 conflicts
+    }).to_csv(table_path, index=False)
+    app.ct_pairs_table_path_var.set(str(table_path))
+    with patch("tkinter.messagebox.showwarning") as warn:
+        app._load_ct_pairs_table()
+    assert not warn.called
+    assert "1 naming conflict" in str(app.ct_pairs_status_label.cget("text"))
+
+    paired = app._pair_ct_standards()
+    assert paired is not None
+    status = str(app.ct_pairs_status_label.cget("text"))
+    assert "1 naming conflict" in status
+    assert str(app.ct_pairs_status_label.cget("foreground")) == str(
+        app.colors["warning"])
+
+
+def _percent_satellite_dir(tmp_path, wl, satellite):
+    """Directory of percent-reflectance satellite CSVs (header = wavelengths)."""
+    X_pct = (satellite * 100.0).to_numpy()
+    d = tmp_path / "satellite_pct"
+    d.mkdir()
+    header = ",".join(repr(float(w)) for w in wl)
+    for i, sid in enumerate(satellite.index):
+        (d / f"{sid}.csv").write_text(
+            header + "\n" + ",".join(repr(float(v)) for v in X_pct[i]) + "\n",
+            encoding="utf-8")
+    return d, X_pct
+
+
+def test_load_and_predict_routes_through_scale_funnel(physical_app, tmp_path):
+    """R3-7: the older apply-and-predict path feeds the model primary-scale."""
+    from spectral_predict.calibration_transfer import apply_transfer_dispatch
+
+    app, wl, primary, satellite = physical_app
+    tm = _fit_percent_transfer(app, primary, satellite, "DS")
+    app.ct_pred_transfer_model = tm
+    y = np.linspace(1.0, 9.0, primary.shape[0])
+    model = _regression_model_on(tmp_path, (primary * 100.0).to_numpy(), y, wl)
+    app.ct_primary_model_dict = model
+    d, X_pct = _percent_satellite_dir(tmp_path, wl, satellite)
+    app.ct_new_satellite_dir_var.set(str(d))
+    app.ct_pred_y_pred = None
+
+    try:
+        with (patch("tkinter.messagebox.showinfo"),
+              patch("tkinter.messagebox.showerror") as err,
+              patch.object(app, "_plot_ct_predictions")):
+            app._load_and_predict_ct()
+        assert not err.called, err.call_args_list
+
+        expected = model["model"].predict(
+            apply_transfer_dispatch(X_pct / 100.0, tm) * 100.0).ravel()
+        np.testing.assert_allclose(np.asarray(app.ct_pred_y_pred), expected,
+                                   rtol=1e-6)
+    finally:
+        app.ct_new_satellite_dir_var.set("")
+
+
+def test_load_and_predict_warns_on_legacy_transfer_file(physical_app, tmp_path,
+                                                        capsys):
+    """R3-7: a legacy transfer file is warned about on this path too."""
+    from spectral_predict.calibration_transfer import apply_transfer_dispatch
+
+    app, wl, primary, satellite = physical_app
+    tm = _fit_percent_transfer(app, primary, satellite, "DS")
+    tm.meta.pop("value_scale", None)
+    tm.meta.pop("primary_value_scale", None)
+    app.ct_pred_transfer_model = tm
+    y = np.linspace(1.0, 9.0, primary.shape[0])
+    model = _regression_model_on(tmp_path, (primary * 100.0).to_numpy(), y, wl)
+    app.ct_primary_model_dict = model
+    d, X_pct = _percent_satellite_dir(tmp_path, wl, satellite)
+    app.ct_new_satellite_dir_var.set(str(d))
+    app.ct_pred_y_pred = None
+
+    try:
+        with (patch("tkinter.messagebox.showinfo"),
+              patch("tkinter.messagebox.showerror") as err,
+              patch.object(app, "_plot_ct_predictions")):
+            app._load_and_predict_ct()
+        assert not err.called, err.call_args_list
+        assert "predates value-scale recording" in capsys.readouterr().out
+
+        # old behaviour kept: no conversion anywhere for a legacy file
+        expected = model["model"].predict(
+            apply_transfer_dispatch(X_pct, tm)).ravel()
+        np.testing.assert_allclose(np.asarray(app.ct_pred_y_pred), expected,
+                                   rtol=1e-6)
+    finally:
+        app.ct_new_satellite_dir_var.set("")
