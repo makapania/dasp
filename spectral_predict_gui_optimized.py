@@ -56815,6 +56815,11 @@ External Validation Performance (n={n_val}):
         scale_current = (
             float(getattr(self, 'comparison_value_scale', 1.0) or 1.0)
             if data_type == 'reflectance' else None)
+        # primary_value_scale recorded by the last new (scale-recorded)
+        # transfer in the chain — the scale a following legacy file most
+        # plausibly saw, since standalone it was fitted on the instruments'
+        # loaded data.
+        ref_primary_scale = None
 
         last_model = None
         for i, transfer_dict in enumerate(self.transfer_models):
@@ -56831,10 +56836,32 @@ External Validation Performance (n={n_val}):
                 X_values = X_current
                 sample_names = None
 
+            # A legacy file (no value_scale recorded) cannot say what scale
+            # it was fitted on: feed it the preceding recorded transfer's
+            # primary value scale rather than whatever the chain happens to
+            # carry at that point (after a 0-1 step that means converting
+            # back up). With no recorded step before it, keep the old
+            # behaviour and say so.
+            meta = getattr(transfer_model, 'meta', None) or {}
+            fit_scale = meta.get('value_scale')
+            if fit_scale in (1.0, 100.0):
+                self._ct_legacy_scale_note(transfer_model, scale_current)
+            elif (scale_current is not None
+                    and ref_primary_scale in (1.0, 100.0)
+                    and ref_primary_scale != scale_current):
+                factor = float(ref_primary_scale) / float(scale_current)
+                X_values = np.asarray(X_values, dtype=float) * factor
+                scale_current = float(ref_primary_scale)
+                print(f"Transfer chain: converting spectra to "
+                      f"x{ref_primary_scale:g} for the legacy step "
+                      f"'{transfer_dict['description']}' (the previous "
+                      f"transfer's primary scale).")
+            else:
+                self._ct_legacy_scale_note(transfer_model, scale_current)
+
             # Apply through the shared funnel (value-scale conversion + ROI
             # splice); output is in this transfer's fit scale.
             try:
-                self._ct_legacy_scale_note(transfer_model, scale_current)
                 X_transferred = self._apply_transfer_with_roi(
                     X_values, transfer_model, value_scale=scale_current)
             except Exception as e:
@@ -56842,9 +56869,11 @@ External Validation Performance (n={n_val}):
                                    f"Failed to apply transfer model {transfer_dict['description']}: {str(e)}")
                 return X_data  # Return original data on error
 
-            fit_scale = (getattr(transfer_model, 'meta', None) or {}).get('value_scale')
             if fit_scale in (1.0, 100.0):
                 scale_current = float(fit_scale)
+                p_recorded = meta.get('primary_value_scale')
+                if p_recorded in (1.0, 100.0):
+                    ref_primary_scale = float(p_recorded)
 
             # Reconstruct DataFrame with new wavelengths
             if sample_names is not None:
