@@ -1727,6 +1727,38 @@ def test_eval_settings_change_discards_board(inline_workers):
     assert app.ct_last_evaluation is None
 
 
+def test_custom_joins_edit_discards_board(inline_workers):
+    """R4-2: editing the Custom (nm) joins entry invalidates the board.
+
+    Fit uses the Validate context frozen at launch; an unnoticed entry edit
+    would leave an old board fit-ready under different joins.
+    """
+    app, wl, primary, satellite = inline_workers
+    app._pair_ct_standards()
+    with patch("tkinter.messagebox.showerror") as err:
+        app._run_ct_validate()
+    assert not err.called
+    assert app.ct_last_evaluation is not None
+    app.ct_leaderboard_tree.selection_set(
+        app.ct_leaderboard_tree.get_children()[0])
+
+    # a user edits the custom-joins entry (the entry writes this variable)
+    app.ct_eval_joins_custom_var.set("1100, 1700")
+
+    assert app.ct_last_evaluation is None and app._ct_eval_context is None
+    assert not app.ct_leaderboard_tree.get_children()
+    import spectral_predict.transfer_evaluation as te
+
+    fitted = []
+    with (patch.object(te, "fit_transfer",
+                       lambda *a, **k: fitted.append(1)),
+          patch("tkinter.messagebox.showwarning") as warn):
+        app._fit_ct_selected()
+    assert not fitted  # Fit refused: no board survives the joins edit
+    assert warn.called
+    assert "Validate & Compare" in str(warn.call_args)
+
+
 def test_eval_model_load_discards_board(inline_workers, tmp_path):
     """R3-1: loading a different prediction model invalidates the board."""
     app, wl, primary, satellite = inline_workers

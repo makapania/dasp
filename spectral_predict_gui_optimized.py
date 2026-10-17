@@ -58007,6 +58007,11 @@ External Validation Performance (n={n_val}):
                   style='Caption.TLabel').pack(side='left', padx=(0, 4))
         ttk.Entry(eval_options_row, textvariable=self.ct_eval_joins_custom_var,
                   width=12).pack(side='left')
+        # The frozen Validate context reads this entry; any edit (typed or
+        # written through the variable) must invalidate the board exactly
+        # like the comboboxes above, or Fit keeps fitting under old joins.
+        self.ct_eval_joins_custom_var.trace_add(
+            'write', lambda *_: self._on_ct_eval_settings_changed())
         self.ct_eval_joins_used_label = ttk.Label(
             validate_section, text="", style='Caption.TLabel',
             foreground=self.colors['text_light'])
