@@ -53096,6 +53096,12 @@ External Validation Performance (n={n_val}):
                     wl_range_loaded = f"{wavelengths[0]:.1f}-{wavelengths[-1]:.1f}"
                     wl_range_expected = f"{expected_wl[0]:.1f}-{expected_wl[-1]:.1f}"
 
+                    # Refuse outright when resampling would extrapolate outside
+                    # the fitted range (interpolation inside it is fine)
+                    if not self._ct_refuse_uncovered_grid(
+                            wavelengths, expected_wl, "loaded spectra"):
+                        return
+
                     # Check if ranges overlap enough for reasonable resampling
                     overlap_start = max(wavelengths[0], expected_wl[0])
                     overlap_end = min(wavelengths[-1], expected_wl[-1])
@@ -53359,6 +53365,33 @@ External Validation Performance (n={n_val}):
         else:
             return [f"Sample_{i+1}" for i in range(n_samples)]
 
+    def _ct_refuse_uncovered_grid(self, wavelengths, target_wl, what):
+        """Refuse grids that do not cover the fitted wavelengths (no extrapolation).
+
+        Interpolation inside the fitted range is fine, but ``resample_to_grid``
+        would silently linear-extrapolate outside it. Returns True when the
+        loaded grid covers the target (a wider range is fine); otherwise shows
+        an error naming both ranges and returns False.
+        """
+        from tkinter import messagebox
+
+        wl = np.asarray(wavelengths, dtype=float)
+        tgt = np.asarray(target_wl, dtype=float)
+        tol = 0.01
+        if wl.size and tgt.size and (
+                wl.min() > tgt.min() + tol or wl.max() < tgt.max() - tol):
+            messagebox.showerror(
+                "Wavelength Range Too Narrow",
+                f"The {what} span {wl.min():.1f}-{wl.max():.1f} nm, which does "
+                f"not cover the transfer model's fitted range "
+                f"{tgt.min():.1f}-{tgt.max():.1f} nm.\n\n"
+                "Calibration transfer would have to extrapolate outside the "
+                "fitted range, which is unreliable. Load spectra covering "
+                f"{tgt.min():.1f}-{tgt.max():.1f} nm (a wider range is fine; "
+                "only the fitted part is used).")
+            return False
+        return True
+
     def _run_prediction_workflow(self):
         """Run the complete prediction workflow: transform -> predict -> display."""
         from tkinter import messagebox
@@ -53389,6 +53422,9 @@ External Validation Performance (n={n_val}):
             if hasattr(transfer_model, 'wavelengths_common') and transfer_model.wavelengths_common is not None:
                 common_wl = transfer_model.wavelengths_common
                 if len(wavelengths) != len(common_wl) or not np.allclose(wavelengths, common_wl):
+                    if not self._ct_refuse_uncovered_grid(
+                            wavelengths, common_wl, "new satellite spectra"):
+                        return
                     X_satellite = resample_to_grid(X_satellite, wavelengths, common_wl)
                 source_wl = common_wl
 
@@ -53477,7 +53513,8 @@ External Validation Performance (n={n_val}):
                 X_transferred_plot = X_transferred * (float(pred_scale) / float(fit_scale))
 
             # Create plots
-            self._plot_ct_prediction_results(y_pred, X_satellite, X_transferred_plot)
+            self._plot_ct_prediction_results(y_pred, X_satellite, X_transferred_plot,
+                                             source_wl)
 
             # Play success sound (removed popup - results shown in tree and plots)
             self.play_sound('success')
@@ -53485,7 +53522,8 @@ External Validation Performance (n={n_val}):
         except Exception as e:
             messagebox.showerror("Error", f"Prediction workflow failed:\n{str(e)}")
 
-    def _plot_ct_prediction_results(self, y_pred, X_satellite_original, X_transferred):
+    def _plot_ct_prediction_results(self, y_pred, X_satellite_original, X_transferred,
+                                    wavelengths=None):
         """Create plots showing prediction results and spectral transformation."""
         if not HAS_MATPLOTLIB:
             return
@@ -53513,7 +53551,9 @@ External Validation Performance (n={n_val}):
         mean_satellite = X_satellite_original.mean(axis=0)
         mean_transferred = X_transferred.mean(axis=0)
 
-        wavelengths = self.new_satellite_data_predict[0]
+        wavelengths = (np.asarray(wavelengths, dtype=float)
+                       if wavelengths is not None
+                       else np.asarray(self.new_satellite_data_predict[0], dtype=float))
         ax2.plot(wavelengths, mean_satellite, label='Satellite (Before)', color='red', alpha=0.7)
         ax2.plot(wavelengths, mean_transferred, label='Transferred (After)', color='blue', alpha=0.7)
         ax2.set_xlabel(self._get_spectral_xlabel(), color=self.colors['text'])
@@ -53832,6 +53872,12 @@ External Validation Performance (n={n_val}):
                     wl_range_loaded = f"{wavelengths[0]:.1f}-{wavelengths[-1]:.1f}"
                     wl_range_expected = f"{expected_wl[0]:.1f}-{expected_wl[-1]:.1f}"
 
+                    # Refuse outright when resampling would extrapolate outside
+                    # the fitted range (interpolation inside it is fine)
+                    if not self._ct_refuse_uncovered_grid(
+                            wavelengths, expected_wl, "loaded spectra"):
+                        return
+
                     # Check if ranges overlap enough for reasonable resampling
                     overlap_start = max(wavelengths[0], expected_wl[0])
                     overlap_end = min(wavelengths[-1], expected_wl[-1])
@@ -53976,6 +54022,10 @@ External Validation Performance (n={n_val}):
             if model_wavelengths is not None:
                 if not np.array_equal(wavelengths_satellite, model_wavelengths):
                     from spectral_predict.calibration_transfer import resample_to_grid
+                    if not self._ct_refuse_uncovered_grid(
+                            wavelengths_satellite, model_wavelengths,
+                            "loaded satellite spectra"):
+                        return
                     X_satellite_resampled = resample_to_grid(X_satellite, wavelengths_satellite, model_wavelengths)
                 else:
                     X_satellite_resampled = X_satellite

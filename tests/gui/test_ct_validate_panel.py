@@ -1107,6 +1107,102 @@ def test_no_correction_fit_clears_active_transfer(physical_app):
 
 
 # ---------------------------------------------------------------------------
+# Review fix D: refuse to extrapolate new satellite grids (Mode A and Mode B)
+# ---------------------------------------------------------------------------
+
+
+def _fitted_physical_transfer(app):
+    app._pair_ct_standards()
+    _run_inline(app, app._run_ct_validate)
+    _select_physical_row(app)
+    _run_inline(app, app._fit_ct_selected)
+    return app.ct_transfer_model
+
+
+def test_mode_a_refuses_uncovered_satellite_grid(physical_app, tmp_path):
+    """D: new spectra narrower than the fitted grid must be refused, not extrapolated."""
+    from spectral_predict.calibration_transfer import resample_to_grid
+
+    app, wl, primary, satellite = physical_app
+    tm = _fitted_physical_transfer(app)
+    assert tm is not None
+
+    y = np.linspace(1.0, 9.0, primary.shape[0])
+    model = _regression_model_on(tmp_path, primary.to_numpy(), y, wl)
+    app.current_prediction_model_dict = model
+    app.current_prediction_model = model["model"]
+    inside = slice(8, -8)  # strictly inside the fitted range
+    narrow_wl = wl[inside]
+    X_narrow = resample_to_grid(satellite.to_numpy(), wl, narrow_wl)
+    app.new_satellite_data_predict = (narrow_wl, X_narrow)
+    app.ct_pred_data_type.set("reflectance")
+    app.ct_pred_value_scale = 1.0
+    app.ct_pred_data_converted = False
+    app.ct_pred_source_data_type = None
+    app.ct_pred_y_pred = None
+
+    with patch("tkinter.messagebox.showerror") as err:
+        app._run_prediction_workflow()
+    assert err.called
+    msg = str(err.call_args)
+    assert f"{narrow_wl.min():.1f}" in msg  # the loaded range is named
+    assert f"{wl.min():.1f}" in msg  # the fitted range is named
+    assert app.ct_pred_y_pred is None
+
+
+def test_mode_a_allows_covering_wider_grid(physical_app, tmp_path):
+    """D: a wider grid that covers the fitted range interpolates and predicts."""
+    from spectral_predict.calibration_transfer import (
+        apply_transfer_dispatch, resample_to_grid)
+
+    app, wl, primary, satellite = physical_app
+    tm = _fitted_physical_transfer(app)
+
+    wide_wl = np.linspace(wl[0] - 40.0, wl[-1] + 40.0, wl.size + 40)
+    X_wide = resample_to_grid(satellite.to_numpy(), wl, wide_wl)
+    y = np.linspace(1.0, 9.0, primary.shape[0])
+    model = _regression_model_on(tmp_path, primary.to_numpy(), y, wl)
+    app.current_prediction_model_dict = model
+    app.current_prediction_model = model["model"]
+    app.new_satellite_data_predict = (wide_wl, X_wide)
+    app.ct_pred_data_type.set("reflectance")
+    app.ct_pred_value_scale = 1.0
+    app.ct_pred_data_converted = False
+    app.ct_pred_source_data_type = None
+
+    with patch("tkinter.messagebox.showwarning"):
+        _run_inline(app, app._run_prediction_workflow)
+
+    X_on_grid = resample_to_grid(X_wide, wide_wl, tm.wavelengths_common)
+    expected = model["model"].predict(apply_transfer_dispatch(X_on_grid, tm)).ravel()
+    np.testing.assert_allclose(np.asarray(app.ct_pred_y_pred), expected, rtol=1e-6)
+
+
+def test_mode_b_refuses_uncovered_satellite_grid(physical_app):
+    """D: Mode B must not extrapolate a narrower grid either."""
+    from spectral_predict.calibration_transfer import resample_to_grid
+
+    app, wl, primary, satellite = physical_app
+    tm = _fitted_physical_transfer(app)
+
+    inside = slice(8, -8)
+    narrow_wl = wl[inside]
+    X_narrow = resample_to_grid(satellite.to_numpy(), wl, narrow_wl)
+    app.new_satellite_data_export = (narrow_wl, X_narrow)
+    app.ct_export_data_type.set("reflectance")
+    app.ct_export_value_scale = 1.0
+    app.ct_export_data_converted = False
+    app.transformed_spectra = None
+
+    with patch("tkinter.messagebox.showerror") as err:
+        app._transform_spectra()
+    assert err.called
+    msg = str(err.call_args)
+    assert f"{narrow_wl.min():.1f}" in msg and f"{wl.min():.1f}" in msg
+    assert app.transformed_spectra is None
+
+
+# ---------------------------------------------------------------------------
 # Commit 3: Plan Transfer Standards (Kennard-Stone)
 # ---------------------------------------------------------------------------
 
