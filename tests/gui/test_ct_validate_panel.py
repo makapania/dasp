@@ -2174,6 +2174,7 @@ def test_failed_table_reload_invalidates_pairing_and_board(inline_workers,
 
     # the old pairing and board are gone; the in-flight run was abandoned
     assert app.ct_paired is None
+    assert not app.ct_pairs_tree.get_children()  # the old matched rows are gone too
     assert app.ct_last_evaluation is None and app._ct_eval_context is None
     assert app._ct_active_run_id is None
     assert not app.ct_leaderboard_tree.get_children()

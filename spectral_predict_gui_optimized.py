@@ -50735,6 +50735,7 @@ External Validation Performance (n={n_val}):
         self.ct_pairs_collisions = None
         self.ct_paired = None
         self._ct_invalidate_eval_state("The pairs table")
+        self._refresh_ct_pairs_tree()
         try:
             table = pd.read_csv(path)
             table.columns = [str(c).strip().lower() for c in table.columns]
