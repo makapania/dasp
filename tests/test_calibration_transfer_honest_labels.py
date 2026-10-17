@@ -42,7 +42,9 @@ class TestMethodNames:
 
     def test_stored_keys_unchanged_for_saved_models(self) -> None:
         """Saved models store these keys; the dispatcher must still accept them."""
-        assert set(ct.MethodType.__args__) == {"ds", "pds", "tsr", "ctai", "nspfce", "jypls-inv"}
+        keys = set(ct.MethodType.__args__)
+        assert {"ds", "pds", "tsr", "ctai", "nspfce", "jypls-inv"} <= keys  # never renamed
+        assert keys - {"ds", "pds", "tsr", "ctai", "nspfce", "jypls-inv"} == {"physical_match"}
 
     def test_dispatch_still_applies_legacy_keys(self) -> None:
         rng = np.random.default_rng(0)

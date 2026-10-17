@@ -560,3 +560,163 @@ def test_fit_transfer_checks_wavelength_length():
     Xp, Xs = _pair(n=5, p=20)
     with pytest.raises(ValueError, match="wavelengths has shape"):
         fit_transfer(TransferCandidate.make("tsr"), Xp, Xs, wavelengths=np.arange(19.0))
+
+
+# ---------------------------------------------------------------------------
+# F2 part 1b: grouped (leave-one-group-out) scoring, physical match, diagnostics
+# ---------------------------------------------------------------------------
+
+
+def _two_group_offsets():
+    """Group A's satellite reads +1.8, group B's +0.2. Leave-one-out mixes the groups,
+    so a per-wavelength bias looks good; fitted on one group and applied to the other
+    it is worse than no correction."""
+    rng = np.random.default_rng(0)
+    n, p = 12, 50
+    prim = np.cumsum(rng.standard_normal((n, p)), axis=1) * 0.1 + 2.0
+    groups = np.array(["A"] * 6 + ["B"] * 6)
+    sat = prim + np.where(groups == "A", 1.8, 0.2)[:, None]
+    return prim, sat, groups, (lambda X: np.asarray(X).mean(axis=1))
+
+
+def test_grouped_scoring_reverses_a_session_learning_winner():
+    prim, sat, groups, predict = _two_group_offsets()
+    cands = [TransferCandidate.make("none"), TransferCandidate.make("tsr_bias")]
+    loso = evaluate_transfer(prim, sat, predict=predict, candidates=cands)
+    assert loso.leaderboard.iloc[0]["method"] == "tsr_bias"
+    ev = evaluate_transfer(prim, sat, predict=predict, candidates=cands, groups=groups)
+    assert ev.score_column == "RMSD_vs_primary_grouped"
+    assert ev.leaderboard.iloc[0]["method"] == "none"
+    row = ev.leaderboard.set_index("method").loc["tsr_bias"]
+    assert row["RMSD_vs_primary"] == pytest.approx(0.8727, abs=1e-3)
+    assert row["RMSD_vs_primary_grouped"] == pytest.approx(1.6, abs=1e-9)
+    assert any("Leave-one-out favours" in w for w in ev.warnings)
+    assert any("Much worse across groups" in w for w in ev.warnings)
+    assert ev.groups == list(groups)
+    assert set(ev.oof_predictions_grouped) == {NONE_LABEL, "Bias per wavelength"}
+
+
+def test_grouped_prediction_bias_hand_check():
+    prim, sat, groups, predict = _two_group_offsets()
+    y = predict(prim) + np.linspace(-0.1, 0.1, prim.shape[0])
+    ev = evaluate_transfer(
+        prim,
+        sat,
+        y=y,
+        predict=predict,
+        groups=groups,
+        candidates=[TransferCandidate.make("pred_bias")],
+    )
+    y_sat = predict(sat)
+    expected = np.empty_like(y)
+    for g, other in (("A", "B"), ("B", "A")):
+        expected[groups == g] = y_sat[groups == g] + np.mean(
+            y[groups == other] - y_sat[groups == other]
+        )
+    np.testing.assert_allclose(ev.oof_predictions_grouped["Prediction bias"], expected)
+    row = ev.leaderboard.set_index("method").loc["pred_bias"]
+    assert row["RMSEP_grouped"] == pytest.approx(np.sqrt(np.mean((expected - y) ** 2)))
+
+
+def test_groups_validation_and_rank_by():
+    prim, sat, groups, predict = _two_group_offsets()
+    with pytest.raises(ValueError, match="groups has"):
+        evaluate_transfer(prim, sat, predict=predict, groups=groups[:-1])
+    ev = evaluate_transfer(prim, sat, predict=predict, groups=["A"] * len(groups))
+    assert ev.score_column == "RMSD_vs_primary" and ev.groups is None
+    assert any("one group" in w for w in ev.warnings)
+    with pytest.raises(ValueError, match="groups"):
+        evaluate_transfer(prim, sat, predict=predict, rank_by="RMSD_vs_primary_grouped")
+    ev = evaluate_transfer(prim, sat, groups=groups)  # no model: grouped spectral RMSE
+    assert ev.score_column == "spectral_RMSE_grouped"
+    ev = evaluate_transfer(prim, sat, predict=predict, groups=groups, rank_by="RMSD_vs_primary")
+    assert ev.score_column == "RMSD_vs_primary"
+    assert "Slope_vs_primary" in ev.leaderboard and "Slope_vs_primary_grouped" in ev.leaderboard
+
+
+@pytest.fixture(scope="module")
+def example_pair():
+    """Primary = example spectra; satellite = sharper, deeper bands, noisier above 2000 nm."""
+    from spectral_predict import physical_match as pm
+    from spectral_predict import spectral_diagnostics as sd
+    from spectral_predict.io import read_asd_dir
+
+    X, _ = read_asd_dir(str(REPO / "example"))
+    wl = X.columns.astype(float).to_numpy()
+    R = X.to_numpy(float)[:24]
+    blocks = np.array([[wl[s][0], wl[s][-1]] for s in sd.block_slices(wl, (1000, 1800))])
+    to_primary = {
+        "space": "reflectance",
+        "blocks": blocks,
+        "sigma_nm": np.array([0.0, 3.0, 4.0]),
+        "shift_nm": np.zeros(3),
+        "gain": np.array([0.8, 0.65, 0.6]),
+        "offset": np.array([0.05, 0.1, 0.15]),
+    }
+    rng = np.random.default_rng(3)
+    Rp = pm.apply_physical_match(R, to_primary, wl) * (1 + rng.normal(0, 2e-5, R.shape))
+    Rs = R * (1 + rng.normal(0, 1e-4, R.shape) * np.where(wl > 2000, 40, 1))
+    b = np.zeros(wl.size)
+    b[(wl >= 2030) & (wl <= 2060)] = 1.0  # a "model" reading the 2030-2060 nm band
+
+    def predict(Rx):
+        return sd.second_derivative(np.log10(1 / np.clip(Rx, 1e-6, None)), wl) @ b * 1e4
+
+    return wl, Rp, Rs, predict, wl[b > 0]
+
+
+def test_physical_candidates_join_the_default_board(example_pair):
+    wl, Rp, Rs, predict, model_wl = example_pair
+    groups = ["u1"] * 12 + ["u2"] * 12
+    ev = evaluate_transfer(
+        Rp,
+        Rs,
+        predict=predict,
+        wavelengths=wl,
+        space="reflectance",
+        groups=groups,
+        model_wavelengths=model_wl,
+    )
+    assert ev.leaderboard.iloc[0]["method"] == "physical"
+    assert {
+        "Physical match (learned blur, gain per block)",
+        "Physical match (no blur, gain per block)",
+    } <= set(ev.candidates)
+    assert ev.diagnostics["joins"] == [1000.0, 1800.0]
+    assert ev.diagnostics["joins_source"] == "detected"
+    assert any("noisier than the primary" in w for w in ev.warnings)
+
+
+def test_physical_candidate_needs_grid_and_space(example_pair):
+    wl, Rp, Rs, _, _ = example_pair
+    cand = TransferCandidate.make("physical", sigma="learn", gain="per_block")
+    with pytest.raises(ValueError, match="wavelengths and space"):
+        evaluate_transfer(Rp, Rs, candidates=[cand])
+    with pytest.raises(ValueError, match="wavelengths and space"):
+        fit_transfer(cand, Rp, Rs)
+    with pytest.raises(ValueError, match="sigma"):
+        TransferCandidate.make("physical", sigma="wide")
+    defaults = default_transfer_candidates(10, has_y=False, has_predict=False)
+    assert not any(c.method == "physical" for c in defaults)
+
+
+def test_fit_transfer_detects_joins_from_its_own_standards(example_pair):
+    wl, Rp, Rs, _, _ = example_pair
+    cand = TransferCandidate.make("physical", sigma=0.0, gain="single")
+    tm = fit_transfer(cand, Rp, Rs, wavelengths=wl, space="reflectance")
+    assert tm.method == "physical_match"
+    assert tm.meta["joins"] == [1000.0, 1800.0] and tm.meta["joins_source"] == "detected"
+    one = fit_transfer(cand, Rp, Rs, wavelengths=wl, space="reflectance", joins=None)
+    assert one.params["blocks"].shape == (1, 2)
+
+
+def test_grouped_fold_that_cannot_be_fitted_is_an_error_and_sorts_last():
+    prim, sat, groups, predict = _two_group_offsets()
+    groups = np.array(["A"] * 10 + ["B"] * 2)  # fitting on B leaves 2 standards
+    cands = [TransferCandidate.make("none"), TransferCandidate.make("pds", window=5, rank=4)]
+    ev = evaluate_transfer(prim, sat, predict=predict, candidates=cands, groups=groups)
+    row = ev.leaderboard.set_index("method").loc["pds"]
+    assert row["error_grouped"] == "needs 5 standards per fit"
+    assert np.isnan(row["RMSD_vs_primary_grouped"]) and np.isnan(row["improvement"])
+    assert ev.leaderboard.iloc[-1]["method"] == "pds"
+    assert any("fewer than 3 standards" in w for w in ev.warnings)

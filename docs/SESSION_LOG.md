@@ -1074,3 +1074,50 @@ Branch `feat/ct-evaluate-transfer`. Plan: `docs/plans/2026-10-05-F2-part1-transf
   `tests/test_ct_evaluate_transfer.py::simulated_instruments` (milder than the original: none 3.12, not 3.91).
 - The roadmap's claim that `estimate_pds` was on the declared surface was false; `calibration_transfer` and the new
   `transfer_evaluation` module now have rows in AGENT_COMPOSITION.
+
+## 2026-10-16 - Calibration transfer on SPYDER Bone's real instrument pairs (40 bones, 4 ASD units)
+
+Data: `C:/Users/sponheim/git/SPYDER Bone/data/Douka and Higham for Matt` (40 bones scanned on LabSpec 4 Hi-Res and
+Standard-Res; two unit pairs, P set 28313->28011 and Thames 28247->28404; pair table and loaders in SPYDER
+`planning/work/transfer/common.py`). Scored with SPYDER's three collagen models (M2045, water-removed M2045, M1500) as
+RMSD of transferred-satellite predictions from the primary (standard-res) predictions; no lab yields exist. Scripts and
+CSVs: session scratchpad `spyder_bench/` (baseline.py, kernel.py, param.py, param2.py, hybrid.py). SPYDER's own report
+is `planning/08_transfer.md` there.
+- **LOSO alone picks the wrong method.** Within units, centred PDS w=31 rank 1 tops dasp's board (M2045 RMSD 2.82) but
+  its slope is 0.70; fitted on one unit pair and applied to the other it gives 3.92, slope 0.38 (DS: 4.6-5.7, slope
+  ~0; PDS rank >= 2 diverges, M1500 RMSD 100-700). Leave-one-standard-out shares session/presentation effects between
+  train and test. The transfer board needs a grouped (leave-one-group-out) score and a slope column vs the primary.
+- **The difference is mostly a band-depth gain, not resolution** (SPYDER's finding, reproduced): hi-res absorbance
+  features ~1.6x deeper; blur explains ~18%. A physical match (Gaussian blur confined to detector blocks + absorbance
+  gain) learned from the spectra alone, with no datasheet values, gives cross-unit M2045 2.99 / slope 0.88,
+  water-removed 3.19, M1500 3.27-3.64, on a par with SPYDER's hand-tuned recipe (3.08 / 3.56 / 2.96). Learned SWIR1
+  sigma 3 nm (datasheet 3.4).
+- **Fit it on the MEAN second-derivative spectrum over the standards, not pooled per-spectrum least squares.** Noise in
+  the satellite D2 (hi-res SWIR2 is 3-30x noisier) biases a least-squares gain low (errors in variables) and drives
+  a learned sigma to the top of the grid (blur used as a denoiser). Pooled LS over whole blocks: cross-unit M2045 4.27,
+  bias -3.2; on the mean spectrum: 3.12 (nominal sigma) / 2.99 (learned). SNR weighting fixes the gain but not sigma.
+- **A free (non-parametric) shared kernel fails:** absorbance is smooth, so neighbouring taps are collinear; the kernel
+  sum recovers the gain (0.63-0.65) but the shape is unidentifiable (centre +12 nm) and predictions are worse.
+- **Featureless blocks give garbage gains** (bone VNIR: 0.05-0.45). Needs a guard: no signal -> no correction there.
+- **Hybrids do not rescue DS/PDS across units:** physical then PDS 3.84 / slope 0.31; PDS then prediction slope/bias
+  fitted against the primary's predictions 3.76 / 0.44.
+- dasp's `instrument_profiles.estimate_smoothing_between_instruments` fits sigma with no gain term (channel units,
+  crosses joins): it mistakes band depth for blur. Roadmap CT5 must not build on it.
+- **Implementation notes (same day).** (1) Inverse-noise weights in the mean-D2 gain fit HURT: they lean on the
+  quietest channels (VNIR, early SWIR1) and moved the pooled gain 0.65 -> 0.73 (cross-unit M2045 3.20 -> 3.48 with
+  datasheet sigma). Use equal weights inside the fit mask; the noise map decides which channels take part. (2) The
+  errors-in-variables denominator correction changes the gain in the third decimal once the fit is on the mean of
+  20-40 standards; kept as harmless. (3) Choosing sigma on the noise-floor-subtracted residual + parsimony vs the raw
+  residual: 3.12 vs 3.08 cross-unit (SWIR2 sigma 3.5-5 vs 4-5 nm). (4) Noise of the second derivative is
+  underestimated ~2x by a white-noise formula on 1 nm ASD data (neighbouring channels share interpolated noise);
+  fitting a correlation kernel to the high-pass residual's autocorrelation recovers it within ~10% (simulation).
+  (5) Join detection: a "persistent level step" test on 10-30 nm flanks failed at 1800 nm (curvature into the 1900
+  water band); a sharpness test (>= 3x the boundaries 2-4 channels away; real joins score 10-35x) plus an isolation
+  test (adjacent boundaries < half) finds 1000/1800 on every LabSpec, FieldSpec 3 and example set, none on Trek.
+- **Review round 1 (GLM 5.3 + DeepSeek Flash, both MERGE WITH CHANGES).** Main catch: excluding an unusable channel
+  (R <= 0, NaN) from the fit mask is not enough. log10(1/clip(R)) turns it into A = 6, and the 31 nm D2 and the blur
+  spread that into fitted neighbours; one dead channel pushed the learned blur to 10 nm (GLM reproduced it), and a
+  dead channel is constant across spectra, so a cross-spectrum MAD noise map does not see it. Fix: fill unusable
+  channels per spectrum (interpolation in absorbance) before anything else, and dilate the exclusion by the D2
+  half-window. Also: Savitzky-Golay delta and the nm blur need even spacing inside a block (now refused otherwise);
+  an ASCII ".asd" can start with "ASD" (binary headers have a NUL after the magic).

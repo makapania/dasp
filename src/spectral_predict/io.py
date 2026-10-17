@@ -766,6 +766,7 @@ def read_asd_dir(asd_dir, reader_mode="auto"):
     spectra = {}
     duplicate_stems = []
     skipped = []
+    header_joins = {}
     for asd_file in sorted(asd_files):
         stem = asd_file.stem
 
@@ -786,6 +787,7 @@ def read_asd_dir(asd_dir, reader_mode="auto"):
                     spectrum = _handle_binary_asd(asd_file, reader_mode)
             if spectrum is not None:
                 spectra[stem] = spectrum
+                header_joins[stem] = _asd_header_joins(asd_file)  # None for ASCII files
             else:
                 # A None return (SpecDAL failed/unavailable, or a binary layout this
                 # reader can't decode) means the file couldn't be read. Report it as a
@@ -856,9 +858,27 @@ def read_asd_dir(asd_dir, reader_mode="auto"):
         'x_unit': 'nm',
         'x_unit_confidence': 95.0,
         'x_unit_detection_method': 'asd_native',
+        'detector_joins': None,
     }
+    # Detector joins (splices) from the binary headers, only when every file read
+    # agrees; the SpecDAL path drops the header, so it is read separately.
+    kept = [header_joins.get(stem) for stem in df.index]
+    if kept and all(j is not None for j in kept) and len(set(kept)) == 1:
+        metadata['detector_joins'] = tuple(kept[0])
+    elif any(j is not None for j in kept):
+        print("  INFO: ASD headers list different detector joins; none recorded.")
 
     return df, metadata
+
+
+def _asd_header_joins(asd_file):
+    """Splice wavelengths from one binary ASD header, or None."""
+    from .spectral_diagnostics import read_asd_header_joins
+
+    try:
+        return read_asd_header_joins(asd_file)
+    except OSError:
+        return None
 
 
 def _read_single_asd_ascii(asd_file, reader_mode):
