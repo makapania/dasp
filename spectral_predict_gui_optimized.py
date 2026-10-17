@@ -3061,6 +3061,21 @@ class SpectralPredictApp:
         self.primary_data_format = None  # 'csv', 'npy', 'folder', etc.
         self.satellite_data_format = None  # 'csv', 'npy', 'folder', etc.
 
+        # A1 loading keeps sample IDs so standards pair by ID, never row order
+        self.current_primary_df = None  # pd.DataFrame, index=sample IDs, columns=wavelengths
+        self.current_satellite_df = None  # same layout, any row order
+        self.current_primary_ids_positional = False  # True when the source had no IDs
+        self.current_satellite_ids_positional = False
+        self.ct_primary_header_joins = None  # ASD header joins captured at load time
+        self.ct_satellite_header_joins = None
+        self.ct_paired = None  # PairedStandards from pair_standards_by_id
+        self.ct_pair_groups = None  # primary sample ID -> group label
+        self.ct_pairs_rename = None  # satellite ID -> primary ID from a pairs table
+        self.ct_pair_resample_note = None  # set when pairing resampled the satellite
+        self.ct_last_evaluation = None  # TransferEvaluation of the last Validate run
+        self.ct_pairs_table_path_var = tk.StringVar()  # pairs-table CSV path (A1b)
+        self.ct_pair_group_entry_var = tk.StringVar()  # group label to apply to selected pairs
+
         # Enhanced loading with Y values (for JYPLS-inv)
         # Primary data with Y values
         self.ct_primary_X = None  # pd.DataFrame with sample IDs as index
@@ -48451,139 +48466,6 @@ External Validation Performance (n={n_val}):
         if directory:
             self.ct_satellite_spectra_dir_var.set(directory)
 
-    def _load_ct_paired_spectra(self):
-        """Load paired standardization spectra for primary and satellite instruments from separate directories."""
-        if not HAS_CALIBRATION_TRANSFER:
-            messagebox.showerror("Error", "Calibration transfer modules not available")
-            return
-
-        primary_id = self.ct_primary_instrument_id.get()
-        satellite_id = self.ct_satellite_instrument_id.get()
-        primary_dir = self.ct_primary_spectra_dir_var.get()
-        satellite_dir = self.ct_satellite_spectra_dir_var.get()
-
-        if not primary_id or not satellite_id:
-            messagebox.showwarning("Warning", "Please select both primary and satellite instruments")
-            return
-
-        if not primary_dir or not satellite_dir:
-            messagebox.showwarning("Warning", "Please browse and select both primary and satellite spectra directories")
-            return
-
-        if primary_id not in self.instrument_profiles or satellite_id not in self.instrument_profiles:
-            messagebox.showerror("Error", "Selected instruments not found in registry")
-            return
-
-        # VALIDATION: Check that primary and satellite are different instruments
-        if primary_id == satellite_id:
-            messagebox.showerror(
-                "Same Instrument Selected",
-                "Primary and satellite instruments must be different for calibration transfer.\n\n"
-                f"You selected: {primary_id} for both primary and satellite.\n\n"
-                "Please select different instruments."
-            )
-            return
-
-        try:
-            # Load spectra from SEPARATE directories
-            wavelengths_primary, X_primary = self._load_spectra_from_directory(primary_dir)
-            wavelengths_satellite, X_satellite = self._load_spectra_from_directory(satellite_dir)
-
-            # VALIDATION 1: Same Sample Count Check
-            if X_primary.shape[0] != X_satellite.shape[0]:
-                messagebox.showerror(
-                    "Sample Count Mismatch",
-                    f"Primary has {X_primary.shape[0]} samples, Satellite has {X_satellite.shape[0]} samples.\n\n"
-                    "Paired spectra must have the same number of samples (same sample set measured on both instruments).\n\n"
-                    "Please ensure both instruments measured the exact same samples."
-                )
-                return
-
-            # VALIDATION 2: Minimum Sample Check
-            if X_primary.shape[0] < 20:
-                response = messagebox.askokcancel(
-                    "Few Samples",
-                    f"Only {X_primary.shape[0]} paired samples loaded.\n\n"
-                    "At least 30 samples recommended for robust calibration transfer.\n"
-                    "Results may be unreliable with fewer samples.\n\n"
-                    "Do you want to continue anyway?"
-                )
-                if not response:
-                    return
-
-            # VALIDATION 3: Wavelength Overlap Check
-            primary_range = (wavelengths_primary[0], wavelengths_primary[-1])
-            satellite_range = (wavelengths_satellite[0], wavelengths_satellite[-1])
-
-            overlap_start = max(primary_range[0], satellite_range[0])
-            overlap_end = min(primary_range[1], satellite_range[1])
-
-            if overlap_start >= overlap_end:
-                messagebox.showerror(
-                    "No Wavelength Overlap",
-                    f"Primary range: {primary_range[0]:.1f}-{primary_range[1]:.1f} nm\n"
-                    f"Satellite range: {satellite_range[0]:.1f}-{satellite_range[1]:.1f} nm\n\n"
-                    "Instruments must have overlapping wavelength ranges for calibration transfer.\n\n"
-                    "Please select instruments with compatible wavelength coverage."
-                )
-                return
-
-            # Check overlap percentage
-            primary_span = primary_range[1] - primary_range[0]
-            satellite_span = satellite_range[1] - satellite_range[0]
-            overlap_span = overlap_end - overlap_start
-
-            primary_overlap_pct = (overlap_span / primary_span) * 100
-            satellite_overlap_pct = (overlap_span / satellite_span) * 100
-            min_overlap_pct = min(primary_overlap_pct, satellite_overlap_pct)
-
-            if min_overlap_pct < 80:
-                response = messagebox.askokcancel(
-                    "Limited Wavelength Overlap",
-                    f"Wavelength overlap is {min_overlap_pct:.1f}% of instrument range.\n\n"
-                    f"Primary range: {primary_range[0]:.1f}-{primary_range[1]:.1f} nm\n"
-                    f"Satellite range: {satellite_range[0]:.1f}-{satellite_range[1]:.1f} nm\n"
-                    f"Overlap region: {overlap_start:.1f}-{overlap_end:.1f} nm\n\n"
-                    "Transfer quality may be reduced with limited overlap.\n"
-                    "Consider using instruments with better wavelength coverage overlap.\n\n"
-                    "Do you want to continue anyway?"
-                )
-                if not response:
-                    return
-
-            # Get instrument profiles
-            primary_prof = self.instrument_profiles[primary_id]
-            satellite_prof = self.instrument_profiles[satellite_id]
-
-            # Choose common grid
-            common_wl = choose_common_grid(
-                {primary_id: primary_prof, satellite_id: satellite_prof},
-                [primary_id, satellite_id]
-            )
-
-            # Resample both to common grid
-            self.ct_X_primary_common = resample_to_grid(X_primary, wavelengths_primary, common_wl)
-            self.ct_X_satellite_common = resample_to_grid(X_satellite, wavelengths_satellite, common_wl)
-            self.ct_wavelengths_common = common_wl
-
-            # Display info
-            info_text = (f"Loaded {X_primary.shape[0]} paired spectra\n"
-                        f"Common wavelength grid: {common_wl.shape[0]} points\n"
-                        f"Range: {common_wl.min():.1f} - {common_wl.max():.1f} nm\n"
-                        f"Wavelength overlap: {min_overlap_pct:.1f}%")
-
-            self.ct_spectra_info_text.config(state='normal')
-            self.ct_spectra_info_text.delete('1.0', tk.END)
-            self.ct_spectra_info_text.insert('1.0', info_text)
-            self.ct_spectra_info_text.config(state='disabled')
-
-            # Show preview plots immediately after loading
-            self._plot_paired_spectra_preview(primary_id, satellite_id)
-
-            messagebox.showinfo("Success", "Paired spectra loaded and resampled to common grid.\n\nPreview plots displayed.")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to load spectra:\n{str(e)}")
-
     # REMOVED - Instrument Lab functionality deprecated
     # def _import_from_instrument_lab(self):
     #     """Import paired spectra from Instrument Lab characterization data."""
@@ -49993,9 +49875,10 @@ External Validation Performance (n={n_val}):
             print(f"Error creating prediction plots: {str(e)}")
 
     def _load_spectra_from_directory(self, directory):
-        # Reader metadata of the last directory load, for callers that need the data
-        # type (this method returns arrays only).
+        # Reader metadata and sample IDs of the last directory load, for callers that
+        # need them (this method returns arrays only).
         self._last_dir_load_metadata = None
+        self._last_dir_ids = None
         return self._load_spectra_from_directory_impl(directory)
 
     def _load_spectra_from_directory_impl(self, directory):
@@ -50012,6 +49895,7 @@ External Validation Performance (n={n_val}):
             from spectral_predict.io import read_asd_dir
             df, metadata = read_asd_dir(directory)
             self._last_dir_load_metadata = metadata
+            self._last_dir_ids = list(df.index)
             wavelengths = df.columns.astype(float).values
             X = df.values
             return wavelengths, X
@@ -50019,6 +49903,7 @@ External Validation Performance (n={n_val}):
             # Load CSV files - try smart detection first
             from spectral_predict.io import identify_wavelength_columns
             all_spectra = []
+            all_ids = []
             wavelengths = None
 
             # Check first file to determine format
@@ -50039,6 +49924,8 @@ External Validation Performance (n={n_val}):
                     spectra = df[wl_cols].values.astype(float)
                     for row in spectra:
                         all_spectra.append(row)
+                    # Rows outnumber files: no 1:1 file-to-sample IDs here
+                    all_ids = None
                 else:
                     # Legacy: first row = wavelengths, second row = spectrum
                     df = pd.read_csv(csv_file, header=None, low_memory=False)
@@ -50046,13 +49933,17 @@ External Validation Performance (n={n_val}):
                         wavelengths = df.iloc[0, :].values.astype(float)
                     spectrum = df.iloc[1, :].values.astype(float)
                     all_spectra.append(spectrum)
+                    all_ids.append(os.path.splitext(os.path.basename(csv_file))[0])
             X = np.array(all_spectra)
+            if all_ids is not None and len(all_ids) == X.shape[0]:
+                self._last_dir_ids = all_ids
             return wavelengths, X
         elif spc_files:
             # Load SPC files
             from spectral_predict.io import read_spc_dir
             df, metadata = read_spc_dir(directory)
             self._last_dir_load_metadata = metadata
+            self._last_dir_ids = list(df.index)
             wavelengths = df.columns.astype(float).values
             X = df.values
             return wavelengths, X
@@ -50063,6 +49954,7 @@ External Validation Performance (n={n_val}):
                 from spectral_predict.io import read_omnic_dir
                 df, metadata = read_omnic_dir(directory)
                 self._last_dir_load_metadata = metadata
+                self._last_dir_ids = list(df.index)
                 wavelengths = df.columns.astype(float).values
                 X = df.values
                 return wavelengths, X
@@ -50415,6 +50307,7 @@ External Validation Performance (n={n_val}):
             dir_metadata = (
                 getattr(self, '_last_dir_load_metadata', None) if os.path.isdir(path) else None
             )
+            self._ct_store_loaded_standards('primary', path, wavelengths, X, dir_metadata)
 
             # Data type: reader metadata first, value heuristic only as fallback
             try:
@@ -50507,6 +50400,7 @@ External Validation Performance (n={n_val}):
             dir_metadata = (
                 getattr(self, '_last_dir_load_metadata', None) if os.path.isdir(path) else None
             )
+            self._ct_store_loaded_standards('satellite', path, wavelengths, X, dir_metadata)
 
             # Data type: reader metadata first, value heuristic only as fallback
             try:
@@ -50553,6 +50447,282 @@ External Validation Performance (n={n_val}):
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load satellite spectra:\n{str(e)}")
+
+    # ========================================================================
+    # PAIRING STANDARDS BY SAMPLE ID (never row order)
+    # ========================================================================
+
+    def _ct_store_loaded_standards(self, which, path, wavelengths, X, dir_metadata):
+        """Store freshly loaded A1 standards as a DataFrame indexed by sample ID.
+
+        Directory readers supply the IDs (file stems); sources with no IDs (a
+        single CSV/NPY file) get positional row_N IDs and are flagged so pairing
+        can say so. Header detector joins are captured here, once per load, and
+        never re-read from the shared metadata attribute later. Any previously
+        built pairing no longer matches the data and is cleared.
+        """
+        ids = getattr(self, "_last_dir_ids", None) if os.path.isdir(path) else None
+        if ids is None or len(ids) != X.shape[0]:
+            ids = [f"row_{i + 1}" for i in range(X.shape[0])]
+            positional = True
+        else:
+            positional = False
+        df = pd.DataFrame(
+            np.asarray(X, dtype=float),
+            index=pd.Index(ids, name="sample_id"),
+            columns=np.asarray(wavelengths, dtype=float),
+        )
+        header_joins = (dir_metadata or {}).get("detector_joins")
+        if which == 'primary':
+            self.current_primary_df = df
+            self.current_primary_ids_positional = positional
+            self.ct_primary_header_joins = header_joins
+        else:
+            self.current_satellite_df = df
+            self.current_satellite_ids_positional = positional
+            self.ct_satellite_header_joins = header_joins
+        self.ct_paired = None
+        return df, positional
+
+    @staticmethod
+    def _ct_normalize_pair_id(name) -> str:
+        """Fold a sample ID / file name for pairs-table matching.
+
+        Deliberately at least as lenient as the backend's ID normalisation
+        (extension, spaces, case ignored): everything but letters and digits is
+        dropped, lowercase.
+        """
+        return re.sub(r"[^a-z0-9]+", "", str(name).lower())
+
+    def _browse_ct_pairs_table(self):
+        """Browse for a pairs-table CSV (columns primary, satellite [, group])."""
+        filepath = filedialog.askopenfilename(
+            title="Select Pairs Table CSV",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if filepath:
+            self.ct_pairs_table_path_var.set(filepath)
+
+    def _load_ct_pairs_table(self):
+        """Load a pairs table naming which satellite file matches which primary file.
+
+        Columns ``primary`` and ``satellite`` (file stems or names, matched
+        case/space-insensitively) and optionally ``group`` (instrument unit,
+        session or batch). Needed when file names differ between instruments.
+        """
+        from tkinter import messagebox
+
+        path = self.ct_pairs_table_path_var.get()
+        if not path:
+            messagebox.showwarning("No File", "Please browse and select a pairs table CSV first.")
+            return
+        if self.current_primary_df is None or self.current_satellite_df is None:
+            messagebox.showwarning(
+                "No Data", "Load the primary and satellite spectra first, then the pairs table."
+            )
+            return
+        try:
+            table = pd.read_csv(path)
+            table.columns = [str(c).strip().lower() for c in table.columns]
+            missing = {"primary", "satellite"} - set(table.columns)
+            if missing:
+                raise ValueError(
+                    f"Pairs table needs columns 'primary' and 'satellite' "
+                    f"(and optionally 'group'); found {list(table.columns)}"
+                )
+            has_group = "group" in table.columns
+
+            def index_by_norm(df):
+                return {
+                    self._ct_normalize_pair_id(ix): ix for ix in df.index
+                }
+
+            p_norm = index_by_norm(self.current_primary_df)
+            s_norm = index_by_norm(self.current_satellite_df)
+
+            rename = {}
+            groups = dict(self.ct_pair_groups or {})
+            problems = []
+            for row in table.itertuples(index=False):
+                p_key = self._ct_normalize_pair_id(row.primary)
+                s_key = self._ct_normalize_pair_id(row.satellite)
+                p_actual = p_norm.get(p_key)
+                s_actual = s_norm.get(s_key)
+                if p_actual is None or s_actual is None:
+                    problems.append(
+                        f"{row.primary} -> {row.satellite}"
+                        f"{' (primary not loaded)' if p_actual is None else ' (satellite not loaded)'}"
+                    )
+                    continue
+                rename[s_actual] = p_actual
+                if has_group and pd.notna(row.group) and str(row.group).strip():
+                    groups[p_actual] = str(row.group).strip()
+            if problems:
+                messagebox.showwarning(
+                    "Pairs Table Rows Not Found",
+                    "These table rows name files that were not loaded:\n  "
+                    + "\n  ".join(problems[:10])
+                    + (f"\n  ... and {len(problems) - 10} more" if len(problems) > 10 else ""),
+                )
+            if not rename:
+                raise ValueError("The pairs table matched none of the loaded spectra.")
+            self.ct_pairs_rename = rename
+            self.ct_pair_groups = groups
+            self.ct_paired = None  # forces a re-pair with the new table
+            self._refresh_ct_pairs_tree()
+            n_grouped = sum(1 for v in (groups or {}).values() if v) if has_group else 0
+            self.ct_pairs_status_label.config(
+                text=(
+                    f"Pairs table loaded: {len(rename)} pairs"
+                    + (f", {n_grouped} with group" if has_group and n_grouped else "")
+                    + ". Click 'Pair by Sample ID'."
+                ),
+                foreground=self.colors['text'],
+            )
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load pairs table:\n{str(e)}")
+
+    def _refresh_ct_pairs_tree(self):
+        """Fill the pairs Treeview from the current pairing state."""
+        for item in self.ct_pairs_tree.get_children():
+            self.ct_pairs_tree.delete(item)
+        paired = self.ct_paired
+        groups = self.ct_pair_groups or {}
+        if paired is None:
+            return
+        for pid, sid in zip(paired.ids, paired.satellite_ids):
+            self.ct_pairs_tree.insert(
+                '', 'end', values=(pid, sid, groups.get(pid, "")), tags=('matched',)
+            )
+        for pid in paired.unmatched_primary:
+            self.ct_pairs_tree.insert(
+                '', 'end', values=(pid, "(no match)", ""), tags=('unmatched',)
+            )
+        for sid in paired.unmatched_satellite:
+            self.ct_pairs_tree.insert(
+                '', 'end', values=("(no match)", sid, ""), tags=('unmatched',)
+            )
+        self.ct_pairs_tree.tag_configure('unmatched', foreground=self.colors['warning'])
+
+    def _ct_set_group_on_selected(self):
+        """Assign the typed group label to the selected matched pairs."""
+        from tkinter import messagebox
+
+        label = self.ct_pair_group_entry_var.get().strip()
+        selection = self.ct_pairs_tree.selection()
+        if not selection:
+            messagebox.showwarning(
+                "No Selection", "Select rows in the pairs table, then set their group."
+            )
+            return
+        groups = dict(self.ct_pair_groups or {})
+        n = 0
+        for item in selection:
+            primary, satellite, _ = self.ct_pairs_tree.item(item, 'values')
+            if primary == "(no match)":
+                continue
+            if not label:
+                groups.pop(primary, None)
+            else:
+                groups[primary] = label
+            n += 1
+        self.ct_pair_groups = groups
+        self._refresh_ct_pairs_tree()
+        self.ct_pairs_status_label.config(
+            text=f"Group '{label or '(cleared)'}' applied to {n} pair(s).",
+            foreground=self.colors['text'],
+        )
+
+    def _pair_ct_standards(self):
+        """Pair the loaded A1 standards by sample ID (never row order).
+
+        When the two wavelength grids differ, the satellite is resampled onto the
+        primary grid over their overlap (a visible, reported operation) before
+        pairing; a too-small overlap is refused. Returns the PairedStandards or
+        None (with a dialog) on failure.
+        """
+        from tkinter import messagebox
+        from spectral_predict.calibration_transfer import resample_to_grid
+        from spectral_predict.transfer_evaluation import pair_standards_by_id
+
+        if self.current_primary_df is None or self.current_satellite_df is None:
+            messagebox.showwarning(
+                "No Data", "Load both primary and satellite spectra (A1) first."
+            )
+            return None
+
+        primary_df = self.current_primary_df
+        satellite_df = self.current_satellite_df
+        if self.ct_pairs_rename:
+            satellite_df = satellite_df.rename(index=self.ct_pairs_rename)
+
+        resample_note = None
+        wl_p = np.asarray(primary_df.columns, dtype=float)
+        wl_s = np.asarray(satellite_df.columns, dtype=float)
+        same_grid = (
+            wl_p.shape == wl_s.shape
+            and np.allclose(wl_p, wl_s, rtol=0.0, atol=0.01)
+        )
+        if not same_grid:
+            overlap_start = max(wl_p[0], wl_s[0])
+            overlap_end = min(wl_p[-1], wl_s[-1])
+            target = wl_p[(wl_p >= overlap_start) & (wl_p <= overlap_end)]
+            span = target[-1] - target[0] if target.size else 0.0
+            if target.size < 32 or span < 50.0:
+                messagebox.showerror(
+                    "Grids Do Not Overlap Enough",
+                    f"Primary grid: {wl_p[0]:.1f}-{wl_p[-1]:.1f} nm ({wl_p.size} points)\n"
+                    f"Satellite grid: {wl_s[0]:.1f}-{wl_s[-1]:.1f} nm ({wl_s.size} points)\n\n"
+                    f"The overlap ({overlap_start:.1f}-{overlap_end:.1f} nm, {target.size} "
+                    "points) is too small for a transfer. Load spectra with matching "
+                    "wavelength coverage.",
+                )
+                return None
+            step_s = float(np.median(np.diff(wl_s))) if wl_s.size > 1 else 0.0
+            X_s_resampled = resample_to_grid(
+                satellite_df.to_numpy(dtype=float), wl_s, target
+            )
+            satellite_df = pd.DataFrame(
+                X_s_resampled, index=satellite_df.index, columns=target
+            )
+            primary_df = primary_df.loc[:, [c for c in primary_df.columns if c in set(target)]]
+            resample_note = (
+                f"Satellite resampled from {wl_s[0]:.1f}-{wl_s[-1]:.1f} nm "
+                f"(step {step_s:.2f} nm) onto the primary grid "
+                f"{target[0]:.1f}-{target[-1]:.1f} nm ({target.size} points)"
+            )
+
+        try:
+            paired = pair_standards_by_id(primary_df, satellite_df)
+        except ValueError as e:
+            self.ct_paired = None
+            self._refresh_ct_pairs_tree()
+            self.ct_pairs_status_label.config(text=str(e), foreground=self.colors['warning'])
+            messagebox.showerror("Pairing Failed", str(e))
+            return None
+
+        self.ct_paired = paired
+        self.ct_pair_resample_note = resample_note
+        self.ct_last_evaluation = None  # a stale board must not be fitted
+        self._refresh_ct_pairs_tree()
+
+        positional = (
+            "positional row_N IDs (the source has no sample names) — check the order!"
+            if self.current_primary_ids_positional
+            else ""
+        )
+        parts = [
+            f"{len(paired.ids)} pairs matched",
+            f"{len(paired.unmatched_primary)} primary-only",
+            f"{len(paired.unmatched_satellite)} satellite-only",
+        ]
+        status = "; ".join(parts)
+        if resample_note:
+            status += f" | {resample_note}"
+        if positional:
+            status += f" | {positional}"
+        self.ct_pairs_status_label.config(text=status, foreground=self.colors['text'])
+        return paired
 
     def _update_data_info(self):
         """Update data information display."""
@@ -50707,32 +50877,21 @@ External Validation Performance (n={n_val}):
             return
 
         # Validate data loaded
-        if self.current_primary_data is None or self.current_satellite_data is None:
+        if self.current_primary_df is None or self.current_satellite_df is None:
             messagebox.showwarning("No Data", "Please load both primary and satellite spectra first.")
             return
 
         try:
-            wl_primary, X_primary = self.current_primary_data
-            wl_satellite, X_satellite = self.current_satellite_data
+            # Pair standards by sample ID, never row order (on a real 40-pair set,
+            # row order paired 0 of 40 correctly). Differing grids are resampled
+            # over their overlap, visibly, inside _pair_ct_standards.
+            paired = self._pair_ct_standards()
+            if paired is None:
+                return
 
-            # Find common wavelength grid (interpolate if needed)
-            if np.allclose(wl_primary, wl_satellite):
-                wl_common = wl_primary
-                X_primary_common = X_primary
-                X_satellite_common = X_satellite
-            else:
-                # Interpolate to common grid (use primary wavelengths as reference)
-                from scipy.interpolate import interp1d
-                wl_common = wl_primary
-
-                # Interpolate satellite to primary grid
-                X_satellite_common = np.zeros_like(X_primary)
-                for i in range(X_satellite.shape[0]):
-                    f = interp1d(wl_satellite, X_satellite[i, :], kind='linear', fill_value='extrapolate')
-                    X_satellite_common[i, :] = f(wl_common)
-
-                X_primary_common = X_primary
-                messagebox.showinfo("Info", "Satellite spectra interpolated to primary wavelength grid.")
+            wl_common = paired.wavelengths
+            X_primary_common = paired.X_primary
+            X_satellite_common = paired.X_satellite
 
             # Store common grid data
             self.ct_wavelengths_common = wl_common
@@ -50890,6 +51049,12 @@ External Validation Performance (n={n_val}):
                 'primary_was_converted': self.ct_primary_was_converted,
                 'satellite_was_converted': self.ct_satellite_was_converted,
                 'build_date': datetime.now().isoformat(),
+                'pairing': {
+                    'by': 'sample_id',
+                    'unmatched_primary': len(paired.unmatched_primary),
+                    'unmatched_satellite': len(paired.unmatched_satellite),
+                    'resampled': self.ct_pair_resample_note or '',
+                },
             }
             if roi_meta:
                 transfer_meta['region_of_interest'] = roi_meta
@@ -56401,6 +56566,64 @@ External Validation Performance (n={n_val}):
         ttk.Button(data_section, text="Preview Primary vs Satellite Spectra",
                   command=self._preview_spectra,
                   style='Modern.TButton').pack(anchor='w')
+
+        # Sub-section A1b: pair the loaded standards and validate/compare methods
+        validate_section = ttk.LabelFrame(
+            self.ct_build_new_frame,
+            text="A1b) Pair Standards by Sample ID & Validate Transfer Methods",
+            style='Card.TFrame', padding=10)
+        validate_section.pack(fill='x', pady=(0, 10))
+
+        # Pairs table row (optional CSV naming primary/satellite pairs)
+        pairs_table_frame = ttk.Frame(validate_section)
+        pairs_table_frame.pack(fill='x', pady=(0, 5))
+        ttk.Label(pairs_table_frame,
+                  text="Pairs table (optional CSV: primary, satellite [, group]):",
+                  style='Caption.TLabel').pack(anchor='w')
+        pairs_table_row = ttk.Frame(pairs_table_frame)
+        pairs_table_row.pack(fill='x')
+        ttk.Entry(pairs_table_row, textvariable=self.ct_pairs_table_path_var,
+                  width=50).pack(side='left', padx=(0, 8))
+        ttk.Button(pairs_table_row, text="Browse...", command=self._browse_ct_pairs_table,
+                   style='Modern.TButton').pack(side='left', padx=(0, 8))
+        ttk.Button(pairs_table_row, text="Load Pairs Table",
+                   command=self._load_ct_pairs_table,
+                   style='Modern.TButton').pack(side='left', padx=(0, 8))
+        self._create_accent_button(pairs_table_row, "Pair by Sample ID",
+                                   self._pair_ct_standards).pack(side='left')
+
+        self.ct_pairs_status_label = ttk.Label(validate_section, text="No standards paired yet.",
+                                               style='Caption.TLabel',
+                                               foreground=self.colors['text_light'])
+        self.ct_pairs_status_label.pack(anchor='w', pady=(0, 5))
+
+        # Pairs table: primary | satellite | group, with unmatched IDs listed
+        pairs_tree_frame = ttk.Frame(validate_section)
+        pairs_tree_frame.pack(fill='x', pady=(0, 5))
+        self.ct_pairs_tree = ttk.Treeview(
+            pairs_tree_frame, columns=('primary', 'satellite', 'group'),
+            show='headings', height=5, selectmode='extended')
+        self.ct_pairs_tree.heading('primary', text='Primary')
+        self.ct_pairs_tree.heading('satellite', text='Satellite')
+        self.ct_pairs_tree.heading('group', text='Group (unit / session / batch)')
+        self.ct_pairs_tree.column('primary', width=180)
+        self.ct_pairs_tree.column('satellite', width=180)
+        self.ct_pairs_tree.column('group', width=160)
+        pairs_scroll = ttk.Scrollbar(pairs_tree_frame, orient='vertical',
+                                     command=self.ct_pairs_tree.yview)
+        self.ct_pairs_tree.configure(yscrollcommand=pairs_scroll.set)
+        self.ct_pairs_tree.pack(side='left', fill='both', expand=True)
+        pairs_scroll.pack(side='left', fill='y')
+
+        # Group editing on the selected rows
+        group_row = ttk.Frame(validate_section)
+        group_row.pack(fill='x', pady=(0, 2))
+        ttk.Label(group_row, text="Group:", style='Caption.TLabel').pack(side='left', padx=(0, 5))
+        ttk.Entry(group_row, textvariable=self.ct_pair_group_entry_var,
+                  width=20).pack(side='left', padx=(0, 8))
+        ttk.Button(group_row, text="Set group on selected rows",
+                   command=self._ct_set_group_on_selected,
+                   style='Modern.TButton').pack(side='left')
 
         # Sub-section A2: Configure Method
         method_section = ttk.LabelFrame(self.ct_build_new_frame, text="A2) Configure Transfer Method",

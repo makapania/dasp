@@ -13,6 +13,7 @@ import tkinter as tk
 from unittest.mock import patch
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from spectral_predict.sample_selection import kennard_stone
@@ -40,6 +41,17 @@ def _paired_standards(n: int = 30, p: int = 60, seed: int = 0):
 _CT_ATTRS = (
     "current_primary_data",
     "current_satellite_data",
+    "current_primary_df",
+    "current_satellite_df",
+    "current_primary_ids_positional",
+    "current_satellite_ids_positional",
+    "ct_primary_header_joins",
+    "ct_satellite_header_joins",
+    "ct_paired",
+    "ct_pair_groups",
+    "ct_pairs_rename",
+    "ct_pair_resample_note",
+    "ct_last_evaluation",
     "ct_transfer_model",
     "current_transfer_model",
     "ct_primary_X",
@@ -94,6 +106,12 @@ def ct_app(gui_app):
     wl, Xp, Xs = _paired_standards()
     app.current_primary_data = (wl, Xp)
     app.current_satellite_data = (wl, Xs)
+    ids = [f"std_{i + 1}" for i in range(Xp.shape[0])]
+    app.current_primary_df = pd.DataFrame(Xp, index=ids, columns=wl)
+    app.current_satellite_df = pd.DataFrame(Xs, index=ids, columns=wl)
+    app.current_primary_ids_positional = False
+    app.current_satellite_ids_positional = False
+    app.ct_paired = None
     app.ct_roi_mode_var.set("full")
     app.ct_primary_data_type.set("absorbance")
     app.ct_satellite_data_type.set("absorbance")
