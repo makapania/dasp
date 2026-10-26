@@ -229,11 +229,17 @@ def _dilate(mask: np.ndarray, wl: np.ndarray, nm: float) -> np.ndarray:
 def _check_regions(
     regions: Sequence[tuple[float, float]] | np.ndarray | None, name: str
 ) -> list[tuple[float, float]] | None:
-    """Validate ``(lo, hi)`` nm pairs; ``None`` passes through."""
+    """Validate ``(lo, hi)`` nm pairs; ``None`` passes through.
+
+    An empty ``exclude`` means nothing is left out (as before fit regions existed); an
+    empty ``fit_regions`` would leave nothing to fit on, so it raises.
+    """
     if regions is None:
         return None
     arr = np.asarray(regions, dtype=np.float64)
     if arr.size == 0:
+        if name == "exclude":
+            return None
         raise ValueError(f"{name} needs at least one (lo, hi) range in nm, or None")
     if arr.ndim != 2 or arr.shape[1] != 2:
         raise ValueError(f"{name} must be a list of (lo, hi) pairs in nm, got shape {arr.shape}")
@@ -571,7 +577,16 @@ def estimate_physical_match(
     offsets = np.zeros(B)
     for b, slc in enumerate(blocks):
         A_t = _transform_block(Xs[:, slc], wl[slc], space, float(sig[b]), float(sh[b]))
-        m = fit_mask[slc] if fit_mask[slc].any() else valid[slc]
+        # A block without fit channels takes its offset from the usable channels the user
+        # did not leave out. A block the regions leave out entirely, and that is otherwise
+        # untouched (gain 1, no blur), is not corrected at all.
+        m = fit_mask[slc]
+        if not m.any():
+            m = valid[slc] & ~excl[slc]
+        if not m.any():
+            if (valid[slc] & excl[slc]).any() and gains[b] == 1.0 and sig[b] == 0.0:
+                continue
+            m = valid[slc]
         if not m.any():
             m = np.ones(slc.stop - slc.start, dtype=bool)
         offsets[b] = float(np.mean(A_p[:, slc][:, m] - gains[b] * A_t[:, m]))

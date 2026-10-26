@@ -646,7 +646,9 @@ def resolve_joins(
                     f"that the file header ({', '.join(f'{h:g}' for h in header)} nm) does not "
                     "list; using the header."
                 )
-        if dn and any(abs(d - h) > agree_nm for d, h in zip(dn, header)):
+        if dn and (
+            len(dn) != len(header) or any(abs(d - h) > agree_nm for d, h in zip(dn, header))
+        ):
             res.warnings.append(
                 f"The raw readings show detector joins at {', '.join(f'{d:g}' for d in dn)} nm, "
                 f"not the file header's {', '.join(f'{h:g}' for h in header)} nm; "

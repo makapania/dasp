@@ -441,7 +441,6 @@ def test_fitted_gain_applies_to_the_excluded_channels_too():
     "kw",
     [
         {"fit_regions": []},
-        {"exclude": []},
         {"fit_regions": [(1500, 1400)]},
         {"exclude": [(1400, np.nan)]},
         {"fit_regions": [1100, 1300]},
@@ -460,6 +459,25 @@ def test_regions_that_leave_nothing_to_fit_leave_the_block_unscaled():
     )
     assert prm["featureless"][0] and prm["gain"][0] == 1.0
     assert "too few usable wavelengths" in prm["notes"]
+
+
+def test_empty_exclude_leaves_nothing_out():
+    wl, Rp, Rs = _water_pair(n=6)
+    a = pm.estimate_physical_match(Rp, Rs, wl, space="reflectance", sigma=0.0, exclude=[])
+    b = pm.estimate_physical_match(Rp, Rs, wl, space="reflectance", sigma=0.0)
+    np.testing.assert_allclose(a["gain"], b["gain"])
+    np.testing.assert_allclose(a["offset"], b["offset"])
+
+
+def test_a_block_the_fit_regions_leave_out_is_not_corrected():
+    """No gain, blur or offset is fitted on a block the user left out of the fit."""
+    wl, Rp, Rs = _water_pair()
+    prm = pm.estimate_physical_match(
+        Rp, Rs, wl, space="reflectance", sigma=0.0, joins=(1300.0,), fit_regions=[(1500, 1750)]
+    )
+    assert prm["gain"][0] == 1.0 and prm["offset"][0] == 0.0
+    assert prm["gain"][1] == pytest.approx(0.8, rel=0.03)
+    assert prm["offset"][1] == pytest.approx(0.3 - 0.8 * 0.3, abs=0.01)
 
 
 def test_no_regions_means_empty_region_arrays():
