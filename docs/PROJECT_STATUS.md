@@ -44,11 +44,12 @@ recommended to delete them and their tests rather than wire them (offered to the
 **Part 2b (after part 2):** `docs/plans/2026-10-17-F2-part2b-transfer-fit-regions-dn-joins.md`: a fit-regions option
 for the physical-match gain ("exclude water bands"), and detector joins from raw DN (Trek). Both found on SPYDER's
 Beasley FieldSpec 3/Trek pairs; no bone-specific mode. **User rule 2026-10-25 (CLAUDE.md): general features only,
-no instrument- or sample-specific code; real datasets are checks, not design inputs.** Started 2026-10-25 (zcode).
+no instrument- or sample-specific code; real datasets are checks, not design inputs.** Started 2026-10-26 (Sonnet, branch `feat/f2-part2b`).
 **Part 3:** `.dasp` per-instrument adapters; decide replace vs chain for a satellite slope/bias over a stored
 `bias_correction`; GUI Model Development reads `metrics_original` from a correction dict. When the satellite is
 coarser, offer refitting the model on primary spectra blurred to the satellite (roadmap CT5, rewritten).
-**Reviewers (user, 2026-10-16):** GLM 5.3 via the `zcode` CLI for real work and for plan/code reviews and confirm
+**Who builds (user, 2026-10-26):** Sonnet subagents build in a worktree, the main session checks; GLM 5.3 (`zcode`)
+reviews some of the time. **Reviewers (user, 2026-10-16):** GLM 5.3 via the `zcode` CLI for plan/code reviews and confirm
 rounds; Codex (gpt-6-astra, codex-reviewer) as the second opinion on significant diffs (one pass; it found three
 real defects on #98 after two GLM rounds). No DeepSeek. Read-only reviews: say so in the prompt, demand a verdict.
 Merge rule: well-reviewed PR → merge origin/main into branch, test, `gh pr create`,
