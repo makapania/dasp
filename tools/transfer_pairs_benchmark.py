@@ -6,6 +6,7 @@ scoring when the table has a group column, and the noise and join diagnostics.
 
     python tools/transfer_pairs_benchmark.py PRIMARY_DIR SATELLITE_DIR pairs.csv \
         [--model model.dasp] [--space reflectance] [--joins auto|header|none]
+        [--fit-regions all|water|1100-1350,1550-1800]
 
 ``pairs.csv`` has columns ``primary`` and ``satellite`` (file stems or names) and
 optionally ``group`` (instrument unit, session or batch). Data stay where they are;
@@ -24,6 +25,8 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from spectral_predict.io import read_spectra  # noqa: E402
+from spectral_predict.physical_match import WATER_BANDS_NM  # noqa: E402
+from spectral_predict.spectral_diagnostics import union_joins  # noqa: E402
 from spectral_predict.transfer_evaluation import (  # noqa: E402
     evaluate_transfer,
     predict_fn_from_model,
@@ -42,6 +45,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--model", help="a saved regression .dasp model")
     ap.add_argument("--space", choices=["reflectance", "absorbance"])
     ap.add_argument("--joins", default="auto", choices=["auto", "header", "none"])
+    ap.add_argument(
+        "--fit-regions",
+        default="all",
+        help="physical-match fit regions: 'all' (default; the board adds a water-bands-excluded "
+        "row by itself), 'water' (leave out the water bands) or nm ranges to fit only on",
+    )
     ap.add_argument("--out", help="write the leaderboard to this CSV")
     args = ap.parse_args(argv)
 
@@ -72,7 +81,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.joins == "none":
         joins = None
     elif args.joins == "header":
-        joins = meta_s.get("detector_joins") or meta_p.get("detector_joins") or "auto"
+        joins = (
+            union_joins(meta_s.get("detector_joins"), meta_p.get("detector_joins")) or "auto"
+        )
+    exclude = fit_regions = None
+    if args.fit_regions == "water":
+        exclude = WATER_BANDS_NM
+    elif args.fit_regions != "all":
+        fit_regions = [
+            tuple(float(v) for v in part.split("-")) for part in args.fit_regions.split(",")
+        ]
 
     predict = model_wl = None
     if args.model:
@@ -92,6 +110,8 @@ def main(argv: list[str] | None = None) -> int:
         space=space,
         joins=joins,
         model_wavelengths=model_wl,
+        exclude=exclude,
+        fit_regions=fit_regions,
     )
     cols = [
         c

@@ -40,6 +40,7 @@ def _raw_asd(
 ) -> Path:
     hdr = bytearray(484)
     hdr[:3] = magic
+    hdr[3:19] = b"Trek field scan "  # comment text follows the magic; no NUL after it
     hdr[186] = data_type
     hdr[199] = 2
     struct.pack_into("<f", hdr, 191, 350.0)

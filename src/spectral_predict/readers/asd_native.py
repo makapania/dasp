@@ -166,7 +166,8 @@ def read_asd_white_reference(asd_file) -> tuple[np.ndarray, np.ndarray] | None:
         raw = Path(asd_file).read_bytes()
     except OSError:
         return None
-    if len(raw) < _HEADER_BYTES or raw[:3] not in _RAW_MAGICS or raw[3] != 0:
+    # No NUL is required after the magic: as7/as8 headers continue with the comment text.
+    if len(raw) < _HEADER_BYTES or raw[:3] not in _RAW_MAGICS:
         return None
     if raw[_OFF_DATA_TYPE] != 0 or raw[_OFF_DATA_FORMAT] != 2:
         return None

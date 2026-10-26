@@ -77,17 +77,6 @@ _CT_STATE_ATTRS = (
 )
 
 
-@pytest.fixture(autouse=True)
-def _reset_fit_region_controls(request):
-    """The fit-regions and joins controls live on the shared app: put them back."""
-    yield
-    if "gui_app" in request.fixturenames:
-        app = request.getfixturevalue("gui_app")
-        app.ct_eval_fit_regions_var.set("All usable channels")
-        app.ct_eval_fit_regions_custom_var.set("1100-1350, 1550-1800")
-        app.ct_eval_joins_var.set("auto")
-
-
 @pytest.fixture
 def ct_app(gui_app):
     """gui_app with standards loaded as the A1 loaders leave them; state restored."""
@@ -2596,6 +2585,17 @@ def test_load_and_predict_warns_on_legacy_transfer_file(physical_app, tmp_path,
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def ctl_workers(inline_workers):
+    """inline_workers, with the fit-regions and joins controls put back afterwards."""
+    yield inline_workers
+    app = inline_workers[0]
+    app.ct_eval_fit_regions_var.set("All usable channels")
+    app.ct_eval_fit_regions_custom_var.set("1100-1350, 1550-1800")
+    app.ct_eval_joins_var.set("auto")
+
+
+
 def _captured_evaluate_kwargs(app):
     captured = {}
 
@@ -2611,17 +2611,17 @@ def _captured_evaluate_kwargs(app):
     return captured
 
 
-def test_fit_regions_control_default_leaves_the_board_to_decide(inline_workers):
-    app, _, _, _ = inline_workers
+def test_fit_regions_control_default_leaves_the_board_to_decide(ctl_workers):
+    app, _, _, _ = ctl_workers
     assert app.ct_eval_fit_regions_var.get() == "All usable channels"
     kw = _captured_evaluate_kwargs(app)
     assert kw["exclude"] is None and kw["fit_regions"] is None
 
 
-def test_fit_regions_control_exclude_water_and_custom(inline_workers):
+def test_fit_regions_control_exclude_water_and_custom(ctl_workers):
     from spectral_predict.physical_match import WATER_BANDS_NM
 
-    app, _, _, _ = inline_workers
+    app, _, _, _ = ctl_workers
     app.ct_eval_fit_regions_var.set("Exclude water bands")
     kw = _captured_evaluate_kwargs(app)
     assert kw["exclude"] == tuple(WATER_BANDS_NM) and kw["fit_regions"] is None
@@ -2634,8 +2634,8 @@ def test_fit_regions_control_exclude_water_and_custom(inline_workers):
 
 
 @pytest.mark.parametrize("text", ["", "1350-1100", "water", "1100"])
-def test_custom_fit_regions_reject_bad_text(inline_workers, text):
-    app, _, _, _ = inline_workers
+def test_custom_fit_regions_reject_bad_text(ctl_workers, text):
+    app, _, _, _ = ctl_workers
     app.ct_eval_fit_regions_var.set("Custom (fit only on)")
     app.ct_eval_fit_regions_custom_var.set(text)
     with patch("tkinter.messagebox.showerror") as err:
@@ -2644,8 +2644,8 @@ def test_custom_fit_regions_reject_bad_text(inline_workers, text):
     assert app.ct_last_evaluation is None
 
 
-def test_changing_fit_regions_invalidates_the_board(inline_workers):
-    app, _, _, _ = inline_workers
+def test_changing_fit_regions_invalidates_the_board(ctl_workers):
+    app, _, _, _ = ctl_workers
     with patch("tkinter.messagebox.showerror"):
         app._run_ct_validate()
     assert app.ct_last_evaluation is not None
@@ -2655,8 +2655,8 @@ def test_changing_fit_regions_invalidates_the_board(inline_workers):
     app.ct_eval_fit_regions_custom_var.set("1100-1200")  # typing in the entry invalidates too
 
 
-def test_board_shows_the_water_excluded_row_and_fit_selected_keeps_the_regions(inline_workers):
-    app, _, _, _ = inline_workers
+def test_board_shows_the_water_excluded_row_and_fit_selected_keeps_the_regions(ctl_workers):
+    app, _, _, _ = ctl_workers
     with patch("tkinter.messagebox.showerror") as err:
         app._run_ct_validate()
     assert not err.called
@@ -2672,8 +2672,8 @@ def test_board_shows_the_water_excluded_row_and_fit_selected_keeps_the_regions(i
     assert "Physical-match fit regions: all usable channels" in text
 
 
-def test_asd_joins_option_uses_the_union_of_both_instruments(inline_workers):
-    app, _, _, _ = inline_workers
+def test_asd_joins_option_uses_the_union_of_both_instruments(ctl_workers):
+    app, _, _, _ = ctl_workers
     app.ct_primary_header_joins = (1000.0, 1800.0)
     app.ct_primary_joins_source = "header"
     app.ct_satellite_header_joins = (1000.0, 1785.0)
@@ -2685,8 +2685,8 @@ def test_asd_joins_option_uses_the_union_of_both_instruments(inline_workers):
     assert kw["joins"] == (1000.0, 1785.0, 1800.0)
 
 
-def test_asd_joins_option_reports_the_dn_source(inline_workers):
-    app, _, _, _ = inline_workers
+def test_asd_joins_option_reports_the_dn_source(ctl_workers):
+    app, _, _, _ = ctl_workers
     app.ct_primary_header_joins = None
     app.ct_primary_joins_source = None
     app.ct_satellite_header_joins = (1000.0, 1785.0)

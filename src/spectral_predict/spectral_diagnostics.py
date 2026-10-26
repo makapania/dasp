@@ -782,8 +782,9 @@ def read_asd_header_joins(path: str | Path) -> tuple[float, float] | None:
     path = Path(path)
     with open(path, "rb") as fh:
         raw = fh.read(484)
-    # Binary headers have a NUL right after the magic; an ASCII export can start "ASD ...".
-    if len(raw) < 484 or raw[:3] not in _ASD_MAGIC or raw[3] != 0:
+    # A legacy binary header has a NUL right after "ASD" (an ASCII export can start "ASD ...");
+    # as2-as8 headers continue with the comment text, which is usually not empty.
+    if len(raw) < 484 or raw[:3] not in _ASD_MAGIC or (raw[:3] == b"ASD" and raw[3] != 0):
         return None
     ch1 = struct.unpack_from("<f", raw, 191)[0]
     step = struct.unpack_from("<f", raw, 195)[0]
