@@ -101,6 +101,12 @@ samples, to produce that fold's score. Examples: early stopping on the test fold
 base models trained on the fold they are scored on. When a finding claims leakage, say which
 of these it is before proposing a fix.
 
+## General features only (user rule, 2026-10-25)
+
+dasp is general chemometrics software. Do not add modes, branches or presets for one instrument, one sample
+type or one dataset (no instrument model names in code paths, no "bone mode"). Real datasets from other
+projects (e.g. SPYDER Bone) are evidence and acceptance checks; open design choices are decided on principle.
+
 ## Clean up windows and processes (user rule, 2026-10-02)
 
 When you test anything, close what you opened as soon as you no longer need it. This covers

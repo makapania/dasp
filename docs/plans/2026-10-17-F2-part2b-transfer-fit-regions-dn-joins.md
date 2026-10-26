@@ -3,6 +3,11 @@
 Comes after F2 part 2 (the CT GUI) merges. Two general options found on SPYDER Bone's second real instrument
 pair. Neither is bone-specific: water state at scan time varies for soils, grain and plant material as well.
 
+**Generality rule (user, 2026-10-25):** dasp gets general features only, never code for one instrument, one
+sample type or one dataset. No instrument model names in code paths, no "Trek mode", no bone mode. The SPYDER
+datasets below are evidence and acceptance checks, not design inputs: when a choice is open, decide it on
+principle and use the real pairs to confirm it. Every behaviour also gets a synthetic test in `tests/`.
+
 ## Evidence (2026-10-16)
 
 Beasley FieldSpec 3 <-> Trek, 16 clean scan pairs over 15 bones, scored leave-one-bone-out. Report:
@@ -39,8 +44,11 @@ SESSION_LOG 2026-10-16, "Second real pair".
 - Reader: when an ASD file holds raw DN and a white reference (as7, as8), detect joins from the DN jump in each join
   window, as SPYDER's reader does, and report them as `metadata['detector_joins']` with source "dn". Order: user >
   header (when plausible) > DN > detected from reflectance.
-- Pairs whose instruments have different joins (Trek 1785, FS3 1800): decide whether blocks follow the satellite's
-  joins (the blur must not cross the satellite's joins) or the union of both. Test both on Beasley.
+- Pairs whose instruments have different joins (e.g. 1785 on one, 1800 on the other): blocks follow the union of
+  both instruments' joins, because the blur and gain must not cross a join of either instrument. This is decided on
+  principle; Beasley is a check that it does no harm, not a bake-off between rules.
+- The join windows and fallbacks describe the ASD file format's detector layout and apply to every ASD file
+  with raw DN; nothing branches on the instrument model.
 - Acceptance: Trek files give 1000/1785 from `read_asd_dir`; LabSpec and FieldSpec 3 files are unchanged.
 
 ## Not planned

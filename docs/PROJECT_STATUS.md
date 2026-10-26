@@ -43,7 +43,8 @@ the tab (nothing creates `ct_eq_*`, `ct_new_satellite_dir_var`, `ct_prediction_t
 recommended to delete them and their tests rather than wire them (offered to the user 2026-10-17, not yet decided).
 **Part 2b (after part 2):** `docs/plans/2026-10-17-F2-part2b-transfer-fit-regions-dn-joins.md`: a fit-regions option
 for the physical-match gain ("exclude water bands"), and detector joins from raw DN (Trek). Both found on SPYDER's
-Beasley FieldSpec 3/Trek pairs; no bone-specific mode.
+Beasley FieldSpec 3/Trek pairs; no bone-specific mode. **User rule 2026-10-25 (CLAUDE.md): general features only,
+no instrument- or sample-specific code; real datasets are checks, not design inputs.** Started 2026-10-25 (zcode).
 **Part 3:** `.dasp` per-instrument adapters; decide replace vs chain for a satellite slope/bias over a stored
 `bias_correction`; GUI Model Development reads `metrics_original` from a correction dict. When the satellite is
 coarser, offer refitting the model on primary spectra blurred to the satellite (roadmap CT5, rewritten).
