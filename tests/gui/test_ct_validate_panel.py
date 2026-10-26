@@ -44,6 +44,8 @@ _CT_STATE_ATTRS = (
     "current_satellite_ids_positional",
     "ct_primary_header_joins",
     "ct_satellite_header_joins",
+    "ct_primary_joins_source",
+    "ct_satellite_joins_source",
     "ct_paired",
     "ct_pair_groups",
     "ct_pair_groups_table_keys",
@@ -73,6 +75,17 @@ _CT_STATE_ATTRS = (
     "ct_pred_value_scale",
     "ct_pred_y_pred",
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_fit_region_controls(request):
+    """The fit-regions and joins controls live on the shared app: put them back."""
+    yield
+    if "gui_app" in request.fixturenames:
+        app = request.getfixturevalue("gui_app")
+        app.ct_eval_fit_regions_var.set("All usable channels")
+        app.ct_eval_fit_regions_custom_var.set("1100-1350, 1550-1800")
+        app.ct_eval_joins_var.set("auto")
 
 
 @pytest.fixture
@@ -2576,3 +2589,125 @@ def test_load_and_predict_warns_on_legacy_transfer_file(physical_app, tmp_path,
     finally:
         restore_dir_var()
 
+
+
+# ---------------------------------------------------------------------------
+# F2 part 2b: fit regions control, file joins from raw readings
+# ---------------------------------------------------------------------------
+
+
+def _captured_evaluate_kwargs(app):
+    captured = {}
+
+    def fake_evaluate(**kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop here")
+
+    import spectral_predict.transfer_evaluation as te
+
+    with patch.object(te, "evaluate_transfer", fake_evaluate):
+        with patch("tkinter.messagebox.showerror"):
+            app._run_ct_validate()
+    return captured
+
+
+def test_fit_regions_control_default_leaves_the_board_to_decide(inline_workers):
+    app, _, _, _ = inline_workers
+    assert app.ct_eval_fit_regions_var.get() == "All usable channels"
+    kw = _captured_evaluate_kwargs(app)
+    assert kw["exclude"] is None and kw["fit_regions"] is None
+
+
+def test_fit_regions_control_exclude_water_and_custom(inline_workers):
+    from spectral_predict.physical_match import WATER_BANDS_NM
+
+    app, _, _, _ = inline_workers
+    app.ct_eval_fit_regions_var.set("Exclude water bands")
+    kw = _captured_evaluate_kwargs(app)
+    assert kw["exclude"] == tuple(WATER_BANDS_NM) and kw["fit_regions"] is None
+
+    app.ct_eval_fit_regions_var.set("Custom (fit only on)")
+    app.ct_eval_fit_regions_custom_var.set("1100-1350, 1550 to 1800 nm; 1900–1950")
+    kw = _captured_evaluate_kwargs(app)
+    assert kw["exclude"] is None
+    assert kw["fit_regions"] == ((1100.0, 1350.0), (1550.0, 1800.0), (1900.0, 1950.0))
+
+
+@pytest.mark.parametrize("text", ["", "1350-1100", "water", "1100"])
+def test_custom_fit_regions_reject_bad_text(inline_workers, text):
+    app, _, _, _ = inline_workers
+    app.ct_eval_fit_regions_var.set("Custom (fit only on)")
+    app.ct_eval_fit_regions_custom_var.set(text)
+    with patch("tkinter.messagebox.showerror") as err:
+        app._run_ct_validate()
+    assert err.called and err.call_args[0][0] == "Fit Regions"
+    assert app.ct_last_evaluation is None
+
+
+def test_changing_fit_regions_invalidates_the_board(inline_workers):
+    app, _, _, _ = inline_workers
+    with patch("tkinter.messagebox.showerror"):
+        app._run_ct_validate()
+    assert app.ct_last_evaluation is not None
+    app.ct_eval_fit_regions_var.set("Exclude water bands")
+    app._on_ct_eval_settings_changed()
+    assert app.ct_last_evaluation is None
+    app.ct_eval_fit_regions_custom_var.set("1100-1200")  # typing in the entry invalidates too
+
+
+def test_board_shows_the_water_excluded_row_and_fit_selected_keeps_the_regions(inline_workers):
+    app, _, _, _ = inline_workers
+    with patch("tkinter.messagebox.showerror") as err:
+        app._run_ct_validate()
+    assert not err.called
+    label = next(x for x in _board_labels(app) if "water bands excluded" in x)
+    for item in app.ct_leaderboard_tree.get_children():
+        if str(app.ct_leaderboard_tree.item(item, "values")[0]) == label:
+            app.ct_leaderboard_tree.selection_set(item)
+    with patch("tkinter.messagebox.showerror"), patch("tkinter.messagebox.showinfo"):
+        app._fit_ct_selected()
+    tm = app.ct_transfer_model
+    assert tm is not None and tm.meta["exclude_regions"] == [[1380.0, 1500.0], [1880.0, 1990.0]]
+    text = app.ct_diagnostics_text.get("1.0", "end")
+    assert "Physical-match fit regions: all usable channels" in text
+
+
+def test_asd_joins_option_uses_the_union_of_both_instruments(inline_workers):
+    app, _, _, _ = inline_workers
+    app.ct_primary_header_joins = (1000.0, 1800.0)
+    app.ct_primary_joins_source = "header"
+    app.ct_satellite_header_joins = (1000.0, 1785.0)
+    app.ct_satellite_joins_source = "dn"
+    app.ct_eval_joins_var.set("ASD file header")
+    joins, source = app._resolve_ct_eval_joins()
+    assert joins == (1000.0, 1785.0, 1800.0) and source == "file"
+    kw = _captured_evaluate_kwargs(app)
+    assert kw["joins"] == (1000.0, 1785.0, 1800.0)
+
+
+def test_asd_joins_option_reports_the_dn_source(inline_workers):
+    app, _, _, _ = inline_workers
+    app.ct_primary_header_joins = None
+    app.ct_primary_joins_source = None
+    app.ct_satellite_header_joins = (1000.0, 1785.0)
+    app.ct_satellite_joins_source = "dn"
+    app.ct_eval_joins_var.set("ASD file header")
+    assert app._resolve_ct_eval_joins() == ((1000.0, 1785.0), "dn")
+    app.ct_satellite_header_joins = None
+    with pytest.raises(ValueError, match="No ASD file joins"):
+        app._resolve_ct_eval_joins()
+
+
+def test_loading_standards_captures_the_joins_source(ct_app):
+    app, wl, primary, _ = ct_app
+    app._ct_store_loaded_standards(
+        "satellite",
+        "no-such-dir",
+        wl,
+        primary.to_numpy(),
+        {"detector_joins": (1000.0, 1785.0), "detector_joins_source": "dn"},
+    )
+    assert app.ct_satellite_header_joins == (1000.0, 1785.0)
+    assert app.ct_satellite_joins_source == "dn"
+    app._ct_store_loaded_standards("satellite", "no-such-dir", wl, primary.to_numpy(), {})
+    assert app.ct_satellite_joins_source is None

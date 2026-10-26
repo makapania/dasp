@@ -54,6 +54,11 @@ FIT_MARGIN_NM = 25.0
 SIGMA_TOLERANCE = 0.02
 DIRECTION_MARGIN = 0.8
 KERNEL_TRUNCATE = 4.0
+WATER_BANDS_NM: tuple[tuple[float, float], ...] = ((1380.0, 1500.0), (1880.0, 1990.0))
+"""The two liquid-water combination bands (about 1450 and 1940 nm). Their depth follows how
+wet the sample was at scan time, which differs between sessions and instruments, so a gain
+fitted across them mostly corrects the water rather than the instrument. Pass as
+``exclude`` (or use ``water_bands_covered`` to see whether a grid reaches them)."""
 FWHM_TO_SIGMA = 1.0 / (2.0 * np.sqrt(2.0 * np.log(2.0)))
 
 
@@ -215,10 +220,34 @@ def _dilate(mask: np.ndarray, wl: np.ndarray, nm: float) -> np.ndarray:
     """Grow a channel mask by ``nm`` on each side."""
     if not mask.any():
         return mask
-    out = mask.copy()
-    for w in wl[mask]:
-        out |= np.abs(wl - w) <= nm
-    return out
+    hit = wl[mask]  # increasing
+    first = np.searchsorted(hit, wl - nm, side="left")
+    nearest = hit[np.minimum(first, hit.size - 1)]
+    return mask | ((first < hit.size) & (nearest <= wl + nm))
+
+
+def _check_regions(
+    regions: Sequence[tuple[float, float]] | np.ndarray | None, name: str
+) -> list[tuple[float, float]] | None:
+    """Validate ``(lo, hi)`` nm pairs; ``None`` passes through."""
+    if regions is None:
+        return None
+    arr = np.asarray(regions, dtype=np.float64)
+    if arr.size == 0:
+        raise ValueError(f"{name} needs at least one (lo, hi) range in nm, or None")
+    if arr.ndim != 2 or arr.shape[1] != 2:
+        raise ValueError(f"{name} must be a list of (lo, hi) pairs in nm, got shape {arr.shape}")
+    if not np.all(np.isfinite(arr)) or np.any(arr[:, 0] >= arr[:, 1]):
+        raise ValueError(f"{name} ranges need finite lo < hi, got {arr.tolist()}")
+    return [(float(lo), float(hi)) for lo, hi in arr]
+
+
+def water_bands_covered(wavelengths: Sequence[float]) -> bool:
+    """Whether the grid spans at least one of ``WATER_BANDS_NM`` completely."""
+    wl = np.asarray(wavelengths, dtype=np.float64)
+    if wl.size == 0:
+        return False
+    return any(wl.min() <= lo and wl.max() >= hi for lo, hi in WATER_BANDS_NM)
 
 
 def _d2_block(A: np.ndarray, wl_b: np.ndarray) -> np.ndarray:
@@ -344,6 +373,7 @@ def estimate_physical_match(
     shift: bool = False,
     featureless: str = "unity",
     exclude: Sequence[tuple[float, float]] | None = None,
+    fit_regions: Sequence[tuple[float, float]] | None = None,
     noisy_factor: float = 10.0,
     sigma_grid: Sequence[float] | None = None,
 ) -> dict:
@@ -363,7 +393,14 @@ def estimate_physical_match(
         gain: ``'per_block'`` or ``'single'`` (one gain pooled over blocks with signal).
         shift: Also learn a wavelength shift per block (-3..3 nm, 0.25 nm steps).
         featureless: ``'unity'`` (gain 1) or ``'pooled'`` for blocks without signal.
-        exclude: Extra ``(lo, hi)`` nm regions left out of the fit.
+        exclude: Extra ``(lo, hi)`` nm regions left out of the fit (e.g. ``WATER_BANDS_NM``).
+        fit_regions: ``(lo, hi)`` nm regions the gain and blur are fitted on; everything
+            else is left out (``None`` = all usable channels). Combines with ``exclude``
+            (a channel must be inside a fit region and outside every excluded one). The
+            second-derivative window is 31 nm wide, so a channel is only used when that
+            window stays clear of the excluded data: excluded regions are widened, and
+            fit regions narrowed, by half a window. Only the fit is restricted; the
+            fitted blur, gain and offset are applied to every channel of the block.
         noisy_factor: Regions noisier than this multiple of the block's quiet level, on
             either instrument, are left out of the fit.
         sigma_grid: Candidate sigmas (nm) for ``sigma='learn'`` (default 0-10 nm in
@@ -372,11 +409,13 @@ def estimate_physical_match(
     Returns:
         Params for ``apply_physical_match``: ``space``, ``blocks`` (B, 2) nm,
         ``sigma_nm``, ``shift_nm``, ``gain``, ``offset`` (each (B,)), ``featureless`` and
-        ``satellite_coarser`` (bool (B,)), ``fit_mask`` (p,) bool, ``snr`` (B,), and
+        ``satellite_coarser`` (bool (B,)), ``fit_mask`` (p,) bool, ``fit_regions`` and
+        ``exclude_regions`` ((R, 2) / (E, 2) nm; zero rows when not given), ``snr`` (B,), and
         ``notes`` (one string; empty when there is nothing to report).
 
     Raises:
-        ValueError: Shapes differ, fewer than 2 standards, bad wavelengths or space.
+        ValueError: Shapes differ, fewer than 2 standards, bad wavelengths or space, or
+            malformed ``exclude`` / ``fit_regions``.
     """
     Xp = np.atleast_2d(np.asarray(X_primary, dtype=np.float64))
     Xs = np.atleast_2d(np.asarray(X_satellite, dtype=np.float64))
@@ -410,7 +449,13 @@ def estimate_physical_match(
     noisy = sd.regions_mask(
         sd.noisy_regions(ne_p.channel_sd, wl, joins, factor=noisy_factor), wl
     ) | sd.regions_mask(sd.noisy_regions(ne_s.channel_sd, wl, joins, factor=noisy_factor), wl)
-    excl = sd.regions_mask(() if exclude is None else exclude, wl)
+    exclude_list = _check_regions(exclude, "exclude")
+    fit_list = _check_regions(fit_regions, "fit_regions")
+    excl = sd.regions_mask(exclude_list or (), wl)
+    if fit_list is not None:
+        excl |= ~sd.regions_mask(fit_list, wl)
+    # a channel's 31 nm derivative must not reach into the left-out data
+    excl = _dilate(excl, wl, 0.5 * sd.D2_WINDOW_NM + float(np.max(np.diff(wl))))
 
     grid = tuple(sorted(float(v) for v in (SIGMA_GRID_NM if sigma_grid is None else sigma_grid)))
     if not grid or not np.all(np.isfinite(grid)) or grid[0] < 0:
@@ -543,6 +588,8 @@ def estimate_physical_match(
         "satellite_coarser": coarser,
         "snr": snr,
         "fit_mask": fit_mask,
+        "fit_regions": np.array(fit_list or [], dtype=np.float64).reshape(-1, 2),
+        "exclude_regions": np.array(exclude_list or [], dtype=np.float64).reshape(-1, 2),
         "notes": " ".join(
             notes
             + (

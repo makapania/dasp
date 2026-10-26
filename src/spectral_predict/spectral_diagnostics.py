@@ -458,7 +458,8 @@ class JoinDetection:
 
     Attributes:
         joins: Join wavelengths (last wavelength of the left block), ascending.
-        source: ``'header'``, ``'detected'``, ``'user'`` or ``'none'``.
+        source: ``'user'``, ``'header'``, ``'dn'`` (raw white-reference readings),
+            ``'detected'`` (from reflectance) or ``'none'``.
         confident: For detection: at least one join cleared every test.
         scores: Candidate wavelength -> step score (detection only).
         warnings: Plain-language notes (e.g. header and data disagree).
@@ -606,16 +607,20 @@ def resolve_joins(
     *,
     user_joins: Sequence[float] | None = None,
     header_joins: Sequence[float] | None = None,
+    dn_joins: Sequence[float] | None = None,
     X: np.ndarray | None = None,
     space: str | None = None,
     agree_nm: float = 2.0,
 ) -> JoinDetection:
-    """Decide the detector joins: user, then a plausible header, then detection, else none.
+    """Decide the detector joins: user, then a plausible header, then joins read from the
+    raw readings (``dn_joins``), then detection from reflectance, else none.
 
     Args:
         wavelengths: Grid.
         user_joins: Joins the user gave (taken as they are; ``()`` means "no joins").
         header_joins: Joins from the file header (e.g. ``read_asd_header_joins``).
+        dn_joins: Joins found in the raw white-reference readings (``read_asd_dn_joins``, or
+            ``read_asd_dir``'s ``metadata['detector_joins']`` when its source is ``'dn'``).
         X: Spectra to detect joins from (with ``space``).
         space: Space of ``X``.
         agree_nm: Header and detected joins this close are treated as the same join.
@@ -626,6 +631,7 @@ def resolve_joins(
     wl = check_wavelengths(wavelengths)
     if user_joins is not None:
         return JoinDetection(tuple(sorted(float(j) for j in user_joins)), "user", True)
+    dn = _plausible_joins(dn_joins, wl)
     detected = None
     if X is not None and space is not None:
         detected = detect_detector_joins(X, wl, space=space)
@@ -640,7 +646,15 @@ def resolve_joins(
                     f"that the file header ({', '.join(f'{h:g}' for h in header)} nm) does not "
                     "list; using the header."
                 )
+        if dn and any(abs(d - h) > agree_nm for d, h in zip(dn, header)):
+            res.warnings.append(
+                f"The raw readings show detector joins at {', '.join(f'{d:g}' for d in dn)} nm, "
+                f"not the file header's {', '.join(f'{h:g}' for h in header)} nm; "
+                "using the header."
+            )
         return res
+    if dn:
+        return JoinDetection(dn, "dn", True)
     if detected is not None and detected.confident:
         return detected
     note = []
@@ -653,6 +667,104 @@ def resolve_joins(
 
 
 _ASD_MAGIC = (b"ASD", b"as2", b"as3", b"as4", b"as5", b"as6", b"as7", b"as8")
+
+
+ASD_JOIN_WINDOWS_NM: tuple[tuple[float, float], ...] = ((950.0, 1050.0), (1700.0, 1900.0))
+"""Where the two detector joins (VNIR/SWIR1, SWIR1/SWIR2) of an ASD spectrometer lie. A
+property of the file format's detector layout, so it applies to every ASD file."""
+DN_JUMP_CLEAR = 3.0
+DN_JUMP_MIN = 0.01
+
+
+def asd_joins_plausible(joins: Sequence[float] | None) -> bool:
+    """Whether ``joins`` are two finite wavelengths, one inside each ASD join window."""
+    if joins is None or len(joins) != len(ASD_JOIN_WINDOWS_NM):
+        return False
+    return all(
+        np.isfinite(j) and lo <= j <= hi for j, (lo, hi) in zip(joins, ASD_JOIN_WINDOWS_NM)
+    )
+
+
+def detect_joins_from_white_reference(
+    wavelengths: Sequence[float], white_dn: Sequence[float]
+) -> tuple[float, ...] | None:
+    """Detector joins from the step in a white reference's raw digital numbers.
+
+    The detectors are spliced with a level offset, which shows in the raw readings as a
+    jump between two adjacent channels (the sample/reference ratio cancels most of it,
+    so reflectance can hide a join the raw readings show). In each ASD join window the
+    largest relative jump ``|dn[k+1] - dn[k]| / |dn[k]|`` between two channels inside the
+    window marks the join (the last channel before it). The jump must be at least 3
+    times the median jump in the window and at least 0.01.
+
+    Args:
+        wavelengths: (p,) grid in nm.
+        white_dn: (p,) white-reference digital numbers.
+
+    Returns:
+        One wavelength per ASD join window, or ``None`` when any window shows no clear
+        jump (or the grid does not reach it).
+    """
+    wl = np.asarray(wavelengths, dtype=np.float64)
+    dn = np.asarray(white_dn, dtype=np.float64)
+    if wl.shape != dn.shape or wl.ndim != 1 or wl.size < 4:
+        return None
+    out: list[float] = []
+    for lo, hi in ASD_JOIN_WINDOWS_NM:
+        ks = np.flatnonzero((wl[:-1] >= lo) & (wl[1:] <= hi))
+        if ks.size < 3:
+            return None
+        with np.errstate(divide="ignore", invalid="ignore"):
+            jumps = np.abs(dn[ks + 1] - dn[ks]) / np.abs(dn[ks])
+        finite = jumps[np.isfinite(jumps)]
+        if finite.size < 3:
+            return None
+        best = int(np.argmax(np.where(np.isfinite(jumps), jumps, -np.inf)))
+        if jumps[best] < DN_JUMP_CLEAR * float(np.median(finite)) or jumps[best] < DN_JUMP_MIN:
+            return None
+        out.append(float(wl[ks[best]]))
+    return tuple(out)
+
+
+def read_asd_dn_joins(path: str | Path) -> tuple[float, float] | None:
+    """Detector joins from the white reference stored in a raw ASD file.
+
+    Reads the raw white-reference digital numbers of a file that holds raw readings and
+    a stored reference, and applies ``detect_joins_from_white_reference``.
+
+    Returns:
+        ``(join1, join2)``, or ``None`` for files with no raw readings or no clear jump.
+    """
+    from .readers.asd_native import read_asd_white_reference
+
+    found = read_asd_white_reference(path)
+    if found is None:
+        return None
+    joins = detect_joins_from_white_reference(*found)
+    return None if joins is None else (joins[0], joins[1])
+
+
+def union_joins(*join_sets: Sequence[float] | None, merge_nm: float = 5.0) -> tuple[float, ...]:
+    """Detector joins of several instruments combined.
+
+    A blur or gain fitted for a pair of instruments must not cross a join of either, so
+    the blocks follow the union of the joins. Joins closer than ``merge_nm`` are one
+    join (the first one given is kept).
+
+    Args:
+        *join_sets: Joins of each instrument (``None`` and empty sets are skipped).
+        merge_nm: Joins this close count as the same join.
+
+    Returns:
+        Sorted wavelengths.
+    """
+    found: list[float] = []
+    for joins in join_sets:
+        for j in () if joins is None else np.atleast_1d(joins):
+            j = float(j)
+            if np.isfinite(j) and all(abs(j - f) > merge_nm for f in found):
+                found.append(j)
+    return tuple(sorted(found))
 
 
 def read_asd_header_joins(path: str | Path) -> tuple[float, float] | None:

@@ -3083,6 +3083,8 @@ class SpectralPredictApp:
         self.current_satellite_ids_positional = False
         self.ct_primary_header_joins = None  # ASD header joins captured at load time
         self.ct_satellite_header_joins = None
+        self.ct_primary_joins_source = None  # 'header' / 'dn' / 'mixed' (reader's report)
+        self.ct_satellite_joins_source = None
         self.ct_paired = None  # PairedStandards from pair_standards_by_id
         self.ct_pair_groups = None  # primary sample ID -> group label
         self.ct_pair_groups_table_keys = None  # IDs whose label came from the pairs table
@@ -3103,6 +3105,8 @@ class SpectralPredictApp:
         self.ct_eval_space_var = tk.StringVar(value="auto (detected)")
         self.ct_eval_joins_var = tk.StringVar(value="auto")
         self.ct_eval_joins_custom_var = tk.StringVar(value="1000, 1800")
+        self.ct_eval_fit_regions_var = tk.StringVar(value=self._CT_FIT_ALL)
+        self.ct_eval_fit_regions_custom_var = tk.StringVar(value="1100-1350, 1550-1800")
         self._ct_validate_running = False  # guards Validate/Fit double launches
         self._ct_eval_context = None  # frozen inputs of the last Validate run (for Fit)
         self._ct_input_generation = 0  # bumped whenever the pairing inputs change
@@ -50556,14 +50560,17 @@ External Validation Performance (n={n_val}):
             columns=np.asarray(wavelengths, dtype=float),
         )
         header_joins = (dir_metadata or {}).get("detector_joins")
+        joins_source = (dir_metadata or {}).get("detector_joins_source") if header_joins else None
         if which == 'primary':
             self.current_primary_df = df
             self.current_primary_ids_positional = positional
             self.ct_primary_header_joins = header_joins
+            self.ct_primary_joins_source = joins_source
         else:
             self.current_satellite_df = df
             self.current_satellite_ids_positional = positional
             self.ct_satellite_header_joins = header_joins
+            self.ct_satellite_joins_source = joins_source
         self._ct_invalidate_standards_state()
         return df, positional
 
@@ -51205,7 +51212,10 @@ External Validation Performance (n={n_val}):
         Returns ``(joins, provenance)`` with provenance one of 'detected',
         'header', 'user', 'none' — the GUI's own record of where the joins came
         from (the backend reports 'given' for both header and user joins).
-        Header joins were captured per instrument at load time.
+        File joins (the header's, or for raw files without usable header joins the
+        step in the stored white reference) were captured per instrument at load
+        time. When the two instruments differ the blocks follow the union of both
+        instruments' joins: a blur or gain must not cross a join of either.
         """
         mode = self.ct_eval_joins_var.get()
         if mode == 'auto':
@@ -51213,13 +51223,20 @@ External Validation Performance (n={n_val}):
         if mode == 'none':
             return None, 'none'
         if mode.startswith('ASD'):
-            joins = self.ct_primary_header_joins or self.ct_satellite_header_joins
-            if not joins:
+            from spectral_predict.spectral_diagnostics import union_joins
+            sets = (self.ct_primary_header_joins, self.ct_satellite_header_joins)
+            if not any(sets):
                 raise ValueError(
-                    "No ASD header joins were found in the loaded files (readers "
-                    "report them only for ASD files that carry them). Use 'auto' "
-                    "(detect from the spectra) or 'custom' instead.")
-            return tuple(float(j) for j in joins), 'header'
+                    "No ASD file joins were found in the loaded files (readers report "
+                    "them only for ASD files whose header lists them or that hold raw "
+                    "readings with a white reference). Use 'auto' (detect from the "
+                    "spectra) or 'custom' instead.")
+            sources = {
+                (src or 'header') for joins, src in (
+                    (sets[0], getattr(self, 'ct_primary_joins_source', None)),
+                    (sets[1], getattr(self, 'ct_satellite_joins_source', None)),
+                ) if joins}
+            return union_joins(*sets), (sources.pop() if len(sources) == 1 else 'file')
         text = self.ct_eval_joins_custom_var.get()
         try:
             values = [float(v) for v in re.split(r"[,;\s]+", str(text).strip()) if v]
@@ -51228,6 +51245,39 @@ External Validation Performance (n={n_val}):
         if not values:
             raise ValueError("Custom joins need at least one wavelength in nm (e.g. '1000, 1800').")
         return tuple(sorted(values)), 'user'
+
+    _CT_FIT_ALL = "All usable channels"
+    _CT_FIT_WATER = "Exclude water bands"
+    _CT_FIT_CUSTOM = "Custom (fit only on)"
+
+    def _resolve_ct_eval_fit_regions(self):
+        """Map the Fit regions control to ``(exclude, fit_regions)`` for evaluate_transfer.
+
+        'All usable channels' gives ``(None, None)``: the board then adds the
+        water-bands-excluded candidate by itself when the grid covers them.
+        """
+        from spectral_predict.physical_match import WATER_BANDS_NM
+
+        mode = self.ct_eval_fit_regions_var.get()
+        if mode == self._CT_FIT_WATER:
+            return tuple(WATER_BANDS_NM), None
+        if mode != self._CT_FIT_CUSTOM:
+            return None, None
+        text = self.ct_eval_fit_regions_custom_var.get()
+        regions = []
+        for part in re.split(r"[,;]+", str(text)):
+            part = part.strip()
+            if not part:
+                continue
+            m = re.fullmatch(r"([0-9.]+)\s*(?:-|\u2013|to)\s*([0-9.]+)\s*(?:nm)?", part)
+            if m is None or float(m.group(1)) >= float(m.group(2)):
+                raise ValueError(
+                    f"'{part}' is not a wavelength range such as '1100-1350' (nm, low to high).")
+            regions.append((float(m.group(1)), float(m.group(2))))
+        if not regions:
+            raise ValueError(
+                "Custom fit regions need at least one range in nm (e.g. '1100-1350, 1550-1800').")
+        return None, tuple(regions)
 
     def _ct_eval_groups_list(self, paired):
         """Group label per standard (unit / session / batch), or None."""
@@ -51315,6 +51365,12 @@ External Validation Performance (n={n_val}):
             messagebox.showerror("Detector Joins", str(e))
             return
 
+        try:
+            fit_exclude, fit_regions = self._resolve_ct_eval_fit_regions()
+        except ValueError as e:
+            messagebox.showerror("Fit Regions", str(e))
+            return
+
         groups = self._ct_eval_groups_list(paired)
 
         predict = None
@@ -51357,6 +51413,7 @@ External Validation Performance (n={n_val}):
             Xp=Xp, Xs=Xs,
             wavelengths=np.asarray(paired.wavelengths, dtype=float),
             space=space, joins=joins, joins_source=joins_source, groups=groups,
+            fit_exclude=fit_exclude, fit_regions=fit_regions,
             predict=predict, model_wavelengths=model_wavelengths,
             ids=list(paired.ids), scale_note=scale_note,
             resample_note=self.ct_pair_resample_note,
@@ -51368,7 +51425,8 @@ External Validation Performance (n={n_val}):
         )
         args = dict(X_primary=Xp, X_satellite=Xs, predict=predict, ids=context['ids'],
                     groups=groups, wavelengths=context['wavelengths'], space=space,
-                    joins=joins, model_wavelengths=model_wavelengths)
+                    joins=joins, model_wavelengths=model_wavelengths,
+                    exclude=fit_exclude, fit_regions=fit_regions)
 
         self._ct_active_run_id = self._ct_run_seq
         self._ct_validate_running = True
@@ -51477,6 +51535,14 @@ External Validation Performance (n={n_val}):
         lines.append("Joins used: "
                      + (", ".join(f"{j:g}" for j in joins) + " nm" if joins else "none")
                      + f" (source: {source})")
+        if context.get('fit_exclude'):
+            lines.append("Physical-match fit regions: leaving out "
+                         + self._format_ct_regions(context['fit_exclude']))
+        elif context.get('fit_regions'):
+            lines.append("Physical-match fit regions: fitted only on "
+                         + self._format_ct_regions(context['fit_regions']))
+        else:
+            lines.append("Physical-match fit regions: all usable channels")
         for note in (context.get('resample_note'), context.get('scale_note')):
             if note:
                 lines.append(note)
@@ -58084,6 +58150,24 @@ External Validation Performance (n={n_val}):
         # written through the variable) must invalidate the board exactly
         # like the comboboxes above, or Fit keeps fitting under old joins.
         self.ct_eval_joins_custom_var.trace_add(
+            'write', lambda *_: self._on_ct_eval_settings_changed())
+        fit_regions_row = ttk.Frame(validate_section)
+        fit_regions_row.pack(fill='x', pady=(4, 0))
+        ttk.Label(fit_regions_row, text="Fit regions:",
+                  style='Caption.TLabel').pack(side='left', padx=(0, 4))
+        self.ct_eval_fit_regions_combo = ttk.Combobox(
+            fit_regions_row, textvariable=self.ct_eval_fit_regions_var,
+            state='readonly', width=22,
+            values=(self._CT_FIT_ALL, self._CT_FIT_WATER, self._CT_FIT_CUSTOM))
+        self.ct_eval_fit_regions_combo.pack(side='left', padx=(0, 6))
+        self.ct_eval_fit_regions_combo.bind(
+            '<<ComboboxSelected>>',
+            lambda e: self._on_ct_eval_settings_changed())
+        ttk.Label(fit_regions_row, text="Custom (nm ranges):",
+                  style='Caption.TLabel').pack(side='left', padx=(0, 4))
+        ttk.Entry(fit_regions_row, textvariable=self.ct_eval_fit_regions_custom_var,
+                  width=24).pack(side='left')
+        self.ct_eval_fit_regions_custom_var.trace_add(
             'write', lambda *_: self._on_ct_eval_settings_changed())
         self.ct_eval_joins_used_label = ttk.Label(
             validate_section, text="", style='Caption.TLabel',

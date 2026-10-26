@@ -354,3 +354,142 @@ def test_sigma_grid_must_be_finite():
     wl, Rp, Rs = _broadband_pair()
     with pytest.raises(ValueError, match="sigma_grid"):
         pm.estimate_physical_match(Rp, Rs, wl, space="reflectance", sigma_grid=[0.0, np.nan])
+
+
+# ---------------------------------------------------------------------------
+# Fit regions (F2 part 2b)
+# ---------------------------------------------------------------------------
+
+WET_GAIN = 0.35  # the water band changed by a different factor than the rest
+
+
+def _water_pair(n=20, seed=3):
+    """Primary = 0.8 x satellite everywhere except the 1450 nm water band (0.35 x)."""
+    wl = np.arange(1000.0, 1800.0)
+    rng = np.random.default_rng(seed)
+
+    def band(c, w):
+        return np.exp(-0.5 * ((wl[None, :] - c) / w) ** 2)
+
+    amp = rng.uniform(0.05, 0.25, (n, 4))
+    struct_ = sum(band(c, 18) * amp[:, [k]] for k, c in enumerate((1150, 1300, 1600, 1700)))
+    water = band(1450, 25) * rng.uniform(0.1, 0.4, (n, 1))
+    As = 0.3 + struct_ + water + rng.normal(0, 1e-4, (n, wl.size))
+    Ap = 0.3 + 0.8 * struct_ + WET_GAIN * water + rng.normal(0, 1e-5, (n, wl.size))
+    return wl, 10**-Ap, 10**-As
+
+
+def test_water_bands_preset_is_the_two_combination_bands():
+    assert pm.WATER_BANDS_NM == ((1380.0, 1500.0), (1880.0, 1990.0))
+
+
+def test_excluding_the_water_band_recovers_the_instrument_gain():
+    wl, Rp, Rs = _water_pair()
+    whole = pm.estimate_physical_match(Rp, Rs, wl, space="reflectance", sigma=0.0)
+    dry = pm.estimate_physical_match(
+        Rp, Rs, wl, space="reflectance", sigma=0.0, exclude=pm.WATER_BANDS_NM
+    )
+    assert dry["gain"][0] == pytest.approx(0.8, rel=0.03)
+    assert abs(whole["gain"][0] - 0.8) > 3 * abs(dry["gain"][0] - 0.8)
+    assert not dry["fit_mask"][(wl >= 1380) & (wl <= 1500)].any()
+
+
+def test_fit_regions_confine_the_fit_and_combine_with_exclude():
+    wl, Rp, Rs = _water_pair()
+    inc = pm.estimate_physical_match(
+        Rp, Rs, wl, space="reflectance", sigma=0.0, fit_regions=[(1100, 1330), (1560, 1760)]
+    )
+    assert inc["gain"][0] == pytest.approx(0.8, rel=0.03)
+    in_regions = ((wl >= 1100) & (wl <= 1330)) | ((wl >= 1560) & (wl <= 1760))
+    assert not (inc["fit_mask"] & ~in_regions).any() and inc["fit_mask"].sum() > 100
+    np.testing.assert_array_equal(inc["fit_regions"], [[1100, 1330], [1560, 1760]])
+    both = pm.estimate_physical_match(
+        Rp,
+        Rs,
+        wl,
+        space="reflectance",
+        sigma=0.0,
+        fit_regions=[(1100, 1760)],
+        exclude=[(1380, 1500)],
+    )
+    assert both["gain"][0] == pytest.approx(0.8, rel=0.03)
+    assert not both["fit_mask"][(wl >= 1380) & (wl <= 1500)].any()
+
+
+def test_regions_keep_a_derivative_window_away_from_left_out_data():
+    """The 31 nm derivative window is why a left-out region is widened by half of it."""
+    wl, Rp, Rs = _water_pair()
+    prm = pm.estimate_physical_match(
+        Rp, Rs, wl, space="reflectance", sigma=0.0, exclude=[(1380, 1500)]
+    )
+    half = 0.5 * sd.D2_WINDOW_NM
+    assert not prm["fit_mask"][(wl >= 1380 - half) & (wl <= 1500 + half)].any()
+    assert prm["fit_mask"][wl == 1360].all() and not prm["fit_mask"][wl == 1366].any()
+
+
+def test_fitted_gain_applies_to_the_excluded_channels_too():
+    wl, Rp, Rs = _water_pair()
+    prm = pm.estimate_physical_match(
+        Rp, Rs, wl, space="reflectance", sigma=0.0, exclude=pm.WATER_BANDS_NM
+    )
+    out = pm.apply_physical_match(Rs, prm, wl)
+    assert out.shape == Rs.shape and np.isfinite(out).all()
+    assert not np.allclose(out[:, wl == 1450], Rs[:, wl == 1450])
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"fit_regions": []},
+        {"exclude": []},
+        {"fit_regions": [(1500, 1400)]},
+        {"exclude": [(1400, np.nan)]},
+        {"fit_regions": [1100, 1300]},
+    ],
+)
+def test_malformed_regions_raise(kw):
+    wl, Rp, Rs = _water_pair(n=6)
+    with pytest.raises(ValueError, match="exclude|fit_regions"):
+        pm.estimate_physical_match(Rp, Rs, wl, space="reflectance", sigma=0.0, **kw)
+
+
+def test_regions_that_leave_nothing_to_fit_leave_the_block_unscaled():
+    wl, Rp, Rs = _water_pair()
+    prm = pm.estimate_physical_match(
+        Rp, Rs, wl, space="reflectance", sigma=0.0, fit_regions=[(1100, 1110)]
+    )
+    assert prm["featureless"][0] and prm["gain"][0] == 1.0
+    assert "too few usable wavelengths" in prm["notes"]
+
+
+def test_no_regions_means_empty_region_arrays():
+    wl, Rp, Rs = _water_pair()
+    a = pm.estimate_physical_match(Rp, Rs, wl, space="reflectance", sigma=0.0)
+    assert a["fit_regions"].shape == (0, 2) and a["exclude_regions"].shape == (0, 2)
+
+
+def test_water_bands_covered():
+    assert pm.water_bands_covered(np.arange(350.0, 2501.0))
+    assert pm.water_bands_covered(np.arange(1000.0, 1800.0))  # only the 1450 band
+    assert not pm.water_bands_covered(np.arange(1550.0, 1850.0))
+    assert not pm.water_bands_covered(np.arange(1450.0, 1900.0))  # clips both bands
+    assert not pm.water_bands_covered([])
+
+
+def test_regions_survive_save_and_load(tmp_path):
+    from spectral_predict.transfer_evaluation import TransferCandidate, fit_transfer
+
+    wl, Rp, Rs = _water_pair()
+    cand = TransferCandidate.make(
+        "physical", sigma=0.0, gain="per_block", exclude=((1380.0, 1500.0),)
+    )
+    tm = fit_transfer(cand, Rp, Rs, wavelengths=wl, space="reflectance", joins=None)
+    assert tm.meta["exclude_regions"] == [[1380.0, 1500.0]] and tm.meta["fit_regions"] == []
+    prefix = ct.save_transfer_model(tm, tmp_path, "w")
+    back = ct.load_transfer_model(prefix)
+    np.testing.assert_array_equal(back.params["exclude_regions"], [[1380.0, 1500.0]])
+    assert back.params["fit_regions"].shape == (0, 2)
+    assert back.meta["exclude_regions"] == [[1380.0, 1500.0]]
+    np.testing.assert_allclose(
+        ct.apply_transfer_dispatch(Rs, back), ct.apply_transfer_dispatch(Rs, tm)
+    )

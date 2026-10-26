@@ -767,6 +767,7 @@ def read_asd_dir(asd_dir, reader_mode="auto"):
     duplicate_stems = []
     skipped = []
     header_joins = {}
+    dn_joins = {}
     for asd_file in sorted(asd_files):
         stem = asd_file.stem
 
@@ -788,6 +789,7 @@ def read_asd_dir(asd_dir, reader_mode="auto"):
             if spectrum is not None:
                 spectra[stem] = spectrum
                 header_joins[stem] = _asd_header_joins(asd_file)  # None for ASCII files
+                dn_joins[stem] = _asd_dn_joins(asd_file)  # None unless raw DN + white reference
             else:
                 # A None return (SpecDAL failed/unavailable, or a binary layout this
                 # reader can't decode) means the file couldn't be read. Report it as a
@@ -859,16 +861,63 @@ def read_asd_dir(asd_dir, reader_mode="auto"):
         'x_unit_confidence': 95.0,
         'x_unit_detection_method': 'asd_native',
         'detector_joins': None,
+        'detector_joins_source': None,
     }
-    # Detector joins (splices) from the binary headers, only when every file read
-    # agrees; the SpecDAL path drops the header, so it is read separately.
-    kept = [header_joins.get(stem) for stem in df.index]
-    if kept and all(j is not None for j in kept) and len(set(kept)) == 1:
-        metadata['detector_joins'] = tuple(kept[0])
-    elif any(j is not None for j in kept):
-        print("  INFO: ASD headers list different detector joins; none recorded.")
+    joins, source = _resolve_asd_joins(
+        [header_joins.get(stem) for stem in df.index], [dn_joins.get(stem) for stem in df.index]
+    )
+    if joins is not None:
+        metadata['detector_joins'] = joins
+        metadata['detector_joins_source'] = source
+    elif any(header_joins.get(stem) is not None or dn_joins.get(stem) is not None
+             for stem in df.index):
+        print("  INFO: the ASD files list different detector joins; none recorded.")
 
     return df, metadata
+
+
+_DN_JOINS_AGREE_NM = 2.0
+
+
+def _resolve_asd_joins(header_list, dn_list):
+    """Detector joins for a folder of ASD files: ``(joins, source)`` or ``(None, None)``.
+
+    Per file the header's joins win when they lie inside the ASD join windows, else the
+    joins read from the raw white reference (``'dn'``). The folder gets joins only when
+    every file has some and they agree (header joins exactly, joins from raw readings
+    within 2 nm, which is one detector-edge channel of white-reference noise); mixed
+    sources report ``'mixed'``.
+    """
+    from .spectral_diagnostics import asd_joins_plausible
+
+    per_file = []
+    for head, dn in zip(header_list, dn_list):
+        if head is not None and asd_joins_plausible(head):
+            per_file.append((tuple(float(v) for v in head), "header"))
+        elif dn is not None:
+            per_file.append((tuple(float(v) for v in dn), "dn"))
+        else:
+            return None, None
+    if not per_file:
+        return None, None
+    sources = {src for _, src in per_file}
+    arr = np.array([j for j, _ in per_file])
+    tol = 0.0 if sources == {"header"} else _DN_JOINS_AGREE_NM
+    med = np.median(arr, axis=0)
+    if np.abs(arr - med).max() > tol:
+        return None, None
+    joins = tuple(float(v) for v in (arr[0] if sources == {"header"} else med))
+    return joins, (sources.pop() if len(sources) == 1 else "mixed")
+
+
+def _asd_dn_joins(asd_file):
+    """Splice wavelengths found in one raw ASD file's white reference, or None."""
+    from .spectral_diagnostics import read_asd_dn_joins
+
+    try:
+        return read_asd_dn_joins(asd_file)
+    except OSError:
+        return None
 
 
 def _asd_header_joins(asd_file):

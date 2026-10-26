@@ -98,10 +98,17 @@ PRIMITIVES: dict[str, list[str]] = {
         "detect_detector_joins",
         "resolve_joins",
         "read_asd_header_joins",
+        # F2 part 2b
+        "read_asd_dn_joins",
+        "detect_joins_from_white_reference",
+        "union_joins",
         "NoiseEstimate",
         "JoinDetection",
     ],
+    # F2 part 2b: fit regions for the physical match
+    "physical_match": ["water_bands_covered"],  # WATER_BANDS_NM is a constant
     "transfer_evaluation": [
+        "regions_tuple",
         "evaluate_transfer",
         "default_transfer_candidates",
         "fit_transfer",

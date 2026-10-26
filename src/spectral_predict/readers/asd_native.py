@@ -139,3 +139,56 @@ def read_binary_asd(asd_file):
         "  1. Export ASD files to ASCII format (.sig or ASCII .asd)\n"
         "  2. Install SpecDAL: pip install specdal\n"
     )
+
+
+# Modern raw (DN) files: as7 / as8 carry the sample DN block, a reference header, then the
+# white-reference DN block, all float64, after the same 484-byte header.
+_RAW_MAGICS = (b"as7", b"as8")
+_OFF_DATA_FORMAT = 199  # uint8: 2 = float64
+_REFERENCE_HEADER_BYTES = 20  # without the description; the description follows it
+
+
+def read_asd_white_reference(asd_file) -> tuple[np.ndarray, np.ndarray] | None:
+    """Wavelengths and white-reference DN stored in a raw modern ASD file.
+
+    Only files that hold raw digital numbers (data type 0, float64) with a stored white
+    reference are decoded: the as7 and as8 layouts. Everything else (legacy reflectance
+    files, ASCII exports, files without a stored reference, other versions, anything
+    truncated or inconsistent) returns ``None``; this reader never raises on content.
+
+    Args:
+        asd_file: Path to a candidate ASD file.
+
+    Returns:
+        ``(wavelengths_nm, white_reference_dn)``, each (channels,), or ``None``.
+    """
+    try:
+        raw = Path(asd_file).read_bytes()
+    except OSError:
+        return None
+    if len(raw) < _HEADER_BYTES or raw[:3] not in _RAW_MAGICS or raw[3] != 0:
+        return None
+    if raw[_OFF_DATA_TYPE] != 0 or raw[_OFF_DATA_FORMAT] != 2:
+        return None
+    ch1 = struct.unpack_from("<f", raw, _OFF_CH1_WAVELENGTH)[0]
+    step = struct.unpack_from("<f", raw, _OFF_WAVELENGTH_STEP)[0]
+    n = struct.unpack_from("<H", raw, _OFF_CHANNELS)[0]
+    if not (np.isfinite(ch1) and np.isfinite(step)) or step <= 0 or n < 2:
+        return None
+    ref_hdr = _HEADER_BYTES + 8 * n
+    if len(raw) < ref_hdr + _REFERENCE_HEADER_BYTES:
+        return None
+    if raw[:3] == b"as7":
+        if raw[ref_hdr] != 1:
+            return None
+        desc_len = struct.unpack_from("<H", raw, ref_hdr + 17)[0]
+    else:
+        if struct.unpack_from("<H", raw, ref_hdr)[0] != 0xFFFF:
+            return None
+        desc_len = struct.unpack_from("<H", raw, ref_hdr + 18)[0]
+    white_off = ref_hdr + _REFERENCE_HEADER_BYTES + desc_len
+    if len(raw) < white_off + 8 * n:
+        return None
+    white = np.frombuffer(raw, dtype="<f8", count=n, offset=white_off).astype(np.float64)
+    wl = ch1 + step * np.arange(n, dtype=np.float64)
+    return wl, white

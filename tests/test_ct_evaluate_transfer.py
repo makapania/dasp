@@ -720,3 +720,95 @@ def test_grouped_fold_that_cannot_be_fitted_is_an_error_and_sorts_last():
     assert np.isnan(row["RMSD_vs_primary_grouped"]) and np.isnan(row["improvement"])
     assert ev.leaderboard.iloc[-1]["method"] == "pds"
     assert any("fewer than 3 standards" in w for w in ev.warnings)
+
+
+# ---------------------------------------------------------------------------
+# F2 part 2b: fit regions on the board
+# ---------------------------------------------------------------------------
+
+WATER_LABEL = "Physical match (learned blur, gain per block, water bands excluded)"
+
+
+def _wet_pair(n=14, wl=None, seed=5):
+    wl = np.arange(1000.0, 2000.0) if wl is None else wl
+    rng = np.random.default_rng(seed)
+
+    def band(c, w):
+        return np.exp(-0.5 * ((wl[None, :] - c) / w) ** 2)
+
+    struct_ = sum(
+        band(c, 18) * rng.uniform(0.05, 0.25, (n, 1)) for c in (1150, 1300, 1650, 1750, 2000)
+    )
+    water = band(1450, 25) * rng.uniform(0.1, 0.5, (n, 1)) + band(1940, 25) * rng.uniform(
+        0.1, 0.5, (n, 1)
+    )
+    As = 0.3 + struct_ + water + rng.normal(0, 1e-4, (n, wl.size))
+    Ap = 0.3 + 0.8 * struct_ + 0.3 * water + rng.normal(0, 1e-5, (n, wl.size))
+    return wl, 10**-Ap, 10**-As
+
+
+def test_board_adds_the_water_excluded_candidate_when_the_bands_are_covered():
+    wl, Rp, Rs = _wet_pair()
+    ev = evaluate_transfer(Rp, Rs, wavelengths=wl, space="reflectance", joins=None)
+    assert WATER_LABEL in ev.candidates
+    cand = ev.candidates[WATER_LABEL]
+    assert cand.settings["exclude"] == ((1380.0, 1500.0), (1880.0, 1990.0))
+    # the gain is fitted on the structural bands only: it recovers the instrument's 0.8
+    fitted = fit_transfer(cand, Rp, Rs, wavelengths=wl, space="reflectance", joins=None)
+    plain = fit_transfer(
+        ev.candidates["Physical match (learned blur, gain per block)"],
+        Rp,
+        Rs,
+        wavelengths=wl,
+        space="reflectance",
+        joins=None,
+    )
+    assert fitted.params["gain"][0] == pytest.approx(0.8, rel=0.05)
+    assert abs(plain.params["gain"][0] - 0.8) > 3 * abs(fitted.params["gain"][0] - 0.8)
+
+
+def test_board_has_no_water_candidate_without_the_bands_or_a_grid():
+    wl, Rp, Rs = _wet_pair(wl=np.arange(1550.0, 1850.0))
+    ev = evaluate_transfer(Rp, Rs, wavelengths=wl, space="reflectance", joins=None)
+    assert not any("water" in lab for lab in ev.candidates)
+    assert not any(
+        "water" in c.label for c in default_transfer_candidates(10, has_y=False, has_predict=False)
+    )
+
+
+def test_explicit_regions_apply_to_every_default_physical_row_and_replace_the_extra():
+    wl, Rp, Rs = _wet_pair()
+    ev = evaluate_transfer(
+        Rp, Rs, wavelengths=wl, space="reflectance", joins=None, exclude=[(1380, 1500)]
+    )
+    phys = [c for c in ev.candidates.values() if c.method == "physical"]
+    assert len(phys) == 3 and all(c.settings["exclude"] == ((1380.0, 1500.0),) for c in phys)
+    assert all("excluding 1380-1500 nm" in c.label for c in phys)
+    ev = evaluate_transfer(
+        Rp, Rs, wavelengths=wl, space="reflectance", joins=None, fit_regions=[(1100, 1350)]
+    )
+    phys = [c for c in ev.candidates.values() if c.method == "physical"]
+    assert all(c.settings["fit_regions"] == ((1100.0, 1350.0),) for c in phys)
+    assert all("fitted on 1100-1350 nm" in c.label for c in phys)
+
+
+def test_regions_without_a_grid_raise():
+    Xp, Xs = _pair(n=6)
+    with pytest.raises(ValueError, match="wavelengths and space"):
+        evaluate_transfer(Xp, Xs, exclude=[(1380, 1500)])
+
+
+def test_fit_transfer_records_the_regions_in_the_model_meta():
+    wl, Rp, Rs = _wet_pair()
+    cand = TransferCandidate.make(
+        "physical", sigma=0.0, gain="per_block", fit_regions=((1100.0, 1350.0),)
+    )
+    tm = fit_transfer(cand, Rp, Rs, wavelengths=wl, space="reflectance", joins=None)
+    assert tm.meta["fit_regions"] == [[1100.0, 1350.0]] and tm.meta["exclude_regions"] == []
+    assert "fitted on 1100-1350 nm" in tm.meta["candidate"]
+
+
+@pytest.mark.parametrize("bad", [((1400.0, 1380.0),), (), ((1.0,),), "water"])
+def test_candidate_rejects_malformed_regions(bad):
+    with pytest.raises(ValueError, match="exclude"):
+        TransferCandidate.make("physical", sigma=0.0, exclude=bad)
