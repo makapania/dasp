@@ -448,8 +448,10 @@ def estimate_physical_match(
     Xp, A_p = _fill_invalid(Xp, A_p, valid_p, wl, space, blocks)
     Xs, A_s = _fill_invalid(Xs, A_s, valid_s, wl, space, blocks)
     bad = ~(valid_p.all(axis=0) & valid_s.all(axis=0))
-    # the D2 window is rounded to whole channels, so reach one channel further
-    valid = ~_dilate(bad, wl, 0.5 * sd.D2_WINDOW_NM + float(np.max(np.diff(wl))))
+    # the D2 window is rounded to whole channels, so reach one channel further (the
+    # largest spacing inside a block: a gap at a join is not a channel)
+    reach = 0.5 * sd.D2_WINDOW_NM + max(sd.block_step(wl, s) for s in blocks)
+    valid = ~_dilate(bad, wl, reach)
     ne_p = sd.estimate_noise(A_p, wl, joins)
     ne_s = sd.estimate_noise(A_s, wl, joins)
     noisy = sd.regions_mask(
@@ -461,7 +463,11 @@ def estimate_physical_match(
     if fit_list is not None:
         excl |= ~sd.regions_mask(fit_list, wl)
     # a channel's 31 nm derivative must not reach into the left-out data
-    excl = _dilate(excl, wl, 0.5 * sd.D2_WINDOW_NM + float(np.max(np.diff(wl))))
+    excl = _dilate(excl, wl, reach)
+    # blocks whose every usable channel the regions leave out get no correction at all
+    left_out = np.array(
+        [(valid[s] & excl[s]).any() and not (valid[s] & ~excl[s]).any() for s in blocks]
+    )
 
     grid = tuple(sorted(float(v) for v in (SIGMA_GRID_NM if sigma_grid is None else sigma_grid)))
     if not grid or not np.all(np.isfinite(grid)) or grid[0] < 0:
@@ -525,7 +531,10 @@ def estimate_physical_match(
         lo, hi = float(wl[blocks[b]][0]), float(wl[blocks[b]][-1])
         if fit is None:
             feat[b] = True
-            notes.append(f"{lo:g}-{hi:g} nm: too few usable wavelengths to fit; left unscaled.")
+            if left_out[b]:
+                notes.append(f"{lo:g}-{hi:g} nm: outside the fit regions; not corrected.")
+            else:
+                notes.append(f"{lo:g}-{hi:g} nm: too few usable wavelengths to fit; left unscaled.")
             continue
         snr[b] = fit.snr()
         if snr[b] < FEATURELESS_SNR:
@@ -572,20 +581,18 @@ def estimate_physical_match(
         for b in terms:
             gains[b] = pooled
     if featureless == "pooled" and pooled is not None:
-        gains[feat] = pooled
+        gains[feat & ~left_out] = pooled
 
     offsets = np.zeros(B)
     for b, slc in enumerate(blocks):
         A_t = _transform_block(Xs[:, slc], wl[slc], space, float(sig[b]), float(sh[b]))
-        # A block without fit channels takes its offset from the usable channels the user
-        # did not leave out. A block the regions leave out entirely, and that is otherwise
-        # untouched (gain 1, no blur), is not corrected at all.
+        if left_out[b]:
+            continue
+        # a block without fit channels takes its offset from the channels not left out
         m = fit_mask[slc]
         if not m.any():
             m = valid[slc] & ~excl[slc]
         if not m.any():
-            if (valid[slc] & excl[slc]).any() and gains[b] == 1.0 and sig[b] == 0.0:
-                continue
             m = valid[slc]
         if not m.any():
             m = np.ones(slc.stop - slc.start, dtype=bool)

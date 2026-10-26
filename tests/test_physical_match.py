@@ -511,3 +511,32 @@ def test_regions_survive_save_and_load(tmp_path):
     np.testing.assert_allclose(
         ct.apply_transfer_dispatch(Rs, back), ct.apply_transfer_dispatch(Rs, tm)
     )
+
+
+def test_a_block_left_out_stays_uncorrected_with_pooled_gain():
+    wl, Rp, Rs = _water_pair()
+    prm = pm.estimate_physical_match(
+        Rp,
+        Rs,
+        wl,
+        space="reflectance",
+        sigma=0.0,
+        joins=(1300.0,),
+        fit_regions=[(1500, 1750)],
+        featureless="pooled",
+    )
+    assert prm["gain"][0] == 1.0 and prm["offset"][0] == 0.0
+    assert "outside the fit regions" in prm["notes"]
+
+
+def test_a_gap_at_a_join_does_not_widen_left_out_regions():
+    """Excluding 10 nm next to a 300 nm gap between blocks leaves the rest of the block in."""
+    wl, Rp, Rs = _water_pair()
+    keep = (wl <= 1200) | (wl >= 1500)
+    wl, Rp, Rs = wl[keep], Rp[:, keep], Rs[:, keep]
+    prm = pm.estimate_physical_match(
+        Rp, Rs, wl, space="reflectance", sigma=0.0, joins=(1200.0,), exclude=[(1100, 1110)]
+    )
+    first = wl <= 1200
+    assert prm["fit_mask"][first].sum() > 80
+    assert prm["gain"][0] == pytest.approx(0.8, rel=0.03)

@@ -714,8 +714,12 @@ def detect_joins_from_white_reference(
         ks = np.flatnonzero((wl[:-1] >= lo) & (wl[1:] <= hi))
         if ks.size < 3:
             return None
+        a, c = dn[ks], dn[ks + 1]
+        # a dead (zero or non-finite) channel is not a join: rank only jumps between two
+        # live readings
+        live = np.isfinite(a) & np.isfinite(c) & (a > 0) & (c > 0)
         with np.errstate(divide="ignore", invalid="ignore"):
-            jumps = np.abs(dn[ks + 1] - dn[ks]) / np.abs(dn[ks])
+            jumps = np.where(live, np.abs(c - a) / np.where(live, a, 1.0), np.nan)
         finite = jumps[np.isfinite(jumps)]
         if finite.size < 3:
             return None

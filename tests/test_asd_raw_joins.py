@@ -216,3 +216,10 @@ def test_example_files_keep_their_header_joins():
     _, meta = read_asd_dir(str(Path(__file__).resolve().parents[1] / "example"))
     assert meta["detector_joins"] == (1000.0, 1800.0)
     assert meta["detector_joins_source"] == "header"
+
+
+@pytest.mark.parametrize("dead", [0.0, np.nan, -5.0])
+def test_a_dead_white_reference_channel_is_not_a_join(dead):
+    white = _white()
+    white[WL == 980.0] = dead
+    assert sd.detect_joins_from_white_reference(WL, white) == (1000.0, 1800.0)
