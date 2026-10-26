@@ -1286,3 +1286,40 @@ is `planning/08_transfer.md` there.
   guard but not the launch bookkeeping. `_captured_validate_run` / new `_captured_fit_run` (patch
   only the completion handler, workers inline) launch real runs with callbacks withheld — both
   launches in both stale tests now go through the real `_run_ct_validate` / `_fit_ct_selected`.
+
+## 2026-10-26 - F2 part 2b (fit regions, joins from raw DN) - acceptance and gotchas
+- **Real as7 headers have comment text right after the magic.** `read_asd_header_joins` required a NUL at byte 3
+  (to tell legacy `ASD\0` from an ASCII "ASD ..." export) and so would have rejected any as2-as8 file with a
+  non-empty comment; the new white-reference reader first failed on the Trek files for the same reason (synthetic
+  test files had a NUL there). Only the legacy `ASD` magic needs the NUL now. Lesson: build synthetic binary
+  headers with realistic comment bytes.
+- **Joins from raw DN:** `read_asd_dir` on the 33 Trek as7 files now gives (1000, 1785) with source `dn`; FS3 .NNN
+  and the LabSpec as8 folders (std and hi) give (1000, 1800) with source `header`, unchanged.
+- **Beasley FS3 <-> Trek, grouped leave-one-bone-out RMSD (slope), physical match gain per block, joins = union
+  of both instruments' (1000, 1785, 1800) or the satellite's own: identical to two decimals, so the union does
+  no harm.** Whole-block row reproduces the 2026-10-16 report (cons3 0.87 / 1.02). Water bands excluded
+  (new board row):
+
+  | model | No correction | whole block | water out (Trek to FS3) | whole block | water out (FS3 to Trek) |
+  |---|---|---|---|---|---|
+  | cons3 | 1.40 | 0.87 | 0.81 | 1.02 | 1.18 |
+  | oh1545 | 1.18 | 1.70 | 1.27 | 1.70 | 1.25 |
+  | oh2045 | 2.16 | 0.93 | 1.09 | 1.31 | 1.91 |
+  | ryder2045 | 1.10 | 0.91 | 0.77 | 1.03 | 0.94 |
+  | nh3oh | 1.26 | 0.88 | 0.81 | 1.00 | 1.06 |
+  | snv1500 | 0.98 | 0.98 | 0.99 | 0.99 | 0.98 |
+
+  Reading: excluding the water bands removes most of the oh1545 harm (1.70 to 1.27 / 1.25) but does not get it
+  under No correction (1.18): it is still slightly worse, and the board's "No method beat No correction" still
+  fires. For the 2045 models the picture splits by direction: Trek to FS3 keeps most of the gain (oh2045 2.16 to
+  1.09), FS3 to Trek loses most of it (2.16 to 1.91; slope 0.71). The 2026-10-16 report already said the SWIR2 gain
+  (0.779) matches the 1930 nm water ratio, so on this pair the water band IS the instrument difference for those
+  models; the board decides per model and direction, nothing is switched on silently.
+- **40 LabSpec pairs** (hi to std and std to hi, groups P/T, M2045 / water-removed / M1500): the default rows are
+  identical between main and this branch (max |diff| 0.0 over all 12 compared rows), as they must be, since
+  nothing changes without fit regions. The new water-excluded row is worse there, as expected for instruments
+  that scale water and collagen together: M2045 3.39 vs 3.12 (hi to std), 6.21 vs 5.46 (std to hi); M1500 5.28 vs
+  3.53 and 6.27 vs 4.93 (M1500 reads next to the 1450 band). Grouped scoring keeps the whole-block row on top.
+- Acceptance scripts lived in the session scratchpad (`f2p2b/accept_beasley.py`, `accept_labspec.py`); data were
+  read in place and nothing was copied into the repo.
+

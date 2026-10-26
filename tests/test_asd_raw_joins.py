@@ -119,7 +119,9 @@ def test_resolve_joins_order_user_header_dn_detected():
     wl = WL
     dn = (1000.0, 1785.0)
     head = (1000.0, 1800.0)
-    assert sd.resolve_joins(wl, user_joins=(990.0,), header_joins=head, dn_joins=dn).source == "user"
+    assert (
+        sd.resolve_joins(wl, user_joins=(990.0,), header_joins=head, dn_joins=dn).source == "user"
+    )
     res = sd.resolve_joins(wl, header_joins=head, dn_joins=dn)
     assert (res.source, res.joins) == ("header", head)
     assert res.warnings and "raw readings" in res.warnings[0]

@@ -680,9 +680,7 @@ def asd_joins_plausible(joins: Sequence[float] | None) -> bool:
     """Whether ``joins`` are two finite wavelengths, one inside each ASD join window."""
     if joins is None or len(joins) != len(ASD_JOIN_WINDOWS_NM):
         return False
-    return all(
-        np.isfinite(j) and lo <= j <= hi for j, (lo, hi) in zip(joins, ASD_JOIN_WINDOWS_NM)
-    )
+    return all(np.isfinite(j) and lo <= j <= hi for j, (lo, hi) in zip(joins, ASD_JOIN_WINDOWS_NM))
 
 
 def detect_joins_from_white_reference(

@@ -81,9 +81,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.joins == "none":
         joins = None
     elif args.joins == "header":
-        joins = (
-            union_joins(meta_s.get("detector_joins"), meta_p.get("detector_joins")) or "auto"
-        )
+        joins = union_joins(meta_s.get("detector_joins"), meta_p.get("detector_joins")) or "auto"
     exclude = fit_regions = None
     if args.fit_regions == "water":
         exclude = WATER_BANDS_NM

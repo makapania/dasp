@@ -4,7 +4,14 @@
 
 ## ▶ NEXT SESSION — START HERE (hand-off updated 2026-10-17)
 
-### 0. NOW (2026-10-17): Wave 3 — F2 part 1 (PR #97), 1b (PR #98) and part 2 (PR #99, `b7f6534`) MERGED; next is F2 part 2b
+### 0. NOW (2026-10-26): F2 part 2b built on branch `feat/f2-part2b` (not merged); then F1 part 1
+**F2 part 2b** (plan `docs/plans/2026-10-17-F2-part2b-transfer-fit-regions-dn-joins.md`, "As built" block at the top):
+physical-match `fit_regions=` / `WATER_BANDS_NM` / water-excluded board row / CT Validate "Fit regions" control, and
+detector joins from raw ASD white-reference DN (`metadata['detector_joins_source']` header / dn), blocks on the union of
+both instruments' joins. Acceptance and the misses (oh1545 still slightly above No correction; FS3 to Trek oh2045 loses
+its gain with water out): SESSION_LOG 2026-10-26.
+
+### 0-old. (2026-10-17): Wave 3 — F2 part 1 (PR #97), 1b (PR #98) and part 2 (PR #99, `b7f6534`) MERGED
 Wave 1 + 2 (PRs #83-#96) are merged; their summary is in the archive (Batch 2). Wave 3 order (§0a): F2 part 1 ✔ →
 F2 part 1b ✔ → F2 part 2 ✔ → F2 part 2b → F1 part 1 (CVPlan) → F4/CS1/F3/F5/MW1/SP1-2. No open branches.
 **F2 part 1** (plan `docs/plans/2026-10-05-F2-part1-transfer-validation-backend.md`): `transfer_evaluation`

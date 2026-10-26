@@ -633,8 +633,10 @@ def evaluate_transfer(
     excl_t = regions_tuple(exclude)
     fit_t = regions_tuple(fit_regions)
     if (excl_t or fit_t) and (wl is None or space is None):
-        raise ValueError("exclude and fit_regions apply to the physical match, which needs "
-                         "wavelengths and space")
+        raise ValueError(
+            "exclude and fit_regions apply to the physical match, which needs "
+            "wavelengths and space"
+        )
     if candidates is None:
         have_phys = wl is not None and space is not None
         candidates = default_transfer_candidates(
@@ -648,9 +650,11 @@ def evaluate_transfer(
         if excl_t or fit_t:
             extra = {k: v for k, v in (("exclude", excl_t), ("fit_regions", fit_t)) if v}
             candidates = [
-                TransferCandidate.make(c.method, **{**c.settings, **extra})
-                if c.method == "physical"
-                else c
+                (
+                    TransferCandidate.make(c.method, **{**c.settings, **extra})
+                    if c.method == "physical"
+                    else c
+                )
                 for c in candidates
             ]
     cand_list = list(dict.fromkeys(candidates))
