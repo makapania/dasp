@@ -4,7 +4,15 @@
 
 ## ▶ NEXT SESSION — START HERE (hand-off updated 2026-10-26)
 
-### 0. NOW (2026-10-26): F2 part 2b MERGED (PR #100); next is F1 part 1 (CVPlan / grouped CV)
+### 0. NOW (2026-10-26): F2 part 2b MERGED (PR #100); NEXT = fix the XGBoost worker-pool crash (§4 item 2, diagnosed)
+**Next session, in order:** (1) the CV pool memory cap that fixes the hanging booster test (diagnosis and fix design
+in §4 item 2; no code written yet). (2) Optional: a Codex review with **GPT Sol 6.1** of everything merged on
+2026-10-26 (`4398076..b59b77c`); the user asked whether that was done. It was not: Codex ran only on F2 part 2b, on
+gpt-6-astra, and never saw the fixes for its own findings (`81da947`) or PR #101. Check the exact Sol model id first.
+(3) Then the rest of Wave 3 (F4/CS1/F3/F5/MW1/SP1-2). **F1 grouped CV is deprioritised** (user, 2026-10-26: "not a very
+big deal"; the GUI has no way to mark replicate specimens, and agents can already own grouped CV from Python per
+AGENT_COMPOSITION §4). Keep F1 on the list as agent-facing plumbing; don't start it ahead of the items above.
+
 **F2 part 2b** (plan `docs/plans/2026-10-17-F2-part2b-transfer-fit-regions-dn-joins.md`, "As built" block at the top):
 physical-match `fit_regions=` / `WATER_BANDS_NM` / water-excluded board row / CT Validate "Fit regions" control, and
 detector joins from raw ASD white-reference DN (`metadata['detector_joins_source']` header / dn), blocks on the union of
@@ -110,15 +118,28 @@ selection, SP1/SP2 PLS kernel and SPA. Structural enablers ST1a/ST2/ST4 whenever
 ### 4. Queued work
 1. **T-51 next:** PR E, then F (one-class clamp; F needs its own approval). PR D is merged.
 2. **Smaller follow-ups:**
-   - **Already failing on `main` — FIX NEXT (user, 2026-10-26):**
+   - **FIX NEXT (user, 2026-10-26): XGBoost crashes in big loky pools — DIAGNOSED, not fixed.** Symptom:
      `tests/gui/test_tab7_booster_round_selection.py::test_tab7_log_transform_booster_saves_the_cv_model_in_original_units`
-     hangs until pytest-timeout kills the run, with "Windows fatal exception: access violation" in xgboost inside
-     joblib workers (stack ends in `joblib/parallel.py` `_retrieve`). Seen on main twice on 2026-10-26 (once by its file
-     alone) and on the F2 part 2b branch; both times the machine was busy, so first try it alone on an idle machine.
-     Probably new since 2026-10-17, when the full suite passed. Check xgboost `n_jobs` against the joblib/loky
-     workers (thread oversubscription) and whether the log-y-transform refit path differs from the passing
-     early-stopping tests. While it hangs, run suites with `--ignore=tests/gui/test_tab7_booster_round_selection.py`,
-     and after any timeout stop the orphaned loky workers (parent gone, 100% CPU). SESSION_LOG 2026-10-26.
+     hangs (fails alone too) with "Windows fatal exception: access violation" in xgboost `DMatrix.__init__` inside
+     loky workers; loky respawns the crashing workers, and the run leaves dozens of orphans at 100% CPU.
+     **Cause (reproduced with plain sklearn + XGBoost, no dasp code):** too many worker processes for the free
+     Windows commit memory. The test's Tab 7 refit draws a validation curve (`diagnostics.compute_sklearn_validation_
+     curve`, 9 points x 3 folds = 27 fits); `parallel_policy.plan_cv` sizes the pool as `min(n_splits,
+     physical_cores())` = 24 on this 24-core box. One XGBoost worker commits ~670 MB (even with OMP/BLAS at 1 thread);
+     with 16.8 GB commit free (Roblox Studio, Edge etc. open), XGBoost with `validation_curve(n_jobs=N)` passed at
+     N <= 16 and crashed at N = 20, 23, 24. Ridge with 24 workers is fine. That's why it passed on 2026-10-17 and
+     why it got worse on a busy machine. **User-facing too** (source install): any CV of an XGBoost model with >= ~20
+     fits (Tab 7 curve, LOO) can start 24 workers. The frozen bundle uses the threading backend and should be safe.
+     **Planned fix** (`src/spectral_predict/parallel_policy.py::plan_cv`, the one place that sizes pools): for the
+     loky backend only, cap `workers` at `floor(0.75 * available_commit / 1 GiB)` (at least 1). Read available commit on
+     Windows with ctypes `GlobalMemoryStatusEx().ullAvailPageFile` (no new dependency; elsewhere leave uncapped or use
+     `psutil.virtual_memory().available` if psutil is already a dependency, which it is not in pyproject). Make the probe
+     a small patchable function, add tests in `tests/test_parallel_policy.py` (cap binds with low commit, is a no-op
+     with plenty, never for threading), then rerun the booster file and the full suite. Repro scripts were in the
+     session scratchpad (gone); rebuild from SESSION_LOG 2026-10-26. Until fixed, run suites with
+     `--ignore=tests/gui/test_tab7_booster_round_selection.py` and stop orphaned loky workers (parent gone) after
+     any timeout.
+   - **Already failing on `main` (older; it passed in the 2026-10-26 suite runs, so recheck and drop if it holds):**
      `tests/gui/test_multiclass_gui.py::test_run_analysis_accepts_multiclass_engine_selection`
      (the worker never starts). Its `_FakeThread` accepts no `kwargs`; it probably predates #79's
      launch changes, but this is unverified. Found by the full GUI suite on 2026-09-27.

@@ -1344,3 +1344,20 @@ is `planning/08_transfer.md` there.
   lines); a line-range `sed -i ...d` turned the diff into a whole-file rewrite. Check `git diff --stat` after any
   shell edit of the GUI file and restore CRLF (`b.replace(b'\n', b'\r\n')` in Python) or use the Edit tool.
   (Found while deleting the unwired File Equalize / `_load_and_predict_ct` code, 2026-10-26.)
+- **Root cause of the tab7 booster hang (diagnosed late 2026-10-26, not yet fixed; supersedes "load, not code"
+  above).** Steps that narrowed it: (1) stubbing `diagnostics.compute_sklearn_validation_curve` with a capturing
+  plugin made the test pass in 5 s, so the Tab 7 validation curve is the only crashing step; (2) replaying the
+  captured TTR(Pipeline(XGBRegressor)) curve in a fresh process crashed too, independent of every XGBoost setting
+  and of array order; (3) plain `validation_curve(XGBRegressor(n_jobs=1), ..., n_jobs=N)` on 45 x 120 random data,
+  no dasp code: N = 4/8/12/16 ok, N = 20/23/24 access violation; Ridge at N = 24 ok. One XGBoost worker commits
+  ~670 MB with OMP/BLAS at 1 thread (~2.1 GB without the caps); commit free was 16.8 GB of 67.5 GB with other apps
+  open. So: pool size x per-worker commit exceeds the commit limit, and XGBoost's allocation failure surfaces as
+  an access violation. `plan_cv` gives 24 workers for 27 fits on this 24-core machine. Fix design in PROJECT_STATUS
+  §4 item 2 (cap loky workers by available commit via `GlobalMemoryStatusEx`). Imports (lightgbm, catboost,
+  spectral_predict.*), OMP settings, memmapped inputs and the TTR wrapper were all ruled out.
+- **Grouped CV vs averaging replicates (user question, 2026-10-26).** Both are accepted practice; what is not OK is
+  replicates of one specimen split across folds. Averaging replicates first (one row per specimen) is simple,
+  robust and standard in chemometrics when predictions will also be made from averaged scans. Grouped CV is the
+  choice when the model is trained on single scans (future predictions from one scan) or when the structure is
+  bigger than replicates (sites, batches, sessions: leave-one-group-out), which averaging cannot fix. The user
+  deprioritised F1 (agents can already run grouped CV from Python).
