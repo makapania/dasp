@@ -1332,7 +1332,11 @@ is `planning/08_transfer.md` there.
   in-block step (this also applies to the pre-existing dead-channel widening); (3) under `featureless='pooled'` a
   block the fit regions leave out entirely still got the pooled gain plus an offset fitted on excluded channels;
   such blocks are now tracked as `left_out` and stay uncorrected ("outside the fit regions; not corrected").
-- **Flaky xgboost hang is load, not code.** The tab7 booster / early-stopping tests (`tests/gui/test_tab7_*`,
-  `tests/test_class_weight_sister_sites.py`) time out with "Windows fatal exception: access violation" inside
-  joblib workers when another pytest run is going on the same machine. Alone they pass on main and on this
-  branch (44 passed both). Don't run two suites at once; rerun these alone before calling them broken.
+- **xgboost tab7 hang, and the orphaned workers it leaves.**
+  `tests/gui/test_tab7_booster_round_selection.py::test_tab7_log_transform_booster_saves_the_cv_model_in_original_units`
+  times out ("Windows fatal exception: access violation" inside joblib workers) on main as well as on this branch,
+  including when its file runs alone, so it is not from F2. Other xgboost files (`test_class_weight_sister_sites.py`,
+  `tests/gui/test_tab7_y_transform_save.py`) passed alone on both (44 each) but hung inside busier runs. pytest-timeout
+  on Windows kills the whole process, and the **loky workers of the killed run stay alive, orphaned, at 100% CPU**: on
+  2026-10-26 six of them burned ~14 h of CPU each and slowed every later run. After any timeout, stop python.exe loky
+  workers whose parent is gone. F2 part 2b's suite ran with that file ignored. Open: diagnose the hang on main.
