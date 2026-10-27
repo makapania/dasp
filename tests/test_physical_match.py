@@ -458,7 +458,8 @@ def test_regions_that_leave_nothing_to_fit_leave_the_block_unscaled():
         Rp, Rs, wl, space="reflectance", sigma=0.0, fit_regions=[(1100, 1110)]
     )
     assert prm["featureless"][0] and prm["gain"][0] == 1.0
-    assert "too few usable wavelengths" in prm["notes"]
+    assert "outside the fit regions; not corrected" in prm["notes"]
+    assert prm["offset"][0] == 0.0
 
 
 def test_empty_exclude_leaves_nothing_out():

@@ -11,10 +11,12 @@
 > - Decision the plan left open: left-out regions are widened (and fit regions narrowed) by half the 31 nm
 >   derivative window plus one channel, for `exclude` as well as `fit_regions`, so no fitted channel's derivative
 >   reads excluded data. This also tightens the existing `exclude=` slightly (it used to mask only the listed
->   channels). Custom regions are an include list ("fit only on").
+>   channels). Custom regions are an include list ("fit only on"). The widening reaches the largest in-block
+>   step, never a gap at a join. A block the regions leave out entirely gets no correction (gain 1, no blur,
+>   offset 0), also under `featureless='pooled'`; an empty `exclude` is a no-op.
 > - Option 2: `readers.asd_native.read_asd_white_reference` (as7/as8 raw DN), `spectral_diagnostics.
 >   detect_joins_from_white_reference` / `read_asd_dn_joins` (largest relative white-reference DN jump in the
->   950-1050 and 1700-1900 nm windows, at least 3x the window median and at least 0.01), `resolve_joins(dn_joins=)`
+>   950-1050 and 1700-1900 nm windows between two live readings, at least 3x the window median and at least 0.01), `resolve_joins(dn_joins=)`
 >   (user > header > dn > detected), `union_joins`. `read_asd_dir` reports `metadata['detector_joins_source']`:
 >   `'header'` (plausible header: each join inside its window), `'dn'`, or `'mixed'`; files must agree (header
 >   exactly, DN within 2 nm) or nothing is recorded. The GUI's "ASD file header" option uses the union of the two

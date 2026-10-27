@@ -1323,3 +1323,16 @@ is `planning/08_transfer.md` there.
 - Acceptance scripts lived in the session scratchpad (`f2p2b/accept_beasley.py`, `accept_labspec.py`); data were
   read in place and nothing was copied into the repo.
 
+- **Review (GLM 5.3 via zcode, then Codex gpt-6-astra).** GLM: MERGE, three lows, all fixed in `58129f4` (empty
+  `exclude=` raised instead of being a no-op; a block with no fit channels took its offset from excluded
+  channels; the header-vs-DN warning missed differing join counts). Codex: MERGE AFTER FIXES, three mediums, all
+  fixed in `81da947`: (1) a dead (zero) white-reference channel gave a relative jump of 1 and beat the real join,
+  so only jumps between two live readings are ranked now; (2) the derivative-window reach used `max(diff(wl))`
+  over the whole grid, so a gap between blocks (allowed at a join) blanked a whole block; it now uses the largest
+  in-block step (this also applies to the pre-existing dead-channel widening); (3) under `featureless='pooled'` a
+  block the fit regions leave out entirely still got the pooled gain plus an offset fitted on excluded channels;
+  such blocks are now tracked as `left_out` and stay uncorrected ("outside the fit regions; not corrected").
+- **Flaky xgboost hang is load, not code.** The tab7 booster / early-stopping tests (`tests/gui/test_tab7_*`,
+  `tests/test_class_weight_sister_sites.py`) time out with "Windows fatal exception: access violation" inside
+  joblib workers when another pytest run is going on the same machine. Alone they pass on main and on this
+  branch (44 passed both). Don't run two suites at once; rerun these alone before calling them broken.
