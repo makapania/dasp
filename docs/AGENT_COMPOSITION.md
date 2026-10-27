@@ -648,8 +648,9 @@ ev = evaluate_transfer(
     groups=unit_of_each_standard,          # instrument unit, session or batch
     wavelengths=paired.wavelengths,        # with space: adds the physical-match rows
     space="reflectance",                   # 0-1 reflectance, or "absorbance"
-    joins="auto",                          # or header joins, e.g. read_asd_dir(...)[1]["detector_joins"]
+    joins="auto",                          # or file joins, e.g. read_asd_dir(...)[1]["detector_joins"]
     model_wavelengths=wavelengths_the_model_reads,
+    exclude=None, fit_regions=None,        # nm ranges for the physical-match fit, see below
 )
 ev.leaderboard[["label", "RMSD_vs_primary_grouped", "Slope_vs_primary_grouped",
                 "RMSD_vs_primary", "Slope_vs_primary"]]
@@ -665,6 +666,25 @@ ev.diagnostics["joins"], ev.diagnostics["satellite_noisy_regions"]
   per-spectrum fit lets satellite noise bias the gain low. Blocks with no band structure
   are left unscaled; if the satellite is the coarser instrument it is not sharpened
   (only the gain is corrected, and `notes` says so).
+- **Fit regions** (`exclude=`, `fit_regions=` on `estimate_physical_match`, `evaluate_transfer`
+  and, as candidate settings, `TransferCandidate.make("physical", exclude=..., fit_regions=...)`;
+  build the tuples with `transfer_evaluation.regions_tuple`). The gain and blur are fitted
+  only on channels inside `fit_regions` (an include list; default all usable channels) and
+  outside `exclude`, then applied to every channel. The point: water band depth follows
+  how wet the sample was when scanned, which differs between sessions, so a gain fitted
+  across the 1450 and 1940 nm bands partly corrects the water instead of the instrument
+  (a pair of instruments with the same structural bands but different water bands: whole-block
+  gain 0.795-0.82 against 0.83-0.86 from the other bands). `physical_match.WATER_BANDS_NM`
+  is `((1380, 1500), (1880, 1990))`. With neither argument given, the default board adds
+  "Physical match (learned blur, gain per block, water bands excluded)" when the grid
+  spans at least one of those bands completely; the grouped score decides, nothing is
+  switched on silently. Giving `exclude`/`fit_regions` to `evaluate_transfer` applies them
+  to all three default physical rows instead (candidates you pass in keep their own
+  settings). Each channel's 31 nm derivative window must stay clear of left-out data, so
+  excluded regions are widened, and fit regions narrowed, by half a window (about 16 nm).
+  The regions are stored in the fitted model: `params['fit_regions']` /
+  `params['exclude_regions']` ((R, 2) nm arrays, zero rows when unset; they survive
+  `save_transfer_model`) and `meta['fit_regions']` / `meta['exclude_regions']`.
 - **Slope columns.** `Slope_vs_primary` (and `_grouped`) is the slope of satellite
   predictions on primary predictions: below ~0.8 the method squashes the range even when
   RMSD looks fine.
@@ -673,8 +693,17 @@ ev.diagnostics["joins"], ev.diagnostics["satellite_noisy_regions"]
   detector) are left out of physical-match fits; warnings name model wavelengths where
   the satellite is far noisier. No transfer removes noise.
 - **Joins**: `'auto'` detects detector joins from each fit's own standards (a level step
-  at one channel boundary); `read_asd_dir` reports ASD header joins as
-  `metadata['detector_joins']`; `resolve_joins` orders user > header > detected.
+  at one channel boundary) on both instruments and takes the union; `read_asd_dir` reports
+  `metadata['detector_joins']` with `metadata['detector_joins_source']`: `'header'` when
+  the ASD header lists joins inside the ASD join windows (950-1050 and 1700-1900 nm), else
+  `'dn'` for raw (as7/as8) files, where the largest clear step of the stored white
+  reference's raw digital numbers in each window marks the join (some instruments store
+  0/0 in the header and the sample/reference ratio cancels the step in reflectance, but
+  the raw numbers show it). Files must agree (within 2 nm for `'dn'`) or none is
+  recorded. `resolve_joins` orders user > header > `dn_joins` > detected from reflectance.
+  When the two instruments have different joins use `union_joins(primary, satellite)`:
+  a blur or gain must not cross a join of either, so blocks follow the union (the GUI's
+  "ASD file header" option does this).
 - **Saved files**: `method='physical_match'`, `meta['format_version'] = 1`; builds from
   before 2026-10-16 raise "Unknown transfer method".
 
@@ -699,8 +728,9 @@ listed is an internal implementation detail that may change without notice.
 | `model_io` | `save_model`, `load_model`, `predict_with_model` |
 | `sample_selection` | `split_calibration_holdout`, `kennard_stone`, `spxy` |
 | `calibration_transfer` | `estimate_pds_lowrank`, `apply_pds_centred`, `estimate_ds_dual`, `apply_ds_dual`, `estimate_tsr`, `apply_tsr`, `estimate_prediction_correction`, `apply_prediction_correction`, `estimate_physical_match`, `apply_physical_match`, `apply_transfer_dispatch`, `TransferModel`, `save_transfer_model`, `load_transfer_model` |
-| `spectral_diagnostics` | `estimate_noise`, `noise_profile`, `noisy_regions`, `noise_comparison`, `detect_detector_joins`, `resolve_joins`, `read_asd_header_joins`, `NoiseEstimate`, `JoinDetection` |
-| `transfer_evaluation` | `evaluate_transfer`, `default_transfer_candidates`, `fit_transfer`, `TransferCandidate`, `TransferEvaluation`, `pair_standards_by_id`, `PairedStandards`, `predict_fn_from_model` |
+| `spectral_diagnostics` | `estimate_noise`, `noise_profile`, `noisy_regions`, `noise_comparison`, `detect_detector_joins`, `resolve_joins`, `read_asd_header_joins`, `read_asd_dn_joins`, `detect_joins_from_white_reference`, `union_joins`, `NoiseEstimate`, `JoinDetection` |
+| `physical_match` | `WATER_BANDS_NM`, `water_bands_covered` (the fit itself is `calibration_transfer.estimate_physical_match`) |
+| `transfer_evaluation` | `regions_tuple`, `evaluate_transfer`, `default_transfer_candidates`, `fit_transfer`, `TransferCandidate`, `TransferEvaluation`, `pair_standards_by_id`, `PairedStandards`, `predict_fn_from_model` |
 | `wavelength_matching` | `match_wavelengths`, `resolve_wavelength_list`, `format_wavelength_list`, `WavelengthMatchError` |
 | `search` | `run_search`, `run_one_class_search`, `run_multiclass_simca_search`, `multiclass_varsel_mask`, `build_multiclass_decision_view`, `compute_validation_metrics_for_top_models`, `MulticlassVarselUnsupported` |
 

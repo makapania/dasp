@@ -1,4 +1,30 @@
-# F2 part 2b: physical-match fit regions and joins from raw readings (follow-up, not started)
+# F2 part 2b: physical-match fit regions and joins from raw readings
+
+> **As built (2026-10-26, branch `feat/f2-part2b`).** Both options are in; nothing was tuned to a dataset.
+> - Option 1: `estimate_physical_match(fit_regions=)` next to `exclude=`; `physical_match.WATER_BANDS_NM`
+>   `((1380, 1500), (1880, 1990))` and `water_bands_covered(wl)`; `evaluate_transfer(exclude=, fit_regions=)`;
+>   `TransferCandidate` settings `exclude` / `fit_regions` (tuples; `transfer_evaluation.regions_tuple`); the default
+>   board adds "Physical match (learned blur, gain per block, water bands excluded)" when the grid spans a water
+>   band completely. Regions are stored in `params['fit_regions']` / `params['exclude_regions']` ((R, 2) arrays,
+>   saved in the NPZ) and `meta[...]` (JSON). CT Validate panel: "Fit regions" row (All usable channels /
+>   Exclude water bands / Custom (fit only on) + nm ranges); the diagnostics box names the regions used.
+> - Decision the plan left open: left-out regions are widened (and fit regions narrowed) by half the 31 nm
+>   derivative window plus one channel, for `exclude` as well as `fit_regions`, so no fitted channel's derivative
+>   reads excluded data. This also tightens the existing `exclude=` slightly (it used to mask only the listed
+>   channels). Custom regions are an include list ("fit only on"). The widening reaches the largest in-block
+>   step, never a gap at a join. A block the regions leave out entirely gets no correction (gain 1, no blur,
+>   offset 0), also under `featureless='pooled'`; an empty `exclude` is a no-op.
+> - Option 2: `readers.asd_native.read_asd_white_reference` (as7/as8 raw DN), `spectral_diagnostics.
+>   detect_joins_from_white_reference` / `read_asd_dn_joins` (largest relative white-reference DN jump in the
+>   950-1050 and 1700-1900 nm windows between two live readings, at least 3x the window median and at least 0.01), `resolve_joins(dn_joins=)`
+>   (user > header > dn > detected), `union_joins`. `read_asd_dir` reports `metadata['detector_joins_source']`:
+>   `'header'` (plausible header: each join inside its window), `'dn'`, or `'mixed'`; files must agree (header
+>   exactly, DN within 2 nm) or nothing is recorded. The GUI's "ASD file header" option uses the union of the two
+>   instruments' joins; `'auto'` already unioned. `read_asd_header_joins` no longer needs a NUL after as2-as8 magic
+>   (real headers carry comment text there; only legacy `ASD` needs the NUL to tell it from an ASCII export).
+> - Acceptance numbers are in SESSION_LOG 2026-10-26 (Beasley: oh1545 improves 1.70 to 1.27 but stays above No
+>   correction 1.18; FS3 to Trek oh2045 loses most of its gain with the water bands out; LabSpec default rows
+>   unchanged to the digit).
 
 Comes after F2 part 2 (the CT GUI) merges. Two general options found on SPYDER Bone's second real instrument
 pair. Neither is bone-specific: water state at scan time varies for soils, grain and plant material as well.

@@ -26,7 +26,11 @@ import pandas as pd
 
 from . import calibration_transfer as ct
 from . import spectral_diagnostics as sd
-from .physical_match import PHYSICAL_MATCH_FORMAT_VERSION
+from .physical_match import (
+    PHYSICAL_MATCH_FORMAT_VERSION,
+    WATER_BANDS_NM,
+    water_bands_covered,
+)
 from .scoring import regression_figures_of_merit
 
 logger = logging.getLogger(__name__)
@@ -65,6 +69,39 @@ REFERENCE_LABEL = "Primary instrument (reference)"
 NONE_LABEL = "No correction"
 
 
+def _check_region_setting(value: Any, name: str) -> None:
+    """A candidate's region setting must be a hashable tuple of ``(lo, hi)`` pairs."""
+    ok = isinstance(value, tuple) and len(value) > 0
+    if ok:
+        for r in value:
+            ok = ok and isinstance(r, tuple) and len(r) == 2 and r[0] < r[1]
+    if not ok:
+        raise ValueError(
+            f"physical {name} must be a non-empty tuple of (lo, hi) nm pairs with lo < hi, "
+            f"got {value!r}; build it with regions_tuple()"
+        )
+
+
+def regions_tuple(
+    regions: Sequence[tuple[float, float]] | np.ndarray | None,
+) -> tuple[tuple[float, float], ...] | None:
+    """``(lo, hi)`` nm regions as the hashable tuple a candidate setting needs.
+
+    Returns ``None`` for ``None`` or an empty sequence.
+    """
+    if regions is None:
+        return None
+    arr = np.asarray(regions, dtype=np.float64)
+    if arr.size == 0:
+        return None
+    arr = arr.reshape(-1, 2)
+    return tuple((float(lo), float(hi)) for lo, hi in arr)
+
+
+def _describe_regions(regions: Sequence[tuple[float, float]]) -> str:
+    return ", ".join(f"{lo:g}-{hi:g}" for lo, hi in regions) + " nm"
+
+
 @dataclass(frozen=True)
 class TransferCandidate:
     """One transfer method with fixed settings.
@@ -74,7 +111,9 @@ class TransferCandidate:
             ``'ds'`` (centred dual-form ridge), ``'pred_slope_bias'``, ``'pred_bias'``,
             ``'physical'`` (blur + band-depth gain per detector block; settings
             ``sigma`` = ``'learn'`` or nm, ``gain`` = ``'per_block'`` or ``'single'``,
-            ``shift`` = bool; needs ``wavelengths`` and ``space``), or ``'pds_legacy'``
+            ``shift`` = bool, ``exclude`` / ``fit_regions`` = tuples of ``(lo, hi)`` nm
+            regions left out of / confining the fit; needs ``wavelengths`` and
+            ``space``), or ``'pds_legacy'``
             / ``'ds_legacy'`` (the pre-2026-10 estimators, for comparing with existing
             settings).
         params: Sorted ``(name, value)`` pairs; build with ``TransferCandidate.make``.
@@ -101,6 +140,9 @@ class TransferCandidate:
                 raise ValueError(
                     f"physical gain must be 'per_block' or 'single', got {s['gain']!r}"
                 )
+            for key in ("exclude", "fit_regions"):
+                if key in s:
+                    _check_region_setting(s[key], key)
 
     @classmethod
     def make(cls, method: str, **params: Any) -> TransferCandidate:
@@ -147,6 +189,14 @@ class TransferCandidate:
                 blur = f"blur {float(sig):g} nm"
             gain = "one gain" if s.get("gain", "per_block") == "single" else "gain per block"
             extra = ", shift" if s.get("shift", False) else ""
+            excl = s.get("exclude")
+            if excl:
+                if tuple(excl) == tuple(WATER_BANDS_NM):
+                    extra += ", water bands excluded"
+                else:
+                    extra += f", excluding {_describe_regions(excl)}"
+            if s.get("fit_regions"):
+                extra += f", fitted on {_describe_regions(s['fit_regions'])}"
             return f"Physical match ({blur}, {gain}{extra})"
         return "Prediction bias"
 
@@ -216,6 +266,7 @@ def default_transfer_candidates(
     has_predict: bool,
     n_wavelengths: int | None = None,
     physical: bool = False,
+    water_excluded: bool = False,
 ) -> list[TransferCandidate]:
     """The default bake-off for ``n_standards`` paired standards.
 
@@ -229,6 +280,9 @@ def default_transfer_candidates(
         n_wavelengths: Drop PDS windows wider than the spectrum.
         physical: Add the physical-match candidates (they need wavelengths and a
             spectral space; ``evaluate_transfer`` sets this when it has both).
+        water_excluded: With ``physical``, also add the physical match fitted with
+            ``WATER_BANDS_NM`` left out (``evaluate_transfer`` sets this when the grid
+            covers those bands).
 
     Returns:
         Candidates, "No correction" first.
@@ -250,6 +304,12 @@ def default_transfer_candidates(
             out.append(TransferCandidate.make("physical", sigma="learn", gain="per_block"))
             out.append(TransferCandidate.make("physical", sigma="learn", gain="single"))
             out.append(TransferCandidate.make("physical", sigma=0.0, gain="per_block"))
+            if water_excluded:
+                out.append(
+                    TransferCandidate.make(
+                        "physical", sigma="learn", gain="per_block", exclude=tuple(WATER_BANDS_NM)
+                    )
+                )
     if has_y and has_predict:
         out.append(TransferCandidate.make("pred_bias"))
         if n_fit >= 3:
@@ -285,13 +345,10 @@ def _fold_joins(
     if isinstance(joins, str):
         if joins != "auto":
             raise ValueError(f"joins must be 'auto', None or wavelengths, got {joins!r}")
-        found: list[float] = []
-        for X in (Xs, Xp):
-            det = sd.detect_detector_joins(X, wl, space=space)
-            for j in det.joins:
-                if all(abs(j - f) > 5.0 for f in found):
-                    found.append(j)
-        return tuple(sorted(found)), ("detected" if found else "none")
+        found = sd.union_joins(
+            *(sd.detect_detector_joins(X, wl, space=space).joins for X in (Xs, Xp))
+        )
+        return found, ("detected" if found else "none")
     return tuple(sorted(float(j) for j in joins)), "given"
 
 
@@ -396,9 +453,15 @@ def fit_transfer(
             sigma=sig if sig == "learn" else float(sig),
             gain=s.get("gain", "per_block"),
             shift=bool(s.get("shift", False)),
+            exclude=s.get("exclude"),
+            fit_regions=s.get("fit_regions"),
         )
         meta.update(
-            joins=list(fold_joins), joins_source=joins_source, notes=params.get("notes", "")
+            joins=list(fold_joins),
+            joins_source=joins_source,
+            notes=params.get("notes", ""),
+            fit_regions=[list(r) for r in params["fit_regions"].tolist()],
+            exclude_regions=[list(r) for r in params["exclude_regions"].tolist()],
         )
     else:  # ds_legacy
         method = "ds"
@@ -466,6 +529,8 @@ def evaluate_transfer(
     space: str | None = None,
     joins: JoinsArg = "auto",
     model_wavelengths: Sequence[float] | None = None,
+    exclude: Sequence[tuple[float, float]] | None = None,
+    fit_regions: Sequence[tuple[float, float]] | None = None,
 ) -> TransferEvaluation:
     """Compare transfer methods by leave-one-standard-out, and by group when given.
 
@@ -511,6 +576,13 @@ def evaluate_transfer(
             standards), ``None`` (one block), or wavelengths from a header or the user.
         model_wavelengths: Wavelengths the model reads; a warning names any that fall
             where the satellite is much noisier than the primary.
+        exclude: ``(lo, hi)`` nm regions left out of every default physical-match fit
+            (for example ``physical_match.WATER_BANDS_NM``). Not applied to candidates
+            you pass in; set ``exclude`` / ``fit_regions`` on those yourself.
+        fit_regions: ``(lo, hi)`` nm regions every default physical-match fit is
+            confined to. With neither ``exclude`` nor ``fit_regions`` the default board
+            also gets a physical match with the water bands left out when the grid
+            covers them, so the board shows whether leaving them out helps.
 
     Returns:
         A ``TransferEvaluation``.
@@ -558,14 +630,33 @@ def evaluate_transfer(
     warnings_out: list[str] = []
     g = _check_groups(groups, n, warnings_out)
 
+    excl_t = regions_tuple(exclude)
+    fit_t = regions_tuple(fit_regions)
+    if (excl_t or fit_t) and (wl is None or space is None):
+        raise ValueError(
+            "exclude and fit_regions apply to the physical match, which needs "
+            "wavelengths and space"
+        )
     if candidates is None:
+        have_phys = wl is not None and space is not None
         candidates = default_transfer_candidates(
             n,
             has_y=y_arr is not None,
             has_predict=predict is not None,
             n_wavelengths=p,
-            physical=wl is not None and space is not None,
+            physical=have_phys,
+            water_excluded=have_phys and not (excl_t or fit_t) and water_bands_covered(wl),
         )
+        if excl_t or fit_t:
+            extra = {k: v for k, v in (("exclude", excl_t), ("fit_regions", fit_t)) if v}
+            candidates = [
+                (
+                    TransferCandidate.make(c.method, **{**c.settings, **extra})
+                    if c.method == "physical"
+                    else c
+                )
+                for c in candidates
+            ]
     cand_list = list(dict.fromkeys(candidates))
     if not any(c.method == "none" for c in cand_list):
         cand_list.insert(0, TransferCandidate.make("none"))
