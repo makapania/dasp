@@ -111,7 +111,15 @@ selection, SP1/SP2 PLS kernel and SPA. Structural enablers ST1a/ST2/ST4 whenever
 ### 4. Queued work
 1. **T-51 next:** PR E, then F (one-class clamp; F needs its own approval). PR D is merged.
 2. **Smaller follow-ups:**
-   - **Already failing on `main`:**
+   - **Already failing on `main` — FIX NEXT (user, 2026-10-26):**
+     `tests/gui/test_tab7_booster_round_selection.py::test_tab7_log_transform_booster_saves_the_cv_model_in_original_units`
+     hangs until pytest-timeout kills the run, with "Windows fatal exception: access violation" in xgboost inside
+     joblib workers (stack ends in `joblib/parallel.py` `_retrieve`). Seen on main twice on 2026-10-26 (once by its file
+     alone) and on the F2 part 2b branch; both times the machine was busy, so first try it alone on an idle machine.
+     Probably new since 2026-10-17, when the full suite passed. Check xgboost `n_jobs` against the joblib/loky
+     workers (thread oversubscription) and whether the log-y-transform refit path differs from the passing
+     early-stopping tests. While it hangs, run suites with `--ignore=tests/gui/test_tab7_booster_round_selection.py`,
+     and after any timeout stop the orphaned loky workers (parent gone, 100% CPU). SESSION_LOG 2026-10-26.
      `tests/gui/test_multiclass_gui.py::test_run_analysis_accepts_multiclass_engine_selection`
      (the worker never starts). Its `_FakeThread` accepts no `kwargs`; it probably predates #79's
      launch changes, but this is unverified. Found by the full GUI suite on 2026-09-27.
