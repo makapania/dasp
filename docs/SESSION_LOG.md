@@ -1340,3 +1340,7 @@ is `planning/08_transfer.md` there.
   on Windows kills the whole process, and the **loky workers of the killed run stay alive, orphaned, at 100% CPU**: on
   2026-10-26 six of them burned ~14 h of CPU each and slowed every later run. After any timeout, stop python.exe loky
   workers whose parent is gone. F2 part 2b's suite ran with that file ignored. Open: diagnose the hang on main.
+- **`sed -i` rewrites `spectral_predict_gui_optimized.py` with LF endings.** The file is stored with CRLF (66k
+  lines); a line-range `sed -i ...d` turned the diff into a whole-file rewrite. Check `git diff --stat` after any
+  shell edit of the GUI file and restore CRLF (`b.replace(b'\n', b'\r\n')` in Python) or use the Edit tool.
+  (Found while deleting the unwired File Equalize / `_load_and_predict_ct` code, 2026-10-26.)

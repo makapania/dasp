@@ -13,9 +13,8 @@ its gain with water out): SESSION_LOG 2026-10-26.
 Built by a Sonnet agent, checked by the main session; GLM MERGE (3 lows) and Codex MERGE AFTER FIXES (3 mediums), all
 fixed with tests. **Open, unrelated to F2:** `tests/gui/test_tab7_booster_round_selection.py::test_tab7_log_transform_
 booster_saves_the_cv_model_in_original_units` hangs on main (xgboost access violation in joblib workers); a killed run
-leaves orphaned loky workers at 100% CPU, so clear them after any timeout (SESSION_LOG 2026-10-26). Still waiting on the
-user: delete the unwired File Equalize UI /
-`_load_and_predict_ct` duplicates.
+leaves orphaned loky workers at 100% CPU, so clear them after any timeout (SESSION_LOG 2026-10-26). The unwired File Equalize
+helpers and `_load_and_predict_ct` (duplicates of Modes B and A) were deleted with their tests (user, 2026-10-26).
 
 ### 0-old. (2026-10-17): Wave 3 — F2 part 1 (PR #97), 1b (PR #98) and part 2 (PR #99, `b7f6534`) MERGED
 Wave 1 + 2 (PRs #83-#96) are merged; their summary is in the archive (Batch 2). Wave 3 order (§0a): F2 part 1 ✔ →
@@ -53,7 +52,7 @@ with a one-line warning). Every input change goes through one invalidation entry
 Five review rounds (GLM, then Codex confirms) to a Codex MERGE verdict; full suite 5173 passed / 26 skipped.
 **Follow-ups:** the File Equalize UI (Section F) and `_load_and_predict_ct` have helpers and tests but no widgets in
 the tab (nothing creates `ct_eq_*`, `ct_new_satellite_dir_var`, `ct_prediction_text`). They duplicate Mode A (predict) and Mode B (transform & export):
-recommended to delete them and their tests rather than wire them (offered to the user 2026-10-17, not yet decided).
+**deleted 2026-10-26** with their tests (user's call); Modes A and B keep their own primary-scale and legacy-file tests.
 **Part 2b (after part 2):** `docs/plans/2026-10-17-F2-part2b-transfer-fit-regions-dn-joins.md`: a fit-regions option
 for the physical-match gain ("exclude water bands"), and detector joins from raw DN (Trek). Both found on SPYDER's
 Beasley FieldSpec 3/Trek pairs; no bone-specific mode. **User rule 2026-10-25 (CLAUDE.md): general features only,
