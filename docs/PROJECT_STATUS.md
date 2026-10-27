@@ -14,7 +14,7 @@ Built by a Sonnet agent, checked by the main session; GLM MERGE (3 lows) and Cod
 fixed with tests. **Open, unrelated to F2:** `tests/gui/test_tab7_booster_round_selection.py::test_tab7_log_transform_
 booster_saves_the_cv_model_in_original_units` hangs on main (xgboost access violation in joblib workers); a killed run
 leaves orphaned loky workers at 100% CPU, so clear them after any timeout (SESSION_LOG 2026-10-26). Still waiting on the
-user: delete the 13 stale `.claude/worktrees/agent-*` checkouts, and delete the unwired File Equalize UI /
+user: delete the unwired File Equalize UI /
 `_load_and_predict_ct` duplicates.
 
 ### 0-old. (2026-10-17): Wave 3 — F2 part 1 (PR #97), 1b (PR #98) and part 2 (PR #99, `b7f6534`) MERGED
@@ -71,7 +71,7 @@ Merge rule: well-reviewed PR → merge origin/main into branch, test, `gh pr cre
 regression sample weighters not applied to the final refit; QW4 distances on preprocessed/PCA spectra; #86 LOWs.
 **Open questions for the user:** Import rounds wavelengths to integers and refuses sub-unit spacing (FTIR?); comma
 ASCII files default to dot-decimal with a warning (my call); advisory EPO count (my call); delete stray GLM temp files
-in %TEMP% (diff.txt, gui_f359708.py, opencode\repo_*); many stale `.claude/worktrees/agent-*` checkouts (delete?).
+in %TEMP% (diff.txt, gui_f359708.py, opencode\repo_*). The 13 stale `.claude/worktrees/agent-*` checkouts were deleted 2026-10-26 (user).
 **Crash-resume design (PR #79, details in archive):** `_confirm_resume_before_launch` is the single main-thread launch
 gate and freezes every worker input; a new Bayesian input must join `BAYESIAN_REQUIRED_SETTINGS` and
 `CAPTURABLE_SETTINGS`.
